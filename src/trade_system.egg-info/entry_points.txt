@@ -1,0 +1,9 @@
+[console_scripts]
+trade-agent = trade_system.application.agent.orchestrator:run_main
+trade-api = trade_system.interfaces.api.routes:run_main
+trade-dashboard = trade_system.interfaces.dashboard.agent_dashboard:run_main
+trade-evolve = trade_system.application.evolution.evolution_loop:run_main
+trade-live = trade_system.interfaces.live.agent_engine:run_main
+trade-mcp = trade_system.interfaces.api.mcp_server:run_main
+trade-postmarket = trade_system.application.agent.postmarket_improver_agent:run_main
+trade-system = trade_system.__main__:main

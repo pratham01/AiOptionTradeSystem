@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trade_system"
+version = "2.0.0"
+authors = [
+  { name="Pratham", email="support@example.com" },
+]
+description = "Agentic autonomous options trading system for Fyers — option buyer focused."
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pandas",
+    "numpy",
+    "requests",
+    "python-dotenv",
+    "fyers-apiv3",
+    "plotly",
+    "streamlit",
+    "sqlalchemy>=2.0",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "flask>=2.3",
+]
+agent = [
+    "openai>=1.0",
+    "anthropic>=0.8",
+    "httpx>=0.24",
+]
+evolution = [
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "mypy>=1.5",
+    "ruff>=0.1",
+]
+all = [
+    "trade_system[api,agent,evolution,dev]",
+]
+
+[project.scripts]
+trade-system = "trade_system.__main__:main"
+trade-live = "trade_system.interfaces.live.agent_engine:run_main"
+trade-postmarket = "trade_system.application.agent.postmarket_improver_agent:run_main"
+trade-mcp = "trade_system.interfaces.api.mcp_server:run_main"
+trade-api = "trade_system.interfaces.api.routes:run_main"
+trade-agent = "trade_system.application.agent.orchestrator:run_main"
+trade-evolve = "trade_system.application.evolution.evolution_loop:run_main"
+trade-dashboard = "trade_system.interfaces.dashboard.agent_dashboard:run_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["trade_system*"]
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = ["venv", ".venv", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  trade-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.secrets:/app/.secrets
+
+  trade-live:
+    build: .
+    command: ["trade-live"]
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.secrets:/app/.secrets

@@ -1,0 +1,13 @@
+{
+  "enabled_zone_types": [],
+  "disabled_zone_types": [
+    "prev_day_vah",
+    "prev_day_close",
+    "prev_day_open",
+    "bull_fvg",
+    "range_support_20",
+    "bear_fvg"
+  ],
+  "min_volume_ratio": 1.25,
+  "min_body_ratio": 0.45
+}

@@ -1,0 +1,190 @@
+# Trade System
+
+This repository is structured as a production-oriented Python project for FYERS-based trading workflows:
+
+- Authentication through browser auth code flow or TOTP flow
+- Historical candle collection with chunking and local storage
+- Live tick collection with pre-authentication and bar aggregation
+- Strategy registry for adding new strategies without changing the engine
+- Backtesting engine for offline validation before live deployment
+
+For deployment, the primary runtime entrypoints are:
+- `python authenticate_fyers_totp.py`
+- `python run_live_trading.py`
+
+## Layout
+
+```text
+.
+├── trade_system/
+│   ├── backtesting/
+│   ├── brokers/
+│   ├── data/
+│   ├── live/
+│   ├── strategies/
+│   ├── cli.py
+│   └── config.py
+├── tests/
+├── authenticate_fyers.py
+├── authenticate_fyers_totp.py
+├── fetch_historical_data.py
+└── run_live_trading.py
+```
+
+## Quick start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .[dev]
+cp .env.example .env
+```
+
+Authenticate:
+
+```bash
+python authenticate_fyers.py
+python authenticate_fyers_totp.py
+```
+
+Fetch historical data:
+
+```bash
+trade-system fetch-history --symbol NSE:NIFTY50-INDEX --resolution 1 --from-date 2025-01-01
+```
+
+Run live collector:
+
+```bash
+python run_live_trading.py
+```
+
+Run strategy dashboard:
+
+```bash
+streamlit run strategy_dashboard.py
+```
+
+The live bot:
+- preloads the last 3 trading sessions of 3-minute candles before market open
+- appends live websocket-driven candles into that same 3-minute history
+- calculates Supertrend on the combined 3-minute dataset
+- sends Telegram notifications for Supertrend direction changes, Supertrend touches, previous-day level touches, major gaps, and option-chain strike summaries
+- starts pre-market processing at `09:09` and stops at `15:30` on trading days only
+
+The strategy dashboard:
+- loads existing research CSV outputs under `reports/`
+- compares strategies across families such as Supertrend, SMC, ICT/FVG/liquidity, option-buyer, and price-action concepts
+- provides yearly comparison grids, leaderboards, and trade-log drilldowns
+
+Backtest:
+
+```bash
+trade-system backtest --strategy sma_cross --csv data/historical/NSE_NIFTY50-INDEX/1/history.csv
+```
+
+Research-only upside big-move detector:
+
+```bash
+python run_upside_big_move_backtest.py
+```
+
+This produces scored research files under `reports/upside_big_move/`. It is not connected to the live flow.
+
+Research-only standalone SMC signal backtest:
+
+```bash
+python run_smc_signal_backtest.py
+```
+
+This writes yearly trade logs and a summary under `reports/smc_signal/`.
+
+Rulebook-backed option trade suggestion:
+
+```bash
+trade-system suggest-trade --input examples/trade_advice_input.json
+trade-system suggest-trade --input examples/trade_advice_input.json --with-llm
+```
+
+The suggestion flow is two-stage:
+- the deterministic rulebook evaluator checks thesis quality, structure, liquidity, strike selection, expiry fit, risk-reward, position risk, IV, and event risk
+- the optional LLM layer explains the setup and proposes safer revisions, but it does not override failed rule checks
+
+The formal rulebook is documented in [`docs/option_buyer_rulebook.md`](docs/option_buyer_rulebook.md).
+
+## Daily Automation
+
+To run the system hands-free on a daily basis, you can set up cron jobs. The system includes built-in TOTP auto-refresh, so it will handle authentication and market-hours logic automatically.
+
+### Scheduling with Cron
+
+Open your crontab editor:
+```bash
+crontab -e
+```
+
+Add the following lines (adjust the paths to match your local installation):
+
+```bash
+# 1. Start Live Monitoring at 9:00 AM (Mon-Fri)
+# Loads the last 3 trading sessions of 3-minute candles, then monitors live 3-minute Supertrend and level alerts.
+0 9 * * 1-5 cd /Users/pratham/aitrade/trade_system && /usr/bin/python3 run_live_trading.py >> logs/live.log 2>&1
+
+# 2. Run EOD Market Scan at 4:00 PM (Mon-Fri)
+# Scans all 210+ F&O stocks for High-Volume (RVOL) Supertrend breakouts for the next day.
+0 16 * * 1-5 cd /Users/pratham/aitrade/trade_system && /usr/bin/python3 run_eod_analysis.py >> logs/eod.log 2>&1
+```
+
+## Extending strategies
+
+New strategies should live under `trade_system/strategies/` and implement `Strategy`. Register them in `strategy_registry.py`. The live runner and backtester both use the same strategy contract, so new strategies remain portable across research and execution.
+
+## Deployment Notes
+
+- Keep `.env` only on the server. It is now ignored by git.
+- Keep `.env.example` in git as the template for new servers.
+- Use `run_live_trading.py` as the production live-bot entrypoint.
+- `automation_wrapper.py` is legacy and should not be the server startup command anymore.
+
+### Recommended deployment
+
+For a remote Linux server, prefer `systemd` over cron for the live bot.
+
+Why:
+- automatic restart on failure
+- clearer logs and process supervision
+- no dependency on shell session state
+
+Files provided:
+- [`deploy/trade-system-live.service`](deploy/trade-system-live.service)
+- [`deploy/trade-system-live.timer`](deploy/trade-system-live.timer)
+- [`deploy/example.crontab`](deploy/example.crontab)
+
+Typical setup:
+
+```bash
+sudo mkdir -p /opt/trade_system
+sudo rsync -av --exclude '.env' ./ /opt/trade_system/
+sudo cp /opt/trade_system/deploy/trade-system-live.service /etc/systemd/system/
+sudo cp /opt/trade_system/deploy/trade-system-live.timer /etc/systemd/system/
+sudo nano /etc/systemd/system/trade-system-live.service
+sudo systemctl daemon-reload
+sudo systemctl enable trade-system-live.timer
+sudo systemctl start trade-system-live.timer
+```
+
+Before enabling:
+- replace `User=REPLACE_ME` in the service file
+- confirm the correct project path in `WorkingDirectory`
+- confirm the correct Python path in `ExecStart`
+- ensure `/opt/trade_system/.env` exists on the server
+
+Useful commands:
+
+```bash
+sudo systemctl status trade-system-live.timer
+sudo systemctl status trade-system-live.service
+sudo journalctl -u trade-system-live.service -f
+```
+
+If you prefer cron, use `deploy/example.crontab`, but `systemd` is the better production choice here.
