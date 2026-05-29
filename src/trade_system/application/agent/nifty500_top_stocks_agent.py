@@ -5,6 +5,7 @@ from datetime import datetime
 from trade_system.infrastructure.brokers.fyers.client import FyersBroker
 from trade_system.application.agent.top_gainers_agent import BrokerTopGainersAgent, create_fyers_broker, format_top_gainers_table
 from trade_system.application.advisory.llm import LlmAdvisorClient
+from trade_system.infrastructure.data.fo_universe import get_fo_universe
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,18 +38,25 @@ class Nifty500TopStocksAgent:
         LOGGER.info("Fetching top 10 stocks from Nifty 500 universe...")
         top_10_gainers = agent.top_gainers(top_n=10)
 
+        # Fetch top 5 and worst 5 FO stocks
+        fo_agent = BrokerTopGainersAgent(broker=active_broker, symbols=get_fo_universe())
+        LOGGER.info("Fetching top 5 and worst 5 stocks from FO universe...")
+        fo_top_5, fo_worst_5 = fo_agent.top_and_worst(n=5)
+
         if not top_10_gainers:
             return "No data retrieved from broker for the Nifty 500 universe."
 
-        # Format as table
-        table_str = format_top_gainers_table(top_10_gainers)
+        # Format as tables
+        table_str = format_top_gainers_table(top_10_gainers, title_prefix="Top (Nifty 500)")
+        table_str += "\n\n" + format_top_gainers_table(fo_top_5, title_prefix="Top F&O")
+        table_str += "\n\n" + format_top_gainers_table(fo_worst_5, title_prefix="Worst F&O")
 
         # Let the AI Brain (LLM) synthesize a quick narrative if configured
         if self.llm.configured():
             prompt = (
-                "You are an AI Trading Assistant. Here are the top 10 gainers in the Nifty 500 today:\n\n"
+                "You are an AI Trading Assistant. Here are the top 10 gainers in the Nifty 500, and the top and worst 5 F&O stocks today:\n\n"
                 f"{table_str}\n\n"
-                "Provide a very brief 2-sentence market narrative based on these top gainers (e.g., Which sectors seem to be leading? Are these defensive or high-beta?). "
+                "Provide a very brief 2-sentence market narrative based on these stocks (e.g., Which sectors seem to be leading or lagging? Are these defensive or high-beta?). "
                 "Output just the table and your 2-sentence summary."
             )
             try:

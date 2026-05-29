@@ -17,7 +17,7 @@ from trade_system.application.agent.skill_creator_agent import SkillCreatorAgent
 from trade_system.application.agent.missed_opportunity_agent import MissedOpportunityAgent
 from trade_system.application.agent.correlation_agent import CorrelationAgent
 from trade_system.application.advisory.llm import LlmAdvisorClient
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.infrastructure.data.fo_universe import get_fo_universe, update_fo_universe_from_nse
 from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE
 from trade_system.application.analysis.sectoral_analyzer import SectoralAnalyzer
 from trade_system.application.analysis.sector_rotation import SectorRotationAnalyzer
@@ -34,6 +34,8 @@ from trade_system.application.analysis.top_gainers import NSETop100GainersFetche
 from trade_system.infrastructure.database import log_agent_thought, get_db_session
 from trade_system.infrastructure.database.connection import get_engine
 from sqlalchemy.orm import Session
+
+from trade_system.application.analysis.weekly_gainers import NSEWeeklyGainersFetcher
 
 LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +94,9 @@ class PostMarketImproverAgent:
         """
         self._thought("PostMarketOrchestrator", "Initializing post-market Swarm ritual...", action="START")
         
-        # 0. Update MWPL Data
+        # 0. Sync Daily Data
+        self._thought("DataService", "Updating official NSE F&O universe list...", action="DATASYNC")
+        update_fo_universe_from_nse()
         self._thought("DataService", "Fetching latest MWPL data from NSE...", action="DATASYNC")
         self.mwpl_analyzer.update_data()
         
@@ -103,6 +107,13 @@ class PostMarketImproverAgent:
         # 2. Top 10 Gainers (Nifty 500)
         self._thought("MarketAnalyst", "Scanning Nifty 500 universe for top performers...", action="SCANNING")
         gainer_result = await self._analyze_top_gainers_broad()
+        
+        # 2.5 Weekly Gainers (Fridays only)
+        if datetime.now().weekday() == 4:
+            self._thought("MarketAnalyst", "Friday detected. Calculating weekly top gainers for Nifty 500...", action="SCANNING")
+            weekly_fetcher = NSEWeeklyGainersFetcher(broker=self.broker)
+            weekly_gainers = weekly_fetcher.fetch_weekly_gainers()
+            weekly_fetcher.send_telegram_report(weekly_gainers, top_n=10)
         
         # 2. Sectoral Analysis & Rotation
         self._thought("SectorAnalyst", "Calculating quantitative Sector Rotation (RS Slope)...", action="EVALUATING")
@@ -214,13 +225,17 @@ class PostMarketImproverAgent:
 
         try:
             fetcher = NSETop100GainersFetcher(broker=self.broker)
-            all_quotes = fetcher.fetch_all_quotes(symbols=NSE_UNIVERSE, batch_size=50)
+            
+            # Combine Nifty 500 and FO universe to ensure all FO stocks are fetched
+            combined_universe = list(set(NSE_UNIVERSE) | set(get_fo_universe()))
+            all_quotes = fetcher.fetch_all_quotes(symbols=combined_universe, batch_size=50)
+            
             filtered = fetcher.apply_filters(all_quotes)
             result = fetcher.get_top_gainers(filtered, top_n=100)
             fetcher.save_results(result)
             
-            # Send Top 10 to dedicated TOP_GAINER channel
-            fetcher.send_telegram_report(result, self.gainer_notifier, max_rows=10)
+            # Send Top 10 to dedicated TOP_GAINER channel, using all_quotes so negative F&O stocks are included
+            fetcher.send_telegram_report(result, self.gainer_notifier, max_rows=10, all_quotes=all_quotes)
             
             # Create Lock
             lock_file.parent.mkdir(parents=True, exist_ok=True)

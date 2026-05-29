@@ -31,15 +31,17 @@ class BrokerTopGainersAgent:
     def __init__(
         self,
         broker: FyersBroker,
+        symbols: list[str] | None = None,
         workers: int = 4,
         batch_size: int = 200,
     ) -> None:
         self.broker = broker
+        self.symbols = symbols or NSE_UNIVERSE
         self.workers = max(1, workers)
         self.batch_size = max(1, batch_size)
 
     def _symbol_batches(self) -> list[list[str]]:
-        return [NSE_UNIVERSE[i:i + self.batch_size] for i in range(0, len(NSE_UNIVERSE), self.batch_size)]
+        return [self.symbols[i:i + self.batch_size] for i in range(0, len(self.symbols), self.batch_size)]
 
     def _fetch_batch(self, symbols: list[str]) -> list[GainerRow]:
         rows: list[GainerRow] = []
@@ -78,6 +80,30 @@ class BrokerTopGainersAgent:
         ranked = sorted(deduped.values(), key=lambda x: x.change_pct, reverse=True)
         return ranked[:top_n]
 
+    def top_and_worst(self, n: int = 5) -> tuple[list[GainerRow], list[GainerRow]]:
+        batches = self._symbol_batches()
+        all_rows: list[GainerRow] = []
+
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            futures = [pool.submit(self._fetch_batch, batch) for batch in batches]
+            for future in as_completed(futures):
+                try:
+                    all_rows.extend(future.result())
+                except Exception as exc:
+                    LOGGER.warning("Batch fetch failed: %s", exc)
+
+        deduped: dict[str, GainerRow] = {}
+        for row in all_rows:
+            existing = deduped.get(row.symbol)
+            if existing is None or row.change_pct > existing.change_pct:
+                deduped[row.symbol] = row
+
+        ranked = sorted(deduped.values(), key=lambda x: x.change_pct, reverse=True)
+        if not ranked:
+            return [], []
+        
+        return ranked[:n], ranked[-n:][::-1]
+
 
 def create_fyers_broker() -> FyersBroker:
     settings = Settings.load()
@@ -100,9 +126,9 @@ def create_fyers_broker() -> FyersBroker:
     return broker
 
 
-def format_top_gainers_table(rows: list[GainerRow]) -> str:
+def format_top_gainers_table(rows: list[GainerRow], title_prefix: str = "Top") -> str:
     lines = []
-    lines.append(f"Top {len(rows)} gainers @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"{title_prefix} {len(rows)} stocks @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("#  SYMBOL               PRICE      CHANGE%      VOLUME")
     for i, row in enumerate(rows, start=1):
         clean = row.symbol.replace("NSE:", "").replace("-EQ", "")

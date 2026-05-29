@@ -90,8 +90,16 @@ class FyersBrokerV2(DataBroker):
                 LOGGER.info("Fyers authentication successful")
                 return True
 
-            if profile.get("code") in [-8, -17] and retry_with_totp and self.authenticator:
-                LOGGER.warning(f"Fyers authentication failed (code: {profile.get('code')}). Attempting automated refresh via TOTP...")
+            code = profile.get("code")
+            _RATE_LIMIT_CODES = {-353, -209}
+            err_msg = str(profile.get("errmsg") or profile.get("message") or "")
+            if code in _RATE_LIMIT_CODES or "limit" in err_msg.lower() or "429" in err_msg:
+                self._authenticated = True
+                LOGGER.warning(f"Fyers /profile rate-limited (code {code}). Token accepted as valid.")
+                return True
+
+            if code in [-8, -17] and retry_with_totp and self.authenticator:
+                LOGGER.warning(f"Fyers authentication failed (code: {code}). Attempting automated refresh via TOTP...")
                 try:
                     new_token = self.authenticator.generate_access_token()
                     self.access_token = new_token
@@ -103,8 +111,8 @@ class FyersBrokerV2(DataBroker):
                     return False
 
             LOGGER.error(
-                f"Fyers authentication failed: {profile.get('errmsg') or profile.get('message')} "
-                f"(code: {profile.get('code')})"
+                f"Fyers authentication failed: {err_msg} "
+                f"(code: {code})"
             )
             return False
 
@@ -116,21 +124,42 @@ class FyersBrokerV2(DataBroker):
         """Verify the current session is active, refresh if needed."""
         if not self.fyers:
             if not self.authenticate():
-                raise AuthenticationError("Unable to authenticate with FYERS.")
+                if self.access_token:
+                    # Force SDK init even if profile check was rate-limited
+                    self.fyers = fyersModel.FyersModel(
+                        client_id=self.client_id,
+                        is_async=False,
+                        token=self._token_for_sdk(),
+                    )
+                    self.client = self.fyers
+                    self._authenticated = True
+                    LOGGER.warning("authenticate() failed but token present. Proceeding with SDK object.")
+                else:
+                    raise AuthenticationError("Unable to authenticate with FYERS.")
             return
 
         profile = self.fyers.get_profile()
-        if profile.get("s") != "ok":
-            if profile.get("code") in [-8, -17] and self.authenticator:
-                LOGGER.warning(f"FYERS session invalid (code: {profile.get('code')}). Refreshing token.")
-                new_token = self.authenticator.generate_access_token()
-                self.access_token = new_token
-                if hasattr(self.authenticator, "update_env_file"):
-                    self.authenticator.update_env_file(new_token)
-                if not self.authenticate(retry_with_totp=False):
-                    raise AuthenticationError(profile.get("errmsg") or "Unable to re-authenticate with FYERS.")
-                return
-            raise DataFetchError(profile.get("errmsg") or profile.get("message") or "FYERS session verification failed.")
+        if profile.get("s") == "ok":
+            return
+            
+        code = profile.get("code")
+        err_msg = str(profile.get("errmsg") or profile.get("message") or "")
+        
+        if code in {-353, -209} or "limit" in err_msg.lower() or "429" in err_msg:
+            LOGGER.warning(f"Fyers /profile rate-limited during verify_session (code {code}). Proceeding.")
+            return
+
+        if code in [-8, -17] and self.authenticator:
+            LOGGER.warning(f"FYERS session invalid (code: {code}). Refreshing token.")
+            new_token = self.authenticator.generate_access_token()
+            self.access_token = new_token
+            if hasattr(self.authenticator, "update_env_file"):
+                self.authenticator.update_env_file(new_token)
+            if not self.authenticate(retry_with_totp=False):
+                raise AuthenticationError(profile.get("errmsg") or "Unable to re-authenticate with FYERS.")
+            return
+            
+        raise DataFetchError(profile.get("errmsg") or err_msg or "FYERS session verification failed.")
 
     def get_quotes(self, symbols: list[str], _retry_count: int = 0) -> dict[str, MarketQuote]:
         """Get real-time quotes with 429 recovery and batching."""
