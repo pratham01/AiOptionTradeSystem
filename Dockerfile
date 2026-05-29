@@ -1,34 +1,35 @@
+# Use official Python lightweight image
 FROM python:3.11-slim
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/src
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV PYTHONPATH=/app/src
 
+# Set work directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
+# Install system dependencies (needed for compiling some python packages and sqlite)
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    sqlite3 \
+    tzdata \
+    cron \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy configuration files and source code
-COPY pyproject.toml README.md ./
-COPY src/ ./src/
+# Set timezone to Asia/Kolkata for Indian markets
+ENV TZ="Asia/Kolkata"
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-# Install the application
-RUN pip install --no-cache-dir -e ".[api,agent]"
+# Install python dependencies
+COPY requirements.txt /app/
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# Ensure directories exist
-RUN mkdir -p /app/data /app/logs /app/.secrets
+# Copy the application code
+COPY . /app/
 
-# Create non-root user
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
+# Expose Streamlit port
+EXPOSE 8502
 
-# Expose API port
-EXPOSE 8000
-
-# Default command (API server)
-CMD ["trade-api"]
+# The default command will be overridden by docker-compose
+CMD ["python", "-m", "trade_system", "live"]

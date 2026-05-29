@@ -1,1 +1,0 @@
-Error connecting to OpenAI brain: Request timed out.

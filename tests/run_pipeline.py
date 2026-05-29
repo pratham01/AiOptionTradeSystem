@@ -7,7 +7,7 @@ from trade_system.config import Settings
 
 logging.basicConfig(level=logging.INFO)
 
-async def test_full_pipeline():
+async def run_full_pipeline():
     print("🚀 Running Integrated Pipeline (ST + RSI + Sector Rotation)...")
     
     settings = Settings.load()
@@ -36,4 +36,4 @@ async def test_full_pipeline():
     print("="*50)
 
 if __name__ == "__main__":
-    asyncio.run(test_full_pipeline())
+    asyncio.run(run_full_pipeline())

@@ -7,7 +7,7 @@ from trade_system.config import Settings
 
 logging.basicConfig(level=logging.INFO)
 
-async def test_fetcher():
+async def run_fetcher():
     settings = Settings.load()
     auth = FyersAuthService(settings)
     token = auth.get_valid_token()
@@ -31,4 +31,4 @@ async def test_fetcher():
         print(f"{i}. {g.name}: {g.change_pct}%")
 
 if __name__ == "__main__":
-    asyncio.run(test_fetcher())
+    asyncio.run(run_fetcher())

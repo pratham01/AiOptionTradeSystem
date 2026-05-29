@@ -92,7 +92,18 @@ class FyersBroker(BaseBroker):
                 logger.info("Fyers authentication successful.")
                 return True
 
-            if profile.get("code") == -8 and retry_with_totp and self.authenticator:
+            code = profile.get("code")
+
+            # Rate-limited on /profile — token is still valid (WebSocket + history work).
+            _RATE_LIMIT_CODES = {-353, -209}
+            err_msg = str(profile.get("errmsg") or profile.get("message") or "")
+            if code in _RATE_LIMIT_CODES or "limit" in err_msg.lower() or "429" in err_msg:
+                logger.warning(
+                    "Fyers /profile rate-limited (code %s). Token accepted as valid; proceeding.", code
+                )
+                return True
+
+            if code == -8 and retry_with_totp and self.authenticator:
                 logger.warning("Fyers token expired. Attempting automated refresh via TOTP...")
                 try:
                     new_token = self.authenticator.generate_access_token()
@@ -103,28 +114,53 @@ class FyersBroker(BaseBroker):
                     logger.error("Failed to automatically refresh Fyers token: %s", exc)
                     return False
 
-            logger.error("Fyers authentication failed: %s (code: %s)", 
-                         profile.get("errmsg") or profile.get("message"), 
-                         profile.get("code"))
+            logger.error(
+                "Fyers authentication failed: %s (code: %s)",
+                profile.get("errmsg") or profile.get("message"),
+                code,
+            )
             return False
         except Exception as exc:
             logger.error("Error during Fyers authentication: %s", exc)
             return False
 
     def verify_session(self) -> None:
-        if not self.fyers and not self.authenticate():
-            raise RuntimeError("Unable to authenticate with FYERS.")
+        # If the SDK object isn't initialized yet, try to authenticate first.
+        if not self.fyers:
+            if not self.authenticate():
+                if self.access_token:
+                    # Force SDK init even if profile check was rate-limited
+                    self.fyers = fyersModel.FyersModel(
+                        client_id=self.client_id,
+                        is_async=False,
+                        token=self._token_for_sdk(),
+                        log_path=str(self.log_path),
+                    )
+                    self.client = self.fyers
+                    logger.warning("authenticate() failed but token present. Proceeding with SDK object.")
+                else:
+                    raise RuntimeError("Unable to authenticate with FYERS.")
+            return
+        # SDK object already exists — re-check profile only to detect token expiry.
         profile = self.fyers.get_profile()
-        if profile.get("s") != "ok":
-            if profile.get("code") == -8 and self.authenticator:
-                logger.warning("FYERS session expired during verification. Refreshing token.")
-                new_token = self.authenticator.generate_access_token()
-                self.access_token = new_token
-                self.authenticator.update_env_file(new_token)
-                if not self.authenticate(retry_with_totp=False):
-                    raise RuntimeError(profile.get("errmsg") or "Unable to re-authenticate with FYERS.")
-                return
-            raise RuntimeError(profile.get("errmsg") or profile.get("message") or "FYERS session verification failed.")
+        if profile.get("s") == "ok":
+            return
+        code = profile.get("code")
+        err_msg = str(profile.get("errmsg") or profile.get("message") or "")
+        # Rate-limited — token still valid.
+        if code in {-353, -209} or "limit" in err_msg.lower() or "429" in err_msg:
+            logger.warning("Fyers /profile rate-limited during verify_session (code %s). Proceeding.", code)
+            return
+        # Token expired — refresh.
+        if code == -8 and self.authenticator:
+            logger.warning("FYERS session expired during verification. Refreshing token.")
+            new_token = self.authenticator.generate_access_token()
+            self.access_token = new_token
+            self.authenticator.update_env_file(new_token)
+            if not self.authenticate(retry_with_totp=False):
+                raise RuntimeError(profile.get("errmsg") or "Unable to re-authenticate with FYERS.")
+            return
+        raise RuntimeError(profile.get("errmsg") or err_msg or "FYERS session verification failed.")
 
     def websocket_access_token(self) -> str:
         """

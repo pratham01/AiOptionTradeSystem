@@ -32,6 +32,42 @@ class LiveAlertAgent:
         self.config = self.settings.indicator_config
         # OI History: symbol -> list of (timestamp, OptionChainAnalysis)
         self.oi_history: dict[str, list[tuple[datetime, Any]]] = {}
+        
+        self.squeeze_targets: dict[str, float] = {}
+        self._load_squeeze_targets()
+
+    def _load_squeeze_targets(self):
+        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.infrastructure.database.repository import get_latest_consolidation_watchlist
+        from sqlalchemy.orm import Session
+        
+        try:
+            engine = get_engine()
+            with Session(engine) as session:
+                stocks = get_latest_consolidation_watchlist(session)
+                for item in stocks:
+                    self.squeeze_targets[item["symbol"]] = item["resistance"]
+            LOGGER.info(f"Loaded {len(self.squeeze_targets)} squeeze targets from database.")
+        except Exception as e:
+            LOGGER.error(f"Failed to load squeeze targets from database: {e}")
+
+    def monitor_squeeze_breakout(self, symbol: str, df: pd.DataFrame) -> None:
+        if symbol not in self.squeeze_targets or df.empty:
+            return
+            
+        resistance = self.squeeze_targets[symbol]
+        latest = df.iloc[-1]
+        price = float(latest["close"])
+        
+        if price > resistance:
+            # Check volume
+            if len(df) >= 20:
+                vol_ma = df["volume"].rolling(20).mean().iloc[-1]
+                vol_surge = float(latest["volume"]) / float(vol_ma) if vol_ma > 0 else 1.0
+                if vol_surge >= 1.5:  # require 1.5x volume surge for breakout
+                    self.alert_squeeze_breakout(symbol, price, resistance, vol_surge)
+                    # Remove from targets to prevent spamming
+                    del self.squeeze_targets[symbol]
 
     def monitor_technical_extremes(self, symbol: str, df: pd.DataFrame) -> None:
         """Analyze latest bar for RSI extremes and volume surges."""
@@ -151,6 +187,19 @@ class LiveAlertAgent:
             f"Level: ₹{level:.2f} ({dist_pct*100:.2f}% dist)"
         )
         self._debounce_send(symbol, f"ZONE_{name}", message, custom_debounce=300, log_only=log_only)
+
+    def alert_squeeze_breakout(self, symbol: str, price: float, resistance: float, vol_surge: float):
+        """High-priority alert for volatility contraction (squeeze) breakouts."""
+        short_sym = symbol.split(':')[-1].replace('-EQ', '')
+        message = (
+            f"🚨 <b>SQUEEZE BREAKOUT: {short_sym}</b>\n"
+            f"Price crossed Resistance: ₹{resistance:.2f}\n"
+            f"Current Price: ₹{price:.2f}\n"
+            f"Volume Surge: <b>{vol_surge:.1f}x</b> average\n"
+            f"<i>Explosive momentum likely from contraction zone.</i>"
+        )
+        self._debounce_send(symbol, "SQUEEZE_BREAKOUT", message, custom_debounce=3600)
+
 
     def monitor_option_chain_changes(self, symbol: str, analysis: Any):
         """

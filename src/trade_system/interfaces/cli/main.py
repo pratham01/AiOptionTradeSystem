@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     research_parser.add_argument("--year", type=int, default=2026)
     research_parser.add_argument("--symbol", default="NSE_NIFTY50-INDEX")
 
+    sanity_parser = subparsers.add_parser(
+        "sanity-check",
+        help="Verify and heal F&O database history",
+    )
+
     return parser
 
 
@@ -92,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
             access_token=token,
             user_id=settings.fyers.user_id,
         )
-        catalog = CsvDataCatalog(settings.data_dir)
+        catalog = CsvDataCatalog(settings.data_dir / "fo_historical")
         service = HistoricalDataService(broker, catalog)
         from_date = date.fromisoformat(args.from_date)
         to_date = date.fromisoformat(args.to_date)
@@ -115,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             access_token=token,
             user_id=settings.fyers.user_id,
         )
-        catalog = CsvDataCatalog(settings.data_dir)
+        catalog = CsvDataCatalog(settings.data_dir / "fo_historical")
         symbols = args.symbol or settings.live_symbols
         timeframe = args.timeframe_minutes or settings.live_timeframe_minutes
         service = LiveMarketDataService(
@@ -126,6 +131,13 @@ def main(argv: list[str] | None = None) -> int:
             settings=settings,
         )
         service.run_forever()
+        return 0
+
+    if args.command == "sanity-check":
+        from trade_system.application.agent.data_sanity_agent import DataSanityAgent
+        agent = DataSanityAgent(settings)
+        result = agent.ensure_data_sanity(min_candles=100)
+        print(f"Sanity check complete. Healed symbols: {result.get('healed_daily', [])}")
         return 0
 
     if args.command == "backtest":

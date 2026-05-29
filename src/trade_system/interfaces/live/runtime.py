@@ -28,7 +28,7 @@ def create_live_market_service(settings: Settings | None = None) -> LiveMarketDa
         user_id=settings.fyers.user_id,
         authenticator=auth_service.authenticator,
     )
-    catalog = CsvDataCatalog(settings.data_dir)
+    catalog = CsvDataCatalog(settings.data_dir / "fo_historical")
     return LiveMarketDataService(
         broker=broker,
         catalog=catalog,

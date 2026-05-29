@@ -37,16 +37,24 @@ _ST_DAILY = SupertrendIndicator(period=10, multiplier=2)
 
 # Pattern quality weights (from backtest: higher = more edge)
 PATTERN_WEIGHT = {
-    "Bearish Engulfing": 0.18,   # 50% hit, +0.70% avg
-    "Hammer": 0.15,              # 50% hit, +0.56% avg
+    "Bearish Engulfing": 0.18,
+    "Hammer": 0.15,
     "Daily ST Flip (Bull)": 0.20,
     "Daily ST Flip (Bear)": 0.20,
-    "Bullish Engulfing": 0.10,   # Deprioritized: 29% hit in backtest
+    "Bullish Engulfing": 0.10,
     "Shooting Star": 0.15,
     "Compression Breakout": 0.12,
     "Compression Breakdown": 0.12,
     "Vol-Weighted Close (Bull)": 0.10,
     "Vol-Weighted Close (Bear)": 0.10,
+    "Momentum Surge (Bull)": 0.25,
+    "Momentum Surge (Bear)": 0.25,
+    "Monthly Breakout": 0.30,
+    "Monthly Breakdown": 0.30,
+    "Weekly Breakout": 0.20,
+    "Weekly Breakdown": 0.20,
+    "Daily ST Touch (Bull)": 0.15,
+    "Daily ST Touch (Bear)": 0.15,
 }
 
 
@@ -118,7 +126,7 @@ class NextDayPredictorAgent:
             return pd.DataFrame()
 
         df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(str).str.replace(r"\.\d+", "", regex=True), errors="coerce")
         return df.sort_values("timestamp").reset_index(drop=True)
 
     def _get_nifty_trend(self, end_date: str = None) -> int:
@@ -265,6 +273,97 @@ class NextDayPredictorAgent:
         return None
 
     @staticmethod
+    def _detect_momentum_surge(df: pd.DataFrame) -> dict | None:
+        if len(df) < 20:
+            return None
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        change_pct = ((curr["close"] - prev["close"]) / prev["close"]) * 100
+        full_range = curr["high"] - curr["low"]
+        if full_range == 0:
+            return None
+            
+        vol_sma = df["volume"].rolling(20).mean().iloc[-1]
+        vol_ratio = curr["volume"] / vol_sma if vol_sma > 0 else 0
+        
+        if change_pct > 1.5 and vol_ratio > 1.2:
+            close_pos = (curr["close"] - curr["low"]) / full_range
+            if close_pos > 0.8:
+                return {"pattern": "Momentum Surge (Bull)", "direction": "CALL", "strength": vol_ratio}
+                
+        if change_pct < -1.5 and vol_ratio > 1.2:
+            close_pos = (curr["close"] - curr["low"]) / full_range
+            if close_pos < 0.2:
+                return {"pattern": "Momentum Surge (Bear)", "direction": "PUT", "strength": vol_ratio}
+                
+        return None
+
+    @staticmethod
+    def _detect_mtf_breakout(df: pd.DataFrame) -> dict | None:
+        if len(df) < 25:
+            return None
+        curr = df.iloc[-1]
+        prev_20 = df.iloc[-21:-1]
+        prev_5 = df.iloc[-6:-1]
+        
+        month_high = prev_20["high"].max()
+        month_low = prev_20["low"].min()
+        week_high = prev_5["high"].max()
+        week_low = prev_5["low"].min()
+        
+        vol_sma = df["volume"].rolling(20).mean().iloc[-1]
+        vol_ratio = curr["volume"] / vol_sma if vol_sma > 0 else 0
+        
+        if vol_ratio < 1.2:
+            return None
+            
+        if curr["close"] > month_high:
+            return {"pattern": "Monthly Breakout", "direction": "CALL", "strength": vol_ratio}
+        if curr["close"] < month_low:
+            return {"pattern": "Monthly Breakdown", "direction": "PUT", "strength": vol_ratio}
+            
+        if curr["close"] > week_high:
+            return {"pattern": "Weekly Breakout", "direction": "CALL", "strength": vol_ratio}
+        if curr["close"] < week_low:
+            return {"pattern": "Weekly Breakdown", "direction": "PUT", "strength": vol_ratio}
+            
+        return None
+
+    @staticmethod
+    def _detect_supertrend_touch(df: pd.DataFrame) -> dict | None:
+        if len(df) < 15:
+            return None
+        try:
+            df_st = _ST_DAILY.calculate(df.copy())
+        except:
+            return None
+        if "supertrend" not in df_st.columns:
+            return None
+            
+        curr = df_st.iloc[-1]
+        st_val = curr["supertrend"]
+        st_dir = curr["supertrend_direction"]
+        
+        full_range = curr["high"] - curr["low"]
+        if full_range == 0:
+            return None
+            
+        if st_dir == 1:
+            if curr["low"] <= st_val * 1.005 and curr["close"] > st_val:
+                close_pos = (curr["close"] - curr["low"]) / full_range
+                if close_pos > 0.5:
+                    return {"pattern": "Daily ST Touch (Bull)", "direction": "CALL", "strength": 1.0}
+                    
+        if st_dir == -1:
+            if curr["high"] >= st_val * 0.995 and curr["close"] < st_val:
+                close_pos = (curr["close"] - curr["low"]) / full_range
+                if close_pos < 0.5:
+                    return {"pattern": "Daily ST Touch (Bear)", "direction": "PUT", "strength": 1.0}
+                    
+        return None
+
+
+    @staticmethod
     def _detect_st_flip(df: pd.DataFrame) -> dict | None:
         if len(df) < 15:
             return None
@@ -355,7 +454,8 @@ class NextDayPredictorAgent:
         for detector in [
             self._detect_engulfing, self._detect_pin_bar,
             self._detect_compression_breakout, self._detect_vol_weighted_close,
-            self._detect_st_flip,
+            self._detect_momentum_surge, self._detect_mtf_breakout,
+            self._detect_supertrend_touch, self._detect_st_flip,
         ]:
             result = detector(df)
             if result:
@@ -373,15 +473,22 @@ class NextDayPredictorAgent:
         direction = "CALL" if call_votes > put_votes else "PUT"
         aligned = [p for p in patterns if p["direction"] == direction]
 
-        # ── DUAL CONFIRMATION: require 2+ aligning patterns ──
-        if len(aligned) < 2:
+        # ── EXTREME MOMENTUM BYPASS ──
+        has_extreme_momentum = any(
+            p["pattern"] in ["Monthly Breakout", "Monthly Breakdown", "Momentum Surge (Bull)", "Momentum Surge (Bear)"]
+            for p in aligned
+        )
+
+        # ── DUAL CONFIRMATION: require 2+ aligning patterns OR extreme momentum ──
+        if len(aligned) < 2 and not has_extreme_momentum:
             return None
 
-        # ── Market regime gate ──
-        if direction == "CALL" and nifty_trend == -1:
-            return None
-        if direction == "PUT" and nifty_trend == 1:
-            return None
+        # ── Market regime gate (bypassed for extreme momentum) ──
+        if not has_extreme_momentum:
+            if direction == "CALL" and nifty_trend == -1:
+                return None
+            if direction == "PUT" and nifty_trend == 1:
+                return None
 
         # ── Daily supertrend alignment ──
         try:

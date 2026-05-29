@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+
+# Secrets (never include in image)
+.env
+.secrets/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Large data files (mount as volumes at runtime)
+data/fo_historical/
+data/option_chain_data/
+reports/
+scratch/
+
+# Logs
+*.log
+logs/
+
+# Dev files
+*.ipynb
+.pre-commit-config.yaml
+docs/
+
+# macOS
+.DS_Store

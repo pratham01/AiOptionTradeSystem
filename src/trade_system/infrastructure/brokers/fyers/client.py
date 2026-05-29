@@ -142,7 +142,7 @@ class FyersBrokerV2(DataBroker):
             for i in range(0, len(symbols), 50):
                 batch = symbols[i:i+50]
                 all_quotes.update(self.get_quotes(batch))
-                time.sleep(0.5) # Prevent 429 rate limits
+                time.sleep(0.8) # Prevent 429 rate limits
             return all_quotes
 
         self.verify_session()
@@ -194,8 +194,14 @@ class FyersBrokerV2(DataBroker):
             return quotes
 
         except Exception as e:
-            LOGGER.error(f"Failed to fetch quotes: {e}")
-            return {} # Safe fallback
+            # If quotes call raised JSONDecodeError/ConnectionError (e.g. HTML 429/502), retry
+            if _retry_count < 3:
+                LOGGER.warning(f"Fyers quotes request failed: {e}. Retry {_retry_count+1}/3 in 3.0s...")
+                time.sleep(3.0)
+                return self.get_quotes(symbols, _retry_count=_retry_count+1)
+            else:
+                LOGGER.error(f"Failed to fetch quotes: {e}")
+                return {} # Safe fallback
 
     def get_historical_data(
         self,

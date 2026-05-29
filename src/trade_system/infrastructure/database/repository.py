@@ -102,12 +102,15 @@ def get_market_data(
     if to_date:
         query = query.filter(model.timestamp <= to_date)
 
-    query = query.order_by(model.timestamp.asc())
-
     if limit:
-        query = query.limit(limit)
-
-    return query.all()
+        # To get the LATEST `limit` rows, sort descending first
+        query = query.order_by(model.timestamp.desc()).limit(limit)
+        results = query.all()
+        # Return in ascending chronological order
+        return sorted(results, key=lambda x: x.timestamp)
+    else:
+        query = query.order_by(model.timestamp.asc())
+        return query.all()
 
 
 def save_option_chain_batch(
@@ -762,3 +765,64 @@ class SQLAlchemyLogRepository(LogRepository):
         except Exception as e:
             # Don't fail the whole app if logging a thought fails
             pass
+
+
+def save_consolidation_watchlist(
+    session: Session,
+    date_str: str,
+    stocks: List[Dict[str, Any]]
+) -> int:
+    """Save/update the consolidation watchlist for a specific date."""
+    from trade_system.infrastructure.database.models import ConsolidationWatchlistStock
+    # Delete existing for this date to avoid duplicates
+    session.query(ConsolidationWatchlistStock).filter_by(date=date_str).delete()
+    
+    count = 0
+    for s_data in stocks:
+        stock = ConsolidationWatchlistStock(
+            date=date_str,
+            symbol=s_data["symbol"],
+            resistance=s_data["resistance"],
+            support=s_data["support"],
+            bbw=s_data["bbw"],
+            atr=s_data["atr"],
+            close=s_data["close"]
+        )
+        session.add(stock)
+        count += 1
+    session.commit()
+    return count
+
+
+def get_consolidation_watchlist(
+    session: Session,
+    date_str: str
+) -> List[Dict[str, Any]]:
+    """Get the consolidation watchlist for a specific date."""
+    from trade_system.infrastructure.database.models import ConsolidationWatchlistStock
+    stocks = session.query(ConsolidationWatchlistStock).filter_by(date=date_str).all()
+    return [
+        {
+            "symbol": s.symbol,
+            "resistance": s.resistance,
+            "support": s.support,
+            "bbw": s.bbw,
+            "atr": s.atr,
+            "close": s.close,
+            "date": s.date
+        }
+        for s in stocks
+    ]
+
+
+def get_latest_consolidation_watchlist(
+    session: Session
+) -> List[Dict[str, Any]]:
+    """Get the latest consolidation watchlist candidates across the database."""
+    from trade_system.infrastructure.database.models import ConsolidationWatchlistStock
+    # Find the latest date
+    latest_date_row = session.query(ConsolidationWatchlistStock.date).order_by(ConsolidationWatchlistStock.date.desc()).first()
+    if not latest_date_row:
+        return []
+    return get_consolidation_watchlist(session, latest_date_row[0])
+

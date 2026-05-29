@@ -51,14 +51,14 @@ async def run_st_touch_scan():
         report.append("📅 <b>Daily Timeframe (Swing/Positional):</b>")
         for s in touches_daily:
             dir_icon = "🟢" if s.direction.value == "CALL" else "🔴"
-            report.append(f" • {dir_icon} <b>{s.symbol.split(':')[-1]}</b> (Conf: {s.confidence:.0%})")
+            report.append(f" • {dir_icon} <b>{s.symbol.split(':')[-1]}</b> ({s.direction.value}) (Conf: {s.confidence:.0%})")
         report.append("")
 
     if touches_15m:
         report.append("⏱️ <b>15-Minute Timeframe (Intraday):</b>")
         for s in touches_15m:
             dir_icon = "🟢" if s.direction.value == "CALL" else "🔴"
-            report.append(f" • {dir_icon} <b>{s.symbol.split(':')[-1]}</b> (Conf: {s.confidence:.0%})")
+            report.append(f" • {dir_icon} <b>{s.symbol.split(':')[-1]}</b> ({s.direction.value}) (Conf: {s.confidence:.0%})")
         report.append("")
 
     report.append("<i>Strategy: Price touching Supertrend line with volume confirmation.</i>")

@@ -16,10 +16,13 @@ pages = {
     "Live Operations": [
         st.Page(HERE / "agent_dashboard.py", title="Agent Dashboard", icon="🤖", default=True),
         st.Page(HERE / "market_mood_dashboard.py", title="Market Mood", icon="📊"),
+        st.Page(HERE / "smart_oi_dashboard.py", title="Smart OI", icon="🎯"),
         st.Page(HERE / "sector_scope_dashboard.py", title="Sector Scope", icon="🧭"),
     ],
     "Research & Strategy": [
         st.Page(HERE / "strategy_dashboard.py", title="Strategy Lab", icon="🧪"),
+        st.Page(HERE / "volumetric_order_flow_dashboard.py", title="Volumetric Order Flow", icon="📊"),
+        st.Page(HERE / "sr_channels_dashboard.py", title="S/R Channels", icon="🏗️"),
         st.Page(HERE / "agent_arch_viz.py", title="Swarm Architecture", icon="🏛️"),
     ],
 }
@@ -47,11 +50,11 @@ if refresh_rate > 0:
 pg.run()
 
 # Implicit Update Logic
-# We put this AFTER pg.run() so the page renders completely first.
+# We use st_autorefresh to trigger a clean server-side script rerun at the selected refresh rate,
+# preventing the browser window from performing a full reload and resetting DOM/connections.
 if refresh_rate > 0:
-    import time
-    time.sleep(refresh_rate)
-    st.rerun()
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=refresh_rate * 1000, key="global_dashboard_refresh")
 
 # Sidebar Footer
 st.sidebar.markdown("---")

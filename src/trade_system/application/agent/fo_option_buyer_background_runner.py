@@ -75,7 +75,7 @@ class FOOptionBuyerBackgroundRunner:
                     LOGGER.info("No high conviction setups found in this scan.")
                     
                 LOGGER.info("Running Mathematical Sector Breakout Scan...")
-                breakouts = self.breakout_screener.scan_for_breakouts()
+                breakouts = self.breakout_screener.scan_for_breakouts(use_sector_filter=False)
                 if breakouts:
                     self.send_breakout_alerts(breakouts)
 

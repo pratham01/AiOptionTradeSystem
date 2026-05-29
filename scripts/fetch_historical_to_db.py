@@ -44,7 +44,7 @@ async def backfill_data(args):
         user_id=settings.fyers.user_id,
     )
     
-    catalog = CsvDataCatalog(settings.data_dir)
+    catalog = CsvDataCatalog(settings.data_dir / "fo_historical")
     service = HistoricalDataService(broker, catalog)
     engine = get_engine()
     

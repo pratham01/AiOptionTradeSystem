@@ -314,6 +314,7 @@ def test_supertrend_alert_uses_current_session_bar_transition():
     sent_messages: list[str] = []
     service.notifier.send = sent_messages.append
     service.last_trend["NSE:NIFTY50-INDEX"] = -1
+    service._today_ist = lambda: pd.to_datetime("2026-03-24").date()
 
     df = pd.DataFrame(
         {

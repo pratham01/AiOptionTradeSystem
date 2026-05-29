@@ -31,6 +31,7 @@ from trade_system.application.indicators.vwap import VWAPIndicator
 from trade_system.application.indicators.retracement import RetracementIndicator
 from trade_system.application.indicators.supertrend import SupertrendIndicator
 from trade_system.application.analysis.mwpl_analyzer import MwplAnalyzer
+from trade_system.application.analysis.pre_breakout_predictor import PreBreakoutPredictor
 from trade_system.core.ports.weights import WeightsProvider
 
 LOGGER = logging.getLogger(__name__)
@@ -117,6 +118,7 @@ class CandidateScreenerAgent:
         self.ret_ind = RetracementIndicator()
         self.st_ind = SupertrendIndicator(period=7, multiplier=3)
         self.mwpl_analyzer = MwplAnalyzer()
+        self.pre_breakout_predictor = PreBreakoutPredictor()
 
         # Load evolved weights
         self.weights = self.weight_evolver.load_weights("candidate_screener")
@@ -221,30 +223,30 @@ class CandidateScreenerAgent:
                 for d in daily_data
             ])
             
-            # 2. Fetch 5m Data (Last 2 days)
-            intraday_data = get_market_data(session, symbol, "5", limit=200)
+            # 2. Fetch 15m Data (Last 2 days)
+            intraday_data = get_market_data(session, symbol, "15", limit=200)
             if not intraday_data:
                 # Fallback to daily-only analysis
-                df_5m = df_daily 
+                df_15m = df_daily 
             else:
-                df_5m = pd.DataFrame([
+                df_15m = pd.DataFrame([
                     {"timestamp": d.timestamp, "open": d.open, "high": d.high, "low": d.low, "close": d.close, "volume": d.volume} 
                     for d in intraday_data
                 ])
                 
-            if df_5m.empty:
+            if df_15m.empty:
                 return None
                 
         except Exception as exc:
             LOGGER.debug("Database read failed for %s: %s", symbol, exc)
             return None
 
-        return self._compute_score(symbol, df_5m, df_daily, market_context, is_index)
+        return self._compute_score(symbol, df_15m, df_daily, market_context, is_index)
 
     def _compute_score(
         self,
         symbol: str,
-        df_5m: pd.DataFrame,
+        df_15m: pd.DataFrame,
         df_daily: pd.DataFrame | None,
         market_context: MarketContext,
         is_index: bool,
@@ -252,12 +254,12 @@ class CandidateScreenerAgent:
         """Compute multi-component score for a symbol."""
         try:
             # Calculate indicators
-            df_5m = self.vd_ind.calculate(df_5m)
-            df_5m = self.comp_ind.calculate(df_5m)
-            df_5m = self.vwap_ind.calculate(df_5m)
-            df_5m = self.ret_ind.calculate(df_5m)
-            df_5m = self.st_ind.calculate(df_5m)
-            profile = self.vp_ind.calculate(df_5m.tail(78))  # ~6.5hrs of 5m bars
+            df_15m = self.vd_ind.calculate(df_15m)
+            df_15m = self.comp_ind.calculate(df_15m)
+            df_15m = self.vwap_ind.calculate(df_15m)
+            df_15m = self.ret_ind.calculate(df_15m)
+            df_15m = self.st_ind.calculate(df_15m)
+            profile = self.vp_ind.calculate(df_15m.tail(26))  # ~6.5hrs of 15m bars
 
             # Calculate Daily Supertrend for Multi-TF Alignment
             prev_day_trend = 0
@@ -270,7 +272,7 @@ class CandidateScreenerAgent:
             LOGGER.debug("Indicator error for %s: %s", symbol, exc)
             return None
 
-        latest = df_5m.iloc[-1]
+        latest = df_15m.iloc[-1]
         entry_price = float(latest.get("close", 0))
         if entry_price <= 0:
             return None
@@ -294,8 +296,8 @@ class CandidateScreenerAgent:
                 LOGGER.debug(f"Liquidity check failed for {symbol}: {e}")
 
         # 2. Volume Consistency (Avg volume check)
-        avg_vol = df_5m["volume"].tail(50).mean()
-        if avg_vol < 1000: # Threshold for 5m bars
+        avg_vol = df_15m["volume"].tail(50).mean()
+        if avg_vol < 1000: # Threshold for 15m bars
             LOGGER.warning(f"Rejecting {symbol}: Low average volume {avg_vol:.0f}")
             is_liquid = False
 
@@ -335,18 +337,18 @@ class CandidateScreenerAgent:
                 above_poc = False
         scores["value_area"] = va_score
 
-        # 4. Trend Alignment (simple multi-TF proxy from 5m data)
-        rsi_5m = self._calc_rsi(df_5m)
+        # 4. Trend Alignment (simple multi-TF proxy from 15m data)
+        rsi_15m = self._calc_rsi(df_15m)
         rsi_daily = self._calc_rsi(df_daily) if (df_daily is not None and len(df_daily) >= 15) else None
-        adx = self._calc_adx(df_5m)
-        alignment_score = self._calc_alignment(df_5m, rsi_5m, rsi_daily, adx)
+        adx = self._calc_adx(df_15m)
+        alignment_score = self._calc_alignment(df_15m, rsi_15m, rsi_daily, adx)
 
         # Incorporate Previous Day trend into alignment
         if prev_day_trend != 0:
-            current_5m_trend = latest['supertrend_direction']
-            if current_5m_trend == prev_day_trend:
+            current_15m_trend = latest['supertrend_direction']
+            if current_15m_trend == prev_day_trend:
                 alignment_score = min(1.0, alignment_score + 0.15)
-                LOGGER.debug(f"Trend alignment for {symbol}: 5m matches Daily.")
+                LOGGER.debug(f"Trend alignment for {symbol}: 15m matches Daily.")
             else:
                 alignment_score = max(0.0, alignment_score - 0.1)
 
@@ -444,7 +446,7 @@ class CandidateScreenerAgent:
         scores["vwap"] = vwap_score
 
         # 10. Retracement / Confluence Zones
-        active_zones = self.ret_ind.get_active_zones(df_5m)
+        active_zones = self.ret_ind.get_active_zones(df_15m)
         ret_score = 0.3 # Default
         if active_zones:
             types = [z.type for z in active_zones]
@@ -472,13 +474,27 @@ class CandidateScreenerAgent:
         except: pass
         scores["viability"] = range_score
 
+        # --- PRE-BREAKOUT PREDICTION ---
+        pre_breakout_res = self.pre_breakout_predictor.analyze(df_15m)
+        pb_score = pre_breakout_res.get("accumulation_score", 0.0)
+        is_pb_tagged = False
+        pb_pattern = ""
+        
+        if pb_score > 0.6:
+            # Huge accumulation happening while price is squeezed/flat
+            scores["pre_breakout"] = pb_score
+            is_pb_tagged = True
+            direction = pre_breakout_res["predictive_direction"] or direction
+            pb_pattern = "PRE_BREAKOUT_ACCUMULATION"
+
         # --- Weighted total ---
         # "Behavioral Shield" Weights
         current_weights = {
-            "performance": 0.35,      # Heat
-            "momentum": 0.25,         # Trend intensity (ADX/RSI) - INCREASED WEIGHT
-            "viability": 0.20,        # Range/Theta protection - NEW
+            "performance": 0.30,      
+            "momentum": 0.20,         
+            "viability": 0.15,        
             "volume_delta": 0.10,     
+            "pre_breakout": 0.15,     # Added predictive weight
             "trend_alignment": 0.05,  
             "value_area": 0.03,       
             "retracement": 0.02       
@@ -505,15 +521,20 @@ class CandidateScreenerAgent:
         ), 4)
 
         # Volume surge
-        vol_ma = df_5m["volume"].rolling(20).mean().iloc[-1]
+        vol_ma = df_15m["volume"].rolling(20).mean().iloc[-1]
         vol_surge = float(latest.get("volume", 0)) / float(vol_ma) if vol_ma > 0 else 1.0
 
         # ATR %
-        atr = self._calc_atr(df_5m)
+        atr = self._calc_atr(df_15m)
         atr_pct = (atr / entry_price * 100) if atr and entry_price > 0 else None
 
         # Breakout type
-        breakout_type = self._detect_breakout_type(df_5m, df_daily)
+        breakout_type = self._detect_breakout_type(df_15m, df_daily)
+        
+        # Combine patterns
+        combined_pattern = ", ".join([z.type for z in active_zones]) if active_zones else ""
+        if is_pb_tagged:
+            combined_pattern += (", " if combined_pattern else "") + pb_pattern
 
         return CandidateScore(
             symbol=symbol,
@@ -524,7 +545,7 @@ class CandidateScreenerAgent:
             sector=FO_METADATA.get(symbol, "Index" if is_index else "Other"),
             entry_price=entry_price,
             rsi_daily=rsi_daily,
-            rsi_hourly=rsi_5m,
+            rsi_hourly=rsi_15m,
             adx=adx,
             volume_surge=round(vol_surge, 2),
             atr_pct=round(atr_pct, 3) if atr_pct else None,
@@ -533,7 +554,7 @@ class CandidateScreenerAgent:
             above_poc=above_poc,
             alignment_score=round(alignment_score, 3),
             breakout_type=breakout_type,
-            pattern=", ".join([z.type for z in active_zones]) if active_zones else None,
+            pattern=combined_pattern if combined_pattern else None,
             spread_pct=round(spread_pct, 3),
             is_liquid=is_liquid,
             component_scores=scores,
@@ -598,7 +619,7 @@ class CandidateScreenerAgent:
     @staticmethod
     def _calc_alignment(
         df: pd.DataFrame,
-        rsi_5m: float | None,
+        rsi_15m: float | None,
         rsi_daily: float | None,
         adx: float | None,
     ) -> float:
@@ -606,7 +627,7 @@ class CandidateScreenerAgent:
         score = 0.0
         count = 0
 
-        # Moving average alignment on 5m
+        # Moving average alignment on 15m
         if len(df) >= 20:
             ma5 = df["close"].rolling(5).mean().iloc[-1]
             ma20 = df["close"].rolling(20).mean().iloc[-1]
@@ -614,9 +635,9 @@ class CandidateScreenerAgent:
                 score += 1.0 if ma5 > ma20 else 0.0
                 count += 1
 
-        # RSI alignment (5m > 50 is bullish)
-        if rsi_5m is not None:
-            score += 1.0 if rsi_5m > 52 else (0.5 if rsi_5m > 45 else 0.0)
+        # RSI alignment (15m > 50 is bullish)
+        if rsi_15m is not None:
+            score += 1.0 if rsi_15m > 52 else (0.5 if rsi_15m > 45 else 0.0)
             count += 1
 
         # Daily RSI alignment
@@ -632,14 +653,14 @@ class CandidateScreenerAgent:
         return round(score / count, 3) if count > 0 else 0.0
 
     @staticmethod
-    def _detect_breakout_type(df_5m: pd.DataFrame, df_daily: pd.DataFrame | None) -> str | None:
+    def _detect_breakout_type(df_15m: pd.DataFrame, df_daily: pd.DataFrame | None) -> str | None:
         """Detect if current price is breaking out of a significant level."""
-        if df_5m.empty:
+        if df_15m.empty:
             return None
-        current_price = float(df_5m["close"].iloc[-1])
+        current_price = float(df_15m["close"].iloc[-1])
 
-        # Check 20-bar high on 5m (intraday high breakout)
-        recent_high = df_5m["high"].tail(20).max()
+        # Check 20-bar high on 15m (intraday high breakout)
+        recent_high = df_15m["high"].tail(20).max()
         if current_price >= recent_high * 0.998:
             return "intraday_high"
 

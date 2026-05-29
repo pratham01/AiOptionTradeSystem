@@ -1,28 +1,46 @@
 version: '3.8'
 
 services:
-  trade-api:
+  # The live trading and monitoring bot
+  live-bot:
     build: .
-    ports:
-      - "8000:8000"
+    container_name: trade_bot_live
+    restart: unless-stopped
+    command: python -m trade_system live
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
     environment:
-      - API_HOST=0.0.0.0
-      - API_PORT=8000
-    env_file:
-      - .env
-    restart: unless-stopped
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./.secrets:/app/.secrets
+      - TZ=Asia/Kolkata
 
-  trade-live:
+  # The Streamlit Dashboard
+  dashboard:
     build: .
-    command: ["trade-live"]
-    env_file:
-      - .env
+    container_name: trade_bot_dashboard
     restart: unless-stopped
+    command: streamlit run src/trade_system/interfaces/dashboard/main.py --server.port 8502
+    ports:
+      - "8502:8502"
     volumes:
       - ./data:/app/data
-      - ./logs:/app/logs
-      - ./.secrets:/app/.secrets
+      - ./.env:/app/.env
+    environment:
+      - TZ=Asia/Kolkata
+
+  # Cron service for End-Of-Day tasks (Backfill, Predictor, Reporting)
+  cron-tasks:
+    build: .
+    container_name: trade_bot_cron
+    restart: unless-stopped
+    # This runs a simple foreground cron loop. 
+    # The actual crontab is loaded from a file or we can use a sleep loop for simplicity.
+    command: >
+      sh -c "echo '15 16 * * 1-5 cd /app && python -m trade_system postmarket >> /proc/1/fd/1 2>&1' > /etc/cron.d/trade-cron &&
+             chmod 0644 /etc/cron.d/trade-cron &&
+             crontab /etc/cron.d/trade-cron &&
+             cron -f"
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env
+    environment:
+      - TZ=Asia/Kolkata

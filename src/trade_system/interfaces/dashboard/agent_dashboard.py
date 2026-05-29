@@ -331,9 +331,9 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# --- AUTO REFRESH SCRIPT ---
-import streamlit_javascript as st_js
-st_js.st_javascript("setTimeout(function(){ window.parent.location.reload(); }, 60000);")
+# --- AUTO REFRESH ---
+# Auto-refresh is handled globally by st_autorefresh in main.py to prevent full page reloads.
+
 
 # --- TOP: MACRO & SECTORS ---
 macro_c1, macro_c2 = st.columns([2, 1])

@@ -187,7 +187,9 @@ class FoStockSuggesterAgent:
         for cand in prioritized_candidates[:20]:
             is_breakout_bypass = getattr(cand, "is_breakout_bypass", False)
             is_watchlist = cand.symbol in watchlist_symbols
-            if not is_breakout_bypass and not is_watchlist and leading_sectors and cand.sector not in leading_sectors:
+            is_pre_breakout = cand.pattern and "PRE_BREAKOUT_ACCUMULATION" in cand.pattern
+            
+            if not is_breakout_bypass and not is_watchlist and not is_pre_breakout and leading_sectors and cand.sector not in leading_sectors:
                 continue
             
             if len(suggestions) >= 5: break
@@ -205,6 +207,9 @@ class FoStockSuggesterAgent:
                 if is_watchlist:
                     if "next_day_watchlist" not in sugg.tags:
                         sugg.tags.append("next_day_watchlist")
+                if is_pre_breakout:
+                    if "pre_breakout_accumulation" not in sugg.tags:
+                        sugg.tags.append("pre_breakout_accumulation")
                 suggestions.append(sugg)
 
         return suggestions

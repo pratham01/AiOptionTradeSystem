@@ -206,6 +206,7 @@ class SetupValidatorAgent:
         score = candidate.component_scores.get("volume_delta", 0) * w.get("volume_delta", 0.25)
         score += candidate.component_scores.get("value_area", 0) * w.get("price_action", 0.30)
         score += candidate.component_scores.get("momentum", 0) * w.get("momentum", 0.20)
+        score += candidate.component_scores.get("pre_breakout", 0) * 0.25
         return round(min(max(score, 0.0), 1.0), 4)
 
     def _suggest_option_params(self, direction, spot, symbol):

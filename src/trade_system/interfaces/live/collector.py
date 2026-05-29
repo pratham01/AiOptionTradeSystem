@@ -111,6 +111,7 @@ class LiveMarketDataService:
         self.settings = settings or broker.settings
         self.indicator_config = indicator_config or self.settings.indicator_config
         self.engine = get_engine()
+        self.last_initialization_attempt = 0.0
         self.strategy_timeframe_minutes = strategy_timeframe_minutes or self.indicator_config.trend_timeframe_minutes
         self.supertrend_period = self.indicator_config.supertrend_period
         self.supertrend_multiplier = self.indicator_config.supertrend_multiplier
@@ -195,6 +196,11 @@ class LiveMarketDataService:
         self.breakout_screener = BreakoutScreener()
         self.breakout_thread: threading.Thread | None = None
         self.last_breakout_alerts: dict[str, pd.Timestamp] = {}
+        self.alert_debounce_seconds: int = 300  # 5-minute cooldown on level-touch alerts
+
+        # Opening Range (first 15-min candle) tracking
+        self.first_15min_candle: dict[str, dict | None] = {symbol: None for symbol in symbols}
+        self.first_15min_break_sent: dict[str, set] = {symbol: set() for symbol in symbols}
 
     @staticmethod
     def _now_ist() -> datetime:
@@ -210,12 +216,16 @@ class LiveMarketDataService:
 
     def run_forever(self) -> None:
         LOGGER.info("Starting intraday live bot monitor.")
+        import time
         while not self.shutdown:
             now = self._now_ist().replace(tzinfo=None)
             today = now.date()
 
             if self.last_initialized_date != today and now.time() >= self._parse_clock(self.settings.market_premarket_check):
-                self._initialize_trading_day(today)
+                current_time_sec = time.time()
+                if current_time_sec - self.last_initialization_attempt >= 300: # 5 minutes backoff
+                    self.last_initialization_attempt = current_time_sec
+                    self._initialize_trading_day(today)
 
             if self.market_open_today:
                 if self._parse_clock(self.settings.market_start) <= now.time() < self._parse_clock(self.settings.market_end):
@@ -228,6 +238,35 @@ class LiveMarketDataService:
                         "🔴 <b>Trading Bot Stopped</b>\n\nMarket closed at 15:30. Monitoring stopped for the day."
                     )
             time.sleep(5)
+
+    def _ensure_broker_session(self) -> None:
+        """Verify the broker session and handle rate-limit or auth failures gracefully."""
+        try:
+            self.broker.verify_session()
+        except Exception as exc:
+            LOGGER.warning("Fyers session verification failed: %s.", exc)
+            err_msg = str(exc)
+            is_rate_limit = any(
+                term in err_msg
+                for term in ["API Limit exceeded", "Limit exceeded", "429", "Too Many Requests", "Bad request"]
+            )
+            if is_rate_limit:
+                LOGGER.warning(
+                    "Rate limits encountered on REST API. Proceeding since access token is present."
+                )
+                return
+            LOGGER.info("Attempting TOTP token refresh...")
+            if not self._refresh_token_via_totp():
+                if self.broker.access_token:
+                    LOGGER.warning("TOTP refresh failed, but proceeding with existing access token.")
+                    return
+                raise exc
+            try:
+                self.broker.verify_session()
+            except Exception as exc2:
+                LOGGER.warning(
+                    "Fyers session verification failed after TOTP refresh: %s. Proceeding anyway.", exc2
+                )
 
     def start(self) -> None:
         self._ensure_broker_session()
@@ -338,7 +377,12 @@ class LiveMarketDataService:
             market_open, detail = self.broker.is_market_open_today()
         except Exception as exc:
             LOGGER.error("Failed to check FYERS market status: %s", exc, exc_info=True)
-            return
+            if "API Limit exceeded per day" in str(exc) or "Limit exceeded" in str(exc) or "Unable to authenticate" in str(exc):
+                LOGGER.warning("API rate limit exceeded during startup. Falling back to weekday check.")
+                market_open = (current_date.weekday() < 5)
+                detail = "API Rate Limit Fallback"
+            else:
+                return
 
         if not market_open:
             LOGGER.info("Market not yet open (Current status: %s). Retrying in next loop...", detail)
@@ -349,20 +393,49 @@ class LiveMarketDataService:
         self.last_initialized_date = current_date
 
         for symbol in self.symbols:
-            self._refresh_premarket_reference_data(symbol)
-            self.minute_data[symbol] = self._fetch_seed_minute_data(
-                symbol,
-                days=self.settings.premarket_intraday_history_days,
-            )
-            self._load_existing_today_minute_file(symbol, current_date)
-            
+            try:
+                self._refresh_premarket_reference_data(symbol)
+            except Exception as e:
+                LOGGER.warning(f"Failed to refresh premarket reference data for {symbol} (using local copy if available): {e}")
+
+            try:
+                self.minute_data[symbol] = self._fetch_seed_minute_data(
+                    symbol,
+                    days=self.settings.premarket_intraday_history_days,
+                )
+            except Exception as e:
+                LOGGER.warning(f"Failed to fetch seed minute data for {symbol}: {e}")
+                if symbol not in self.minute_data or self.minute_data[symbol] is None:
+                    self.minute_data[symbol] = pd.DataFrame()
+
+            try:
+                self._load_existing_today_minute_file(symbol, current_date)
+            except Exception as e:
+                LOGGER.warning(f"Failed to load existing today minute file for {symbol}: {e}")
+
             # --- Zone Calculation ---
-            self._calculate_daily_zones(symbol)
-            
-            initial = self._compute_previous_day_supertrend_seed(symbol)
-            self._prime_intraday_supertrend_state(symbol, current_date)
-            recent_daily = self._fetch_recent_daily_context(symbol)
-            self.previous_day_levels[symbol] = recent_daily[-1] if recent_daily else None
+            try:
+                self._calculate_daily_zones(symbol)
+            except Exception as e:
+                LOGGER.warning(f"Failed to calculate daily zones for {symbol}: {e}")
+
+            initial = {"direction": 0, "supertrend": 0.0}
+            try:
+                initial = self._compute_previous_day_supertrend_seed(symbol)
+            except Exception as e:
+                LOGGER.warning(f"Failed to compute previous day supertrend seed for {symbol}: {e}")
+
+            try:
+                self._prime_intraday_supertrend_state(symbol, current_date)
+            except Exception as e:
+                LOGGER.warning(f"Failed to prime intraday supertrend state for {symbol}: {e}")
+
+            try:
+                recent_daily = self._fetch_recent_daily_context(symbol)
+                self.previous_day_levels[symbol] = recent_daily[-1] if recent_daily else None
+            except Exception as e:
+                LOGGER.warning(f"Failed to fetch recent daily context for {symbol}: {e}")
+
             
             # Build and send comprehensive pre-market report
             if self.premarket_reports_sent.get(symbol) != current_date:
@@ -429,6 +502,9 @@ class LiveMarketDataService:
         self.ict_signal_events = {symbol: [] for symbol in self.symbols}
         self.daily_zones = {symbol: {} for symbol in self.symbols}
         self.zone_buffer_pct = 0.002 # 0.2% buffer for zone proximity
+
+        self.first_15min_candle = {symbol: None for symbol in self.symbols}
+        self.first_15min_break_sent = {symbol: set() for symbol in self.symbols}
 
         self.eod_summary_sent_for = None
     def _refresh_premarket_reference_data(self, symbol: str) -> None:
@@ -540,11 +616,29 @@ class LiveMarketDataService:
         st_df = calculate_supertrend(timeframe, period=self.supertrend_period, multiplier=self.supertrend_multiplier)
         if st_df.empty:
             return
-        valid_today = _valid_supertrend_rows(st_df[st_df.index.date == current_date])
-        if valid_today.empty:
+        
+        st_df_valid = _valid_supertrend_rows(st_df)
+        yesterday_df = st_df_valid[st_df_valid.index.date < current_date]
+        if not yesterday_df.empty:
+            self.last_trend[symbol] = int(yesterday_df.iloc[-1]["supertrend_direction"])
+            self.last_processed_trend_bar_time[symbol] = yesterday_df.index[-1]
+        else:
+            self.last_trend[symbol] = None
+            self.last_processed_trend_bar_time[symbol] = None
+
+        today_df = st_df_valid[st_df_valid.index.date == current_date]
+        if today_df.empty:
             return
-        self.last_trend[symbol] = int(valid_today.iloc[-1]["supertrend_direction"])
-        self.last_processed_trend_bar_time[symbol] = valid_today.index[-1]
+
+        LOGGER.info(
+            "Priming intraday trend for %s. Replaying %d bars from today.",
+            symbol,
+            len(today_df)
+        )
+        for bar_time, _ in today_df.iterrows():
+            slice_df = st_df.loc[:bar_time]
+            self._check_trend_change(symbol, slice_df)
+
 
     def _fetch_recent_daily_context(self, symbol: str) -> list[dict[str, float | str]]:
         today = self._today_ist()
@@ -956,6 +1050,9 @@ class LiveMarketDataService:
         
         # --- Zone Alerts ---
         self._maybe_alert_zone_proximity(symbol, float(tick["ltp"]), tick["timestamp"])
+
+        # --- First 15-min Candle (ORB) Breakout Alert ---
+        self._maybe_alert_first_15min_break(symbol, float(tick["ltp"]), tick["timestamp"])
         
         tick_minute = tick["timestamp"].replace(second=0, microsecond=0)
         current_minute = self.current_minute[symbol]
@@ -1029,6 +1126,96 @@ class LiveMarketDataService:
         upper = max(previous_price, current_price)
         return lower <= level <= upper
 
+    # ------------------------------------------------------------------
+    # Opening Range Breakout (first 15-min candle)
+    # ------------------------------------------------------------------
+
+    def _maybe_set_first_15min_candle(self, symbol: str, current_date: date) -> None:
+        """Lock in the high/low of the first 15-min candle (9:15–9:29) once complete."""
+        if self.first_15min_candle[symbol] is not None:
+            return  # Already set for today
+        frame = self.minute_data[symbol]
+        if frame.empty:
+            return
+        today = frame[frame.index.date == current_date]
+        first_15 = today[
+            (today.index.time >= dt_time(9, 15)) & (today.index.time < dt_time(9, 30))
+        ]
+        if len(first_15) < 14:  # wait for at least 14 of 15 bars
+            return
+        candle = {
+            "high": float(first_15["high"].max()),
+            "low": float(first_15["low"].min()),
+            "open": float(first_15["open"].iloc[0]),
+            "close": float(first_15["close"].iloc[-1]),
+        }
+        self.first_15min_candle[symbol] = candle
+        LOGGER.info(
+            "First 15-min candle locked for %s: Open=%.2f High=%.2f Low=%.2f Close=%.2f",
+            symbol, candle["open"], candle["high"], candle["low"], candle["close"],
+        )
+        # Immediately send a reference card to Telegram so traders know the range
+        ref_msg = (
+            f"📐 <b>Opening Range Set — {self._short_symbol(symbol)}</b>\n"
+            f"<i>First 15-min candle (9:15 – 9:29)</i>\n"
+            f"Open:  ₹{candle['open']:.2f}\n"
+            f"🔺 High: ₹{candle['high']:.2f}\n"
+            f"🔻 Low:  ₹{candle['low']:.2f}\n"
+            f"Range: ₹{candle['high'] - candle['low']:.2f} pts\n"
+            f"<i>Alerts will fire on breakout above ₹{candle['high']:.2f} "
+            f"or breakdown below ₹{candle['low']:.2f}</i>"
+        )
+        self.notifier.send(ref_msg)
+        self.confirmed_notifier.send(ref_msg)
+
+    def _maybe_alert_first_15min_break(self, symbol: str, price: float, tick_time: datetime) -> None:
+        """Fire a Telegram alert when price crosses the first 15-min candle high or low."""
+        candle = self.first_15min_candle.get(symbol)
+        if not candle:
+            return
+        sent = self.first_15min_break_sent[symbol]
+        time_str = tick_time.strftime("%H:%M") if isinstance(tick_time, datetime) else str(tick_time)
+
+        if "HIGH" not in sent and price > candle["high"]:
+            sent.add("HIGH")
+            gap = price - candle["high"]
+            msg = (
+                f"🟢 <b>ORB Breakout — {self._short_symbol(symbol)} {time_str}</b>\n"
+                f"Price broke <b>ABOVE</b> first 15-min candle high\n"
+                f"\n"
+                f"First 15m High : ₹{candle['high']:.2f}\n"
+                f"Current Price  : ₹{price:.2f}  (+{gap:.2f} pts)\n"
+                f"First 15m Low  : ₹{candle['low']:.2f}\n"
+                f"\n"
+                f"Action: <b>BUY CALL / LONG</b>\n"
+                f"SL Ref: Below ₹{candle['high']:.2f} (ORB High)"
+            )
+            self.notifier.send(msg)
+            self.confirmed_notifier.send(msg)
+            LOGGER.info(
+                "ORB HIGH breakout for %s at %.2f (ORB High=%.2f)", symbol, price, candle["high"]
+            )
+
+        if "LOW" not in sent and price < candle["low"]:
+            sent.add("LOW")
+            gap = candle["low"] - price
+            msg = (
+                f"🔴 <b>ORB Breakdown — {self._short_symbol(symbol)} {time_str}</b>\n"
+                f"Price broke <b>BELOW</b> first 15-min candle low\n"
+                f"\n"
+                f"First 15m Low  : ₹{candle['low']:.2f}\n"
+                f"Current Price  : ₹{price:.2f}  (-{gap:.2f} pts)\n"
+                f"First 15m High : ₹{candle['high']:.2f}\n"
+                f"\n"
+                f"Action: <b>BUY PUT / SHORT</b>\n"
+                f"SL Ref: Above ₹{candle['low']:.2f} (ORB Low)"
+            )
+            self.notifier.send(msg)
+            self.confirmed_notifier.send(msg)
+            LOGGER.info(
+                "ORB LOW breakdown for %s at %.2f (ORB Low=%.2f)", symbol, price, candle["low"]
+            )
+
     def _flush_symbol_minute(self, symbol: str) -> None:
         if not self.tick_buffer[symbol]:
             return
@@ -1056,8 +1243,9 @@ class LiveMarketDataService:
         combined = pd.concat([self.minute_data[symbol], indexed]).sort_index()
         self.minute_data[symbol] = combined[~combined.index.duplicated(keep="last")]
         self._backfill_recent_live_minute_volumes(symbol, minute_bar.name.date())
-        self._run_supertrend(symbol)
         self._update_intraday_yearly_3min_file(symbol, minute_bar.name.date())
+        self._maybe_set_first_15min_candle(symbol, minute_bar.name.date())
+        self._run_supertrend(symbol)
 
     def _flush_all_open_minutes(self) -> None:
         for symbol in self.symbols:
@@ -1077,7 +1265,7 @@ class LiveMarketDataService:
             return
         today_df = st_df[st_df.index.date == current_date]
         if not today_df.empty:
-            self._check_trend_change(symbol, today_df)
+            self._check_trend_change(symbol, st_df)
         
         # --- RSI Divergence ---
         rsi_df = self.rsi_divergence.calculate(adjusted)
@@ -1093,16 +1281,20 @@ class LiveMarketDataService:
         
         if not adjusted.empty:
             self.alert_agent.monitor_technical_extremes(symbol, adjusted)
+            self.alert_agent.monitor_squeeze_breakout(symbol, adjusted)
             
             # --- 3. Early Morning Setups (Gap & Go / ORB) ---
             # Using synchronous wrapper or ensuring it runs in the right context
             # Since this is a callback, we handle the async call carefully
             try:
                 import asyncio
-                morning_setups = asyncio.run_coroutine_threadsafe(
-                    self.early_morning_agent.scan_for_setups({symbol: adjusted}),
-                    asyncio.get_event_loop()
-                ).result()
+                loop = asyncio.new_event_loop()
+                try:
+                    morning_setups = loop.run_until_complete(
+                        self.early_morning_agent.scan_for_setups({symbol: adjusted})
+                    )
+                finally:
+                    loop.close()
                 
                 for sugg in morning_setups:
                     if "GAP_AND_GO" in sugg.tags:
@@ -1148,13 +1340,36 @@ class LiveMarketDataService:
         valid_df = _valid_supertrend_rows(df)
         if valid_df.empty:
             return
-        last_bar = valid_df.iloc[-1]
-        bar_time = valid_df.index[-1]
+        
+        current_date = self._today_ist()
+        today_df = valid_df[valid_df.index.date == current_date]
+        if today_df.empty:
+            return
+            
+        last_bar = today_df.iloc[-1]
+        bar_time = today_df.index[-1]
+        
         if self.last_processed_trend_bar_time[symbol] == bar_time:
             return
+            
         current_trend = int(last_bar["supertrend_direction"])
-        previous_bar = valid_df.iloc[-2] if len(valid_df) >= 2 else None
+        
+        # Locate the last bar index in full valid_df to find previous trend (could be yesterday's last bar)
+        try:
+            import numpy as np
+            idx_loc = valid_df.index.get_loc(bar_time)
+            if isinstance(idx_loc, slice):
+                idx_val = idx_loc.start
+            elif isinstance(idx_loc, (np.ndarray, list)):
+                idx_val = int(idx_loc[0])
+            else:
+                idx_val = int(idx_loc)
+            previous_bar = valid_df.iloc[idx_val - 1] if idx_val > 0 else None
+        except Exception:
+            previous_bar = None
+            
         previous_trend = int(previous_bar["supertrend_direction"]) if previous_bar is not None else self.last_trend[symbol]
+        
         self._check_supertrend_touch(symbol, last_bar, bar_time)
         if self.last_signal_bar_time[symbol] != bar_time and previous_trend is not None and current_trend != previous_trend:
             close_price = float(last_bar["close"])
@@ -1190,43 +1405,120 @@ class LiveMarketDataService:
             except Exception as e:
                 LOGGER.warning(f"Failed to calculate 15m ST for trend alert: {e}")
 
-
-            # --- Strike Price Context ---
+            # --- Strike Price Context (CE + PE for 5 adjacent strikes) ---
             strike_info = ""
             clean_sym = symbol.replace("NSE:", "").replace("-INDEX", "").replace("BSE:", "")
             oc_analysis = self.latest_oc_analysis.get(clean_sym)
-            history_df = self.prev_oc_df.get(clean_sym) if self.prev_oc_df else None
             
-            if oc_analysis and history_df is not None:
+            current_oc_df = None
+            if clean_sym in self.oc_analyzers:
                 try:
-                    atm = int(oc_analysis.get("atm", 0))
-                    opt_type = "CE" if current_trend == 1 else "PE"
+                    current_oc_df = self.oc_analyzers[clean_sym].get_option_chain_df()
+                except Exception:
+                    pass
+            if current_oc_df is None or current_oc_df.empty:
+                current_oc_df = self.prev_oc_df.get(clean_sym)
 
-                    strikes = self._select_adjacent_option_chain_strikes(history_df, atm, opt_type, count=5)
-                    strike_lines = []
-                    for s in strikes:
-                        res = self._calculate_option_chain_strike_supertrend(history_df, s, opt_type)
-                        if res:
-                            st_dir = res["direction"]
-                            st_icon = "🟢" if st_dir == 1 else "🔴"
-                            ltp = res["ltp"]
-                            strike_lines.append(f"  {st_icon} {s}{opt_type}: ₹{ltp:.1f}")
+            if current_oc_df is not None and not current_oc_df.empty:
+                try:
+                    # Derive ATM from OC analysis, or fall back to rounding close_price to nearest 50
+                    if oc_analysis and oc_analysis.get("atm", 0):
+                        atm = int(oc_analysis.get("atm", 0))
+                    else:
+                        step = 100 if close_price > 40000 else 50  # BankNifty uses 100, Nifty uses 50
+                        atm = int(round(close_price / step) * step)
 
-                    if strike_lines:
-                        strike_info = "\n\n<b>Option Strikes (ST Context):</b>\n" + "\n".join(strike_lines)
+                    # Fetch 5 adjacent strikes for both CE and PE using current OC snapshot
+                    ce_strikes = self._select_adjacent_option_chain_strikes(current_oc_df, atm, "CE", count=5)
+                    pe_strikes = self._select_adjacent_option_chain_strikes(current_oc_df, atm, "PE", count=5)
+
+                    # Load historical option chain data from the CSV file
+                    date_str = bar_time.strftime("%Y%m%d")
+                    history_path = self.settings.option_chain_data_dir / f"{clean_sym}_strikes_{date_str}.csv"
+                    history_df = self._load_option_chain_history(history_path)
+
+                    if not history_df.empty:
+                        def _build_strike_lines(strikes: list, opt_type: str) -> list[str]:
+                            lines = []
+                            for s in strikes:
+                                res = self._calculate_option_chain_strike_supertrend(history_df, s, opt_type)
+                                if res:
+                                    st_dir = res["direction"]
+                                    st_icon = "🟢" if st_dir == 1 else "🔴"
+                                    ltp = res["ltp"]
+                                    st_lvl = res.get("st_level")
+                                    atm_tag = " ◀ATM" if s == atm else ""
+                                    st_str = f" ST:{st_lvl:.1f}" if st_lvl else ""
+                                    lines.append(f"  {st_icon} <b>{s}{opt_type}</b> ₹{ltp:.1f}{st_str}{atm_tag}")
+                            return lines
+
+                        ce_lines = _build_strike_lines(ce_strikes, "CE")
+                        pe_lines = _build_strike_lines(pe_strikes, "PE")
+
+                        if ce_lines or pe_lines:
+                            parts = [f"\n\n<b>OI Snapshot (ATM {atm}) — 5 Strikes Each</b>"]
+                            if ce_lines:
+                                parts.append(f"<b>CALL (CE):</b>\n" + "\n".join(ce_lines))
+                            if pe_lines:
+                                parts.append(f"<b>PUT (PE):</b>\n" + "\n".join(pe_lines))
+                            parts.append("🟢=ST Bullish  🔴=ST Bearish")
+                            strike_info = "\n".join(parts)
                 except Exception as e:
                     LOGGER.warning(f"Failed to build strike info for trend alert: {e}")
 
-            self.notifier.send(
-                f"{color} <b>{self._short_symbol(symbol)} {bar_time.strftime('%H:%M')}</b>\n"
-                f"Direction changed to <b>{'UP' if current_trend == 1 else 'DOWN'}</b> ({self.strategy_timeframe_minutes}m)\n"
-                f"15m Trend: <b>{st_15_dir_str}</b>\n"
-                f"Close: ₹{close_price:.2f}\n"
-                f"Supertrend: ₹{supertrend_val:.2f}\n"
-                f"Confluence: <b>{confluence_label}</b>\n"
-                f"Action: <b>{action}</b>"
-                f"{strike_info}"
-            )
+            try:
+                # ── Main channel message (concise) ──────────────────────────────
+                main_msg = (
+                    f"{color} <b>{self._short_symbol(symbol)} {bar_time.strftime('%H:%M')}</b>\n"
+                    f"Direction changed to <b>{'UP' if current_trend == 1 else 'DOWN'}</b> ({self.strategy_timeframe_minutes}m)\n"
+                    f"15m Trend: <b>{st_15_dir_str}</b>\n"
+                    f"Close: ₹{close_price:.2f}\n"
+                    f"Supertrend: ₹{supertrend_val:.2f}\n"
+                    f"Confluence: <b>{confluence_label}</b>\n"
+                    f"Action: <b>{action}</b>"
+                    f"{strike_info}"
+                )
+                self.notifier.send(main_msg)
+
+                # ── ST_CONFIRMED channel — rich message with strike ST directions ─
+                confirmed_strike_block = strike_info  # reuse the CE/PE block built above
+                if not confirmed_strike_block and current_oc_df is not None and not current_oc_df.empty:
+                    # Attempt a wider 7-strike build specifically for the confirmed channel
+                    try:
+                        date_str_c = bar_time.strftime("%Y%m%d")
+                        hist_path_c = self.settings.option_chain_data_dir / f"{clean_sym}_strikes_{date_str_c}.csv"
+                        hist_c = self._load_option_chain_history(hist_path_c)
+                        if not hist_c.empty:
+                            ce7 = self._select_adjacent_option_chain_strikes(current_oc_df, atm, "CE", count=7)
+                            pe7 = self._select_adjacent_option_chain_strikes(current_oc_df, atm, "PE", count=7)
+                            ce7_lines = self._build_option_chain_strike_lines(hist_c, ce7, "CE", atm)
+                            pe7_lines = self._build_option_chain_strike_lines(hist_c, pe7, "PE", atm)
+                            if ce7_lines and pe7_lines:
+                                confirmed_strike_block = (
+                                    f"\n\n<b>Strike Supertrend (ATM {atm}) — 7 Strikes Each</b>\n"
+                                    f"━━━━━━━━━━━━\n"
+                                    f"<b>CALL (CE) Supertrend:</b>\n{ce7_lines}\n"
+                                    f"━━━━━━━━━━━━\n"
+                                    f"<b>PUT (PE) Supertrend:</b>\n{pe7_lines}\n"
+                                    f"━━━━━━━━━━━━\n"
+                                    f"🟢=ST Bullish  🔴=ST Bearish"
+                                )
+                    except Exception as _cse:
+                        LOGGER.warning("Failed to build extended strike block for confirmed channel: %s", _cse)
+
+                confirmed_msg = (
+                    f"{color} <b>⚡ ST FLIP — {self._short_symbol(symbol)} {bar_time.strftime('%H:%M')}</b>\n"
+                    f"Timeframe: <b>{self.strategy_timeframe_minutes}m Supertrend</b>\n"
+                    f"New Direction: <b>{'🟢 UP (BULLISH)' if current_trend == 1 else '🔴 DOWN (BEARISH)'}</b>\n"
+                    f"15m Trend Alignment: <b>{st_15_dir_str}</b>\n"
+                    f"Close: ₹{close_price:.2f}  |  ST Level: ₹{supertrend_val:.2f}\n"
+                    f"Confluence: <b>{confluence_label}</b>\n"
+                    f"Suggested Action: <b>{action}</b>"
+                    f"{confirmed_strike_block}"
+                )
+                self.confirmed_notifier.send(confirmed_msg)
+            except Exception as e:
+                LOGGER.exception(f"Failed to process trend change alert: {e}")
 
             LOGGER.info(
                 "Supertrend crossover for %s at %s | trend=%s close=%.2f st=%.2f",
@@ -1483,13 +1775,13 @@ class LiveMarketDataService:
                     now = self._now_ist()
                     # Only run between 9:15 and 15:30
                     if self._parse_clock(self.settings.market_start) <= now.time() < self._parse_clock(self.settings.market_end):
-                        breakouts = self.breakout_screener.scan_for_breakouts()
+                        breakouts = self.breakout_screener.scan_for_breakouts(use_sector_filter=False)
                         if breakouts:
                             self._send_breakout_alerts(breakouts)
                 except Exception as e:
                     LOGGER.error(f"Error in breakout screener loop: {e}")
                 
-                time.sleep(300) # Wait 5 minutes before checking again
+                time.sleep(300)
                 
         self.breakout_thread = threading.Thread(target=_breakout_loop, daemon=True)
         self.breakout_thread.start()
@@ -1499,6 +1791,16 @@ class LiveMarketDataService:
         alerts_to_send = []
         for b in breakouts:
             sym = b['symbol']
+            
+            # For FO stocks (non-indices), only alert if volume surge is > 2.0
+            if "-INDEX" not in sym:
+                vol_sma = b.get('vol_sma', 0.0)
+                vol = b.get('volume', 0.0)
+                if vol_sma > 0:
+                    surge = vol / vol_sma
+                    if surge <= 2.0:
+                        continue
+                        
             if sym in self.last_breakout_alerts:
                 if (now - self.last_breakout_alerts[sym]).total_seconds() < 3600:
                     continue
@@ -1512,35 +1814,33 @@ class LiveMarketDataService:
         long_alerts = [b for b in alerts_to_send if b.get('direction', 'LONG') == 'LONG']
         short_alerts = [b for b in alerts_to_send if b.get('direction') == 'SHORT']
         
-        lines = []
+        # Helper to send in chunks of 5 alerts to respect Telegram's length limits
+        def send_chunked(alerts, title_prefix, icon):
+            chunk_size = 5
+            for i in range(0, len(alerts), chunk_size):
+                chunk = alerts[i:i+chunk_size]
+                lines = [
+                    f"{icon} <b>{title_prefix} (Part {i//chunk_size + 1})</b>",
+                    f"Time: {now.strftime('%H:%M')}",
+                    ""
+                ]
+                for b in chunk:
+                    clean_sym = b['symbol'].replace("NSE:", "").replace("-EQ", "")
+                    lines.append(f"{icon} <b>{clean_sym}</b> ({b['sector']})")
+                    if b.get('direction', 'LONG') == 'LONG':
+                        lines.append(f"Breakout Spot: ₹{b['close']:.2f} (Above ORB: ₹{b['orb_high']:.2f})")
+                    else:
+                        lines.append(f"Breakdown Spot: ₹{b['close']:.2f} (Below ORB: ₹{b['orb_low']:.2f})")
+                    lines.append(f"Volume Surge: {b['volume']/b['vol_sma']:.1f}x (vs 20SMA {b['vol_sma']:.0f})")
+                    lines.append("")
+                
+                self.notifier.send("\n".join(lines))
         
         if long_alerts:
-            lines.extend([
-                f"🚀 <b>[LIVE SECTOR BREAKOUT — LONG]</b>",
-                f"Time: {now.strftime('%H:%M')}",
-                ""
-            ])
-            for b in long_alerts:
-                clean_sym = b['symbol'].replace("NSE:", "").replace("-EQ", "")
-                lines.append(f"📈 <b>{clean_sym}</b> ({b['sector']})")
-                lines.append(f"Breakout Spot: ₹{b['close']:.2f} (Above ORB: ₹{b['orb_high']:.2f})")
-                lines.append(f"Volume Surge: {b['volume']/b['vol_sma']:.1f}x (vs 20SMA {b['vol_sma']:.0f})")
-                lines.append("")
-                
+            send_chunked(long_alerts, "[LIVE SECTOR BREAKOUT — LONG]", "📈")
         if short_alerts:
-            lines.extend([
-                f"💥 <b>[LIVE SECTOR BREAKDOWN — SHORT]</b>",
-                f"Time: {now.strftime('%H:%M')}",
-                ""
-            ])
-            for b in short_alerts:
-                clean_sym = b['symbol'].replace("NSE:", "").replace("-EQ", "")
-                lines.append(f"📉 <b>{clean_sym}</b> ({b['sector']})")
-                lines.append(f"Breakdown Spot: ₹{b['close']:.2f} (Below ORB: ₹{b['orb_low']:.2f})")
-                lines.append(f"Volume Surge: {b['volume']/b['vol_sma']:.1f}x (vs 20SMA {b['vol_sma']:.0f})")
-                lines.append("")
-                
-        self.notifier.send("\n".join(lines))
+            send_chunked(short_alerts, "[LIVE SECTOR BREAKDOWN — SHORT]", "📉")
+            
         LOGGER.info(f"Sent Live Breakout/Breakdown alerts for {len(alerts_to_send)} symbols.")
 
     def _start_option_chain_thread(self) -> None:
@@ -2032,14 +2332,7 @@ class LiveMarketDataService:
             )
         return lines
 
-    def _ensure_broker_session(self) -> None:
-        try:
-            self.broker.verify_session()
-        except Exception as exc:
-            LOGGER.warning("Fyers session invalid (%s). Refreshing token via TOTP helper...", exc)
-            if not self._refresh_token_via_totp():
-                raise
-            self.broker.verify_session()
+
 
     def _refresh_token_via_totp(self) -> bool:
         script_path = Path(__file__).resolve().parents[4] / "scripts" / "authenticate_fyers_totp.py"
@@ -2104,6 +2397,30 @@ class LiveMarketDataService:
                 lines.extend(self._build_ict_eod_lines(symbol))
                 self._write_ict_eod_trade_log(symbol, trade_date)
         self.notifier.send("\n".join(lines))
+
+        # Trigger EOD Post-Market Swarm Analysis automatically
+        try:
+            LOGGER.info("Market closed. Triggering Post-Market Swarm Analysis...")
+            from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+            improver = PostMarketImproverAgent(broker=self.broker)
+            import asyncio
+            import threading
+            
+            def run_in_thread():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Run the async post-market analysis
+                    loop.run_until_complete(improver.run_post_market_analysis())
+                    LOGGER.info("✅ Post-Market Swarm Analysis successfully run.")
+                except Exception as ex:
+                    LOGGER.error(f"EOD Post-Market Swarm Analysis failed: {ex}")
+                finally:
+                    loop.close()
+            
+            threading.Thread(target=run_in_thread, name="EOD_Swarm_Analysis", daemon=True).start()
+        except Exception as e:
+            LOGGER.error(f"Failed to trigger Post-Market Swarm Analysis: {e}")
 
     def _write_ict_eod_trade_log(self, symbol: str, trade_date: date) -> None:
         trades = self.ict_trades[symbol]

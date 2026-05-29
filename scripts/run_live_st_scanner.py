@@ -124,7 +124,7 @@ class ContinuousStScanner:
         for s in suggestions:
             dir_icon = "🟢" if s.direction.value == "CALL" else "🔴"
             report.append(
-                f" • {dir_icon} <b>{s.symbol.split(':')[-1]}</b>\n"
+                f" • {dir_icon} <b>{s.symbol.split(':')[-1]}</b> ({s.direction.value})\n"
                 f"   Conf: {s.confidence:.0%} | {s.sector}"
             )
         

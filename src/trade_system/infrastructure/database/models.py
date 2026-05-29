@@ -468,3 +468,25 @@ class AgentThought(Base):
         Index("idx_thought_agent", "agent_name"),
     )
 
+
+class ConsolidationWatchlistStock(Base):
+    """Stocks identified as squeezed/consolidating, to be monitored for live breakouts."""
+    
+    __tablename__ = "consolidation_watchlist_stocks"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(String, nullable=False)  # YYYY-MM-DD (the date it was scanned/identified)
+    symbol = Column(String, nullable=False)
+    resistance = Column(Float, nullable=False)
+    support = Column(Float, nullable=False)
+    bbw = Column(Float, nullable=False)
+    atr = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index("idx_consolidation_watchlist_lookup", "date", "symbol", unique=True),
+        Index("idx_consolidation_watchlist_symbol", "symbol"),
+    )
+
+
