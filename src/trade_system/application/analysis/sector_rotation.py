@@ -51,7 +51,7 @@ class SectorRotationAnalyzer:
             if raw_df.empty: return pd.DataFrame()
 
             # Normalize timestamps
-            raw_df['date'] = pd.to_datetime(raw_df['timestamp']).dt.date.astype(str)
+            raw_df['date'] = pd.to_datetime(raw_df['timestamp'], format='mixed').dt.date.astype(str)
             raw_df['sector'] = raw_df['symbol'].map(mapping)
             
             # 4. Aggregate to Sector Closes (Mean of percentage changes)
@@ -92,7 +92,7 @@ class SectorRotationAnalyzer:
         with self.engine.connect() as conn:
             df = pd.read_sql(query, conn, params={"symbol": symbol, "limit": days})
         # Convert timestamp to date string for join
-        df['timestamp'] = pd.to_datetime(df['timestamp']).dt.date.astype(str)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed').dt.date.astype(str)
         return df
 
 if __name__ == "__main__":

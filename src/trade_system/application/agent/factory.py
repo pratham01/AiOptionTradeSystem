@@ -42,7 +42,7 @@ def build_orchestrator(settings: Settings | None = None) -> TradeOrchestrator:
         market_context_agent=MarketContextAgent(event_bus=event_bus),
         option_chain_agent=OptionChainAgent(broker=broker, event_bus=event_bus),
         nifty_agent=NiftyOptionBuyerAgent(broker=broker, settings=settings),
-        fo_suggester_agent=FoStockSuggesterAgent(broker=broker),
-        setup_validator=SetupValidatorAgent(broker=broker),
+        fo_suggester_agent=FoStockSuggesterAgent(broker=broker, settings=settings),
+        setup_validator=SetupValidatorAgent(broker=broker, settings=settings),
         max_trades_per_day=2,
     )

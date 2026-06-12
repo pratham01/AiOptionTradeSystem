@@ -26,41 +26,88 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# --- CACHED DATA LOADING ---
+@st.cache_data(ttl=600)
+def cached_load_strategy_summaries(root_path):
+    return load_strategy_summaries(root_path)
+
+@st.cache_data(ttl=600)
+def cached_load_strategy_trades(root_path, strategy):
+    return load_strategy_trades(root_path, strategy)
+
+@st.cache_data(ttl=600)
+def cached_load_agent_lab_runs(root_path):
+    return load_agent_lab_runs(root_path)
+
+@st.cache_data(ttl=600)
+def cached_load_agent_lab_detail(root_path, run_name):
+    return load_agent_lab_detail(root_path, run_name)
+
+
 def main():
     st.title("📈 Strategy Analytics Studio")
     st.caption("Quantum performance analysis and AI-driven strategy optimizations.")
 
-    # 1. Load Data
-    summaries = load_strategy_summaries(ROOT)
+    # 1. Load Data (Cached)
+    summaries = cached_load_strategy_summaries(ROOT)
     if summaries.empty:
         st.warning("No backtest results found. Run a backtest ritual first.")
+        return
+
+    # --- SIDEBAR FILTERS ---
+    st.sidebar.header("🎯 Strategy Filters")
+    
+    # Year Filter
+    available_years = sorted([int(y) for y in summaries['year'].dropna().unique()])
+    year_options = ["All Years"] + [str(y) for y in available_years]
+    selected_year = st.sidebar.selectbox("Filter by Year", year_options)
+    
+    # Family Filter
+    available_families = sorted(summaries['family'].unique())
+    family_options = ["All Families"] + list(available_families)
+    selected_family = st.sidebar.selectbox("Filter by Strategy Family", family_options)
+    
+    # Apply Filters
+    filtered_summaries = summaries.copy()
+    if selected_year != "All Years":
+        filtered_summaries = filtered_summaries[filtered_summaries['year'] == int(selected_year)]
+    if selected_family != "All Families":
+        filtered_summaries = filtered_summaries[filtered_summaries['family'] == selected_family]
+        
+    if filtered_summaries.empty:
+        st.warning("No strategy matches the selected filters. Please select different options.")
         return
 
     # 2. Hero Overview (Tournament Leaderboard)
     st.markdown("### 🏆 Strategy Leaderboard")
     
     # Calculate global ranking
-    summaries['Score'] = (summaries['win_rate'] / 100 * 0.4) + (summaries['profit_factor'] * 0.6)
-    ranked = summaries.sort_values("Score", ascending=False).reset_index(drop=True)
+    filtered_summaries['Score'] = (filtered_summaries['win_rate'] / 100 * 0.4) + (filtered_summaries['profit_factor'] * 0.6)
+    max_score = filtered_summaries['Score'].max()
+    if pd.isna(max_score) or max_score <= 0:
+        max_score = 1.0
+        
+    ranked = filtered_summaries.sort_values("Score", ascending=False).reset_index(drop=True)
     
     top_strat = ranked.iloc[0]
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Top Performer", top_strat['strategy'], delta=f"PF: {top_strat['profit_factor']:.2f}")
-    c2.metric("Best Net PnL", f"{summaries['net_points'].max():.2f} pts")
-    c3.metric("Peak Win Rate", f"{summaries['win_rate'].max():.1f}%")
-    c4.metric("Active Strategies", len(summaries['strategy'].unique()))
+    c2.metric("Best Net PnL", f"{filtered_summaries['net_points'].max():.2f} pts")
+    c3.metric("Peak Win Rate", f"{filtered_summaries['win_rate'].max():.1f}%")
+    c4.metric("Active Strategies", len(filtered_summaries['strategy'].unique()))
 
     # Tournament Table
     st.dataframe(
-        ranked[['strategy', 'family', 'trades', 'win_rate', 'net_points', 'profit_factor', 'Score']],
+        ranked[['strategy', 'family', 'year', 'trades', 'win_rate', 'net_points', 'profit_factor', 'Score']],
         use_container_width=True,
         hide_index=True,
         column_config={
+            "year": st.column_config.NumberColumn("Year", format="%d"),
             "win_rate": st.column_config.NumberColumn("Win Rate", format="%.1f%%"),
             "net_points": st.column_config.NumberColumn("Net PnL", format="%.2f"),
             "profit_factor": st.column_config.NumberColumn("PF", format="%.2f"),
-            "Score": st.column_config.ProgressColumn("Rank Score", min_value=0, max_value=max(ranked['Score']))
+            "Score": st.column_config.ProgressColumn("Rank Score", min_value=0, max_value=float(max_score))
         }
     )
 
@@ -72,7 +119,7 @@ def main():
     with col_v1:
         # Scatter: Risk vs Reward
         fig_scatter = px.scatter(
-            summaries, x="win_rate", y="profit_factor", size="trades", color="family",
+            filtered_summaries, x="win_rate", y="profit_factor", size="trades", color="family",
             hover_name="strategy", title="Win Rate vs. Profit Factor (Bubble = Trade Vol)",
             labels={"win_rate": "Win Rate %", "profit_factor": "Profit Factor"},
             color_discrete_sequence=px.colors.qualitative.Pastel
@@ -83,7 +130,7 @@ def main():
     with col_v2:
         # Bar: Total Points by Strategy
         fig_bar = px.bar(
-            summaries.sort_values("net_points"), x="net_points", y="strategy", color="family",
+            filtered_summaries.sort_values("net_points"), x="net_points", y="strategy", color="family",
             orientation='h', title="Total Net Points Captured",
             color_discrete_sequence=px.colors.qualitative.Pastel
         )
@@ -94,10 +141,10 @@ def main():
     st.markdown("---")
     st.subheader("🔍 Individual Strategy Deep-Dive")
     
-    selected_strat = st.selectbox("Select Strategy to Audit", summaries['strategy'].unique(), index=0)
+    selected_strat = st.selectbox("Select Strategy to Audit", filtered_summaries['strategy'].unique(), index=0)
     
     if selected_strat:
-        trades_df = load_strategy_trades(ROOT, selected_strat)
+        trades_df = cached_load_strategy_trades(ROOT, selected_strat)
         if not trades_df.empty:
             trades_df = trades_df.sort_values('entry_time')
             trades_df['cum_pnl'] = trades_df['points_captured'].cumsum()
@@ -160,14 +207,14 @@ def main():
     # 5. AI Research Lab
     st.markdown("---")
     st.subheader("🧪 AI Optimization Lab")
-    lab_runs = load_agent_lab_runs(ROOT)
+    lab_runs = cached_load_agent_lab_runs(ROOT)
     
     if not lab_runs.empty:
         run_col1, run_col2 = st.columns([1, 2])
         selected_run = run_col1.selectbox("Select Optimization Run", lab_runs['run_name'].tolist())
         
         if selected_run:
-            detail = load_agent_lab_detail(ROOT, selected_run)
+            detail = cached_load_agent_lab_detail(ROOT, selected_run)
             with run_col1:
                 st.markdown("#### Baseline vs. Upgraded")
                 st.dataframe(detail['comparison'], hide_index=True, use_container_width=True)

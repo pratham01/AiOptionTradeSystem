@@ -393,27 +393,42 @@ class AbstractOhlcv:
 
 class Ohlcv1m(Base, AbstractOhlcv):
     __tablename__ = "ohlcv_1m"
-    __table_args__ = (Index("idx_ohlcv_1m_lookup", "symbol", "timestamp", unique=True),)
+    __table_args__ = (
+        Index("idx_ohlcv_1m_lookup", "symbol", "timestamp", unique=True),
+        Index("idx_ohlcv_1m_timestamp", "timestamp"),
+    )
 
 
 class Ohlcv3m(Base, AbstractOhlcv):
     __tablename__ = "ohlcv_3m"
-    __table_args__ = (Index("idx_ohlcv_3m_lookup", "symbol", "timestamp", unique=True),)
+    __table_args__ = (
+        Index("idx_ohlcv_3m_lookup", "symbol", "timestamp", unique=True),
+        Index("idx_ohlcv_3m_timestamp", "timestamp"),
+    )
 
 
 class Ohlcv5m(Base, AbstractOhlcv):
     __tablename__ = "ohlcv_5m"
-    __table_args__ = (Index("idx_ohlcv_5m_lookup", "symbol", "timestamp", unique=True),)
+    __table_args__ = (
+        Index("idx_ohlcv_5m_lookup", "symbol", "timestamp", unique=True),
+        Index("idx_ohlcv_5m_timestamp", "timestamp"),
+    )
 
 
 class Ohlcv15m(Base, AbstractOhlcv):
     __tablename__ = "ohlcv_15m"
-    __table_args__ = (Index("idx_ohlcv_15m_lookup", "symbol", "timestamp", unique=True),)
+    __table_args__ = (
+        Index("idx_ohlcv_15m_lookup", "symbol", "timestamp", unique=True),
+        Index("idx_ohlcv_15m_timestamp", "timestamp"),
+    )
 
 
 class OhlcvDaily(Base, AbstractOhlcv):
     __tablename__ = "ohlcv_daily"
-    __table_args__ = (Index("idx_ohlcv_daily_lookup", "symbol", "timestamp", unique=True),)
+    __table_args__ = (
+        Index("idx_ohlcv_daily_lookup", "symbol", "timestamp", unique=True),
+        Index("idx_ohlcv_daily_timestamp", "timestamp"),
+    )
 
 
 class OptionChainSnapshot(Base):
@@ -446,6 +461,7 @@ class OptionChainSnapshot(Base):
     __table_args__ = (
         Index("idx_option_lookup", "underlying_symbol", "timestamp"),
         Index("idx_option_symbol", "symbol"),
+        Index("idx_option_timestamp", "timestamp"),
     )
 
 

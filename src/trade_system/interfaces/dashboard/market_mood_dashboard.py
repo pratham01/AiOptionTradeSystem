@@ -12,56 +12,27 @@ from trade_system.infrastructure.data.fo_universe import FO_METADATA, get_fo_uni
 from trade_system.application.indicators.volume_delta import VolumeDeltaIndicator
 from trade_system.application.indicators.volume_profile import VolumeProfileIndicator
 from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 
 LOGGER = logging.getLogger(__name__)
 
 # Constants
 PALETTE = ["#00b4d8", "#ff4d6d", "#2d6a4f", "#f77f00"]
 
-@st.cache_resource
-def get_broker():
-    settings = Settings.load()
-    auth_service = FyersAuthService(settings)
-    
-    # Use shared daily token
-    token = auth_service.get_valid_token()
-    
-    if not token:
-        st.error("Fyers token could not be retrieved. Please check TOTP configuration.")
-        return None
-        
-    broker = FyersBroker(
-        client_id=settings.fyers.client_id,
-        access_token=token,
-        user_id=settings.fyers.user_id,
-        authenticator=auth_service.authenticator
-    )
-    
-    try:
-        if not broker.authenticate():
-            # Force once-per-day TOTP refresh if cached token fails
-            new_token = auth_service.get_valid_token(force_refresh=True)
-            if new_token:
-                broker.access_token = new_token
-                if not broker.authenticate(): return None
-            else:
-                return None
-    except Exception as e:
-        st.error(f"Fyers connection error: {e}")
-        return None
-        
-    return broker
 
-def fetch_sector_data(broker, sector):
+def get_broker():
+    """Return the shared cached broker instance."""
+    return get_cached_broker()
+
+@st.cache_data(ttl=60)
+def fetch_sector_data(_broker, sector):
     """Safely fetch sector stocks and quotes."""
     try:
         symbols = get_stocks_by_sector(sector)
         if not symbols:
             return pd.DataFrame()
         
-        quotes = broker.get_quotes(symbols)
+        quotes = _broker.get_quotes(symbols)
         data = []
         for sym, q in quotes.items():
             data.append({
@@ -77,7 +48,7 @@ def fetch_sector_data(broker, sector):
         LOGGER.error(f"Sector data fetch failed for {sector}: {e}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=601)
+@st.cache_data(ttl=60)
 def fetch_market_rankings(_broker):
     """Safely aggregate performance of all F&O stocks with DB fallback."""
     mapping = get_sector_mapping()
@@ -194,6 +165,7 @@ def fetch_stock_details(broker, symbol):
         LOGGER.error(f"Failed to fetch stock details for {symbol}: {e}")
         return None, None, None
 
+@st.cache_data(ttl=600)
 def get_rsi_label(symbol):
     try:
         from trade_system.infrastructure.database.connection import get_engine
@@ -215,6 +187,119 @@ def get_rsi_label(symbol):
             if val < 30: return " 🛡️ [OS]"
     except: pass
     return ""
+
+@st.fragment
+def render_stock_deep_dive(_broker, top_symbol):
+    try:
+        df_5m, profile, _ = fetch_stock_details(_broker, top_symbol)
+        if df_5m is not None and not df_5m.empty:
+            latest = df_5m.iloc[-1]
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Current Price", f"₹{latest['close']:.2f}")
+            c2.metric("CVD", f"{latest.get('cvd', 0.0):,.0f}")
+            is_comp = latest.get('is_compressed', False)
+            comp_score = latest.get('range_compression', 0.0)
+            comp_color = "normal" if is_comp else "off"
+            c3.metric("Compression", f"{comp_score:.1f}%", delta_color=comp_color)
+
+            vwap_val = latest.get('vwap', latest['close'])
+            dist_vwap = ((latest['close'] - vwap_val) / vwap_val) * 100
+            c4.metric("VWAP Dist", f"{dist_vwap:+.2f}%")
+
+            # --- MWPL & FVG Context ---
+            st.write("")
+            m1, m2, m3 = st.columns(3)
+
+            # MWPL
+            try:
+                from trade_system.application.analysis.mwpl_analyzer import MwplAnalyzer
+                mw_analyzer = MwplAnalyzer()
+                mw_data = mw_analyzer.get_mwpl_data()
+                clean_sym = top_symbol.replace("NSE:", "").replace("-EQ", "")
+                symbol_mwpl = mw_data[mw_data['SYMBOL'] == clean_sym]['MWPL_PCT'].iloc[0] if not mw_data.empty else 0.0
+
+                mw_color = "red" if symbol_mwpl > 90 else ("orange" if symbol_mwpl > 80 else "green")
+                m1.markdown(f"**MWPL Heat:** <span style='color:{mw_color}'>{symbol_mwpl:.1f}%</span>", unsafe_allow_html=True)
+            except:
+                m1.write("**MWPL Heat:** --")
+
+            # FVG
+            try:
+                from trade_system.application.indicators.retracement import RetracementIndicator
+                ret_ind = RetracementIndicator()
+                df_5m_calc = ret_ind.calculate(df_5m)
+                active_zones = ret_ind.get_active_zones(df_5m_calc)
+                fvg_count = sum(1 for z in active_zones if z.type == "FVG")
+                m2.markdown(f"**Active FVGs:** {fvg_count}")
+            except:
+                m2.write("**Active FVGs:** --")
+
+            # Supertrend
+            st_dir = latest.get('supertrend_direction', 0)
+            trend_text = "🟢 BULLISH" if st_dir == 1 else ("🔴 BEARISH" if st_dir == -1 else "⚪ NEUTRAL")
+            m3.markdown(f"**Trend:** {trend_text}")
+
+            # --- Liquidity Status ---
+            liq_col1, liq_col2 = st.columns(2)
+            try:
+                q_map = _broker.get_quotes([top_symbol])
+                q = q_map.get(top_symbol)
+                if q:
+                    bid = q.bid or latest['close'] * 0.999
+                    ask = q.ask or latest['close'] * 1.001
+                    spread = ((ask - bid) / latest['close']) * 100
+                    status = "✅ LIQUID" if spread < 0.5 else "⚠️ ILLIQUID"
+                    color = "green" if spread < 0.5 else "red"
+                    liq_col1.markdown(f"**Liquidity Status:** <span class='{color}'>{status}</span>", unsafe_allow_html=True)
+                    liq_col2.markdown(f"**Bid-Ask Spread:** `{spread:.2f}%` (Bid: ₹{bid:.2f} | Ask: ₹{ask:.2f})")
+            except: pass
+
+            tab1, tab2, tab3, tab4 = st.tabs(["Volume Delta & CVD", "VWAP & Price", "Compression Theory", "🧠 AI Deep Research"])
+            
+            with tab1:
+                fig_cvd = go.Figure()
+                fig_cvd.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['cvd'], name="CVD", line=dict(color="#00b4d8")))
+                if 'delta' in df_5m.columns:
+                    fig_cvd.add_trace(go.Bar(x=df_5m['timestamp'], y=df_5m['delta'], name="Delta", marker_color=np.where(df_5m['delta'] > 0, "#2d6a4f", "#c1121f")))
+                fig_cvd.update_layout(title=f"{top_symbol} Order Flow", height=400)
+                st.plotly_chart(fig_cvd, use_container_width=True, key=f"cvd_chart_{top_symbol}")
+
+            with tab2:
+                fig_price = go.Figure()
+                fig_price.add_trace(go.Candlestick(x=df_5m['timestamp'], open=df_5m['open'], high=df_5m['high'], low=df_5m['low'], close=df_5m['close'], name="Price"))
+                fig_price.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['vwap'], name="VWAP", line=dict(color="orange", width=2)))
+                fig_price.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['supertrend'], name="Supertrend", line=dict(color="magenta", width=1, dash="dot")))
+                if profile:
+                    fig_price.add_hline(y=profile.point_of_control, line_dash="dash", line_color="white", annotation_text="POC")
+                fig_price.update_layout(title=f"{top_symbol} Price vs VWAP & ST", height=400)
+                st.plotly_chart(fig_price, use_container_width=True, key=f"price_vwap_chart_{top_symbol}")
+
+            with tab3:
+                st.subheader("⚡ Sudden Move Predictor")
+                if 'range_compression' in df_5m.columns:
+                    fig_comp = go.Figure()
+                    fig_comp.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['range_compression'], name="Compression %", fill='tozeroy'))
+                    fig_comp.update_layout(title="Volatility Coiling Chart", height=400)
+                    st.plotly_chart(fig_comp, use_container_width=True, key=f"comp_chart_{top_symbol}")
+
+            with tab4:
+                st.subheader("🧠 AI Swarm Synthesis Deep-Dive")
+                if st.button(f"🔍 Perform Multi-Agent Research on {top_symbol}", key="multi_agent_research_btn"):
+                    with st.spinner("Executing Swarm Deep Research..."):
+                        try:
+                            from trade_system.application.agent.option_chain_agent import OptionChainAgent
+                            oc_agent = OptionChainAgent(_broker)
+                            import asyncio
+                            oc_analysis = asyncio.run(oc_agent.analyze(top_symbol))
+                            if oc_analysis:
+                                st.metric("PCR", f"{oc_analysis.pcr:.2f}")
+                        except Exception as e:
+                            st.error(f"Research failed: {e}")
+        else:
+            st.warning(f"Insufficient intraday data for {top_symbol}.")
+    except Exception as e:
+        st.error(f"Deep dive failed: {e}")
+
 
 # --- THEME & COMPACTNESS ---
 st.markdown("""
@@ -360,115 +445,7 @@ if broker:
                 top_symbol = st.selectbox("Deep Dive Stock", sector_df["FullSymbol"].tolist())
                 
                 if top_symbol:
-                    try:
-                        df_5m, profile, _ = fetch_stock_details(broker, top_symbol)
-                        if df_5m is not None and not df_5m.empty:
-                            latest = df_5m.iloc[-1]
-                            c1, c2, c3, c4 = st.columns(4)
-                            c1.metric("Current Price", f"₹{latest['close']:.2f}")
-                            c2.metric("CVD", f"{latest.get('cvd', 0.0):,.0f}")
-                            is_comp = latest.get('is_compressed', False)
-                            comp_score = latest.get('range_compression', 0.0)
-                            comp_color = "normal" if is_comp else "off"
-                            c3.metric("Compression", f"{comp_score:.1f}%", delta_color=comp_color)
-
-                            vwap_val = latest.get('vwap', latest['close'])
-                            dist_vwap = ((latest['close'] - vwap_val) / vwap_val) * 100
-                            c4.metric("VWAP Dist", f"{dist_vwap:+.2f}%")
-
-                            # --- MWPL & FVG Context ---
-                            st.write("")
-                            m1, m2, m3 = st.columns(3)
-
-                            # MWPL
-                            try:
-                                from trade_system.application.analysis.mwpl_analyzer import MwplAnalyzer
-                                mw_analyzer = MwplAnalyzer()
-                                mw_data = mw_analyzer.get_mwpl_data()
-                                clean_sym = top_symbol.replace("NSE:", "").replace("-EQ", "")
-                                symbol_mwpl = mw_data[mw_data['SYMBOL'] == clean_sym]['MWPL_PCT'].iloc[0] if not mw_data.empty else 0.0
-
-                                mw_color = "red" if symbol_mwpl > 90 else ("orange" if symbol_mwpl > 80 else "green")
-                                m1.markdown(f"**MWPL Heat:** <span style='color:{mw_color}'>{symbol_mwpl:.1f}%</span>", unsafe_allow_html=True)
-                            except:
-                                m1.write("**MWPL Heat:** --")
-
-                            # FVG
-                            try:
-                                from trade_system.application.indicators.retracement import RetracementIndicator
-                                ret_ind = RetracementIndicator()
-                                df_5m_calc = ret_ind.calculate(df_5m)
-                                active_zones = ret_ind.get_active_zones(df_5m_calc)
-                                fvg_count = sum(1 for z in active_zones if z.type == "FVG")
-                                m2.markdown(f"**Active FVGs:** {fvg_count}")
-                            except:
-                                m2.write("**Active FVGs:** --")
-
-                            # Supertrend
-                            st_dir = latest.get('supertrend_direction', 0)
-                            trend_text = "🟢 BULLISH" if st_dir == 1 else ("🔴 BEARISH" if st_dir == -1 else "⚪ NEUTRAL")
-                            m3.markdown(f"**Trend:** {trend_text}")
-
-                            # --- Liquidity Status ---
-                            liq_col1, liq_col2 = st.columns(2)
-                            try:
-                                q_map = broker.get_quotes([top_symbol])
-                                q = q_map.get(top_symbol)
-                                if q:
-                                    bid = q.bid or latest['close'] * 0.999
-                                    ask = q.ask or latest['close'] * 1.001
-                                    spread = ((ask - bid) / latest['close']) * 100
-                                    status = "✅ LIQUID" if spread < 0.5 else "⚠️ ILLIQUID"
-                                    color = "green" if spread < 0.5 else "red"
-                                    liq_col1.markdown(f"**Liquidity Status:** <span class='{color}'>{status}</span>", unsafe_allow_html=True)
-                                    liq_col2.markdown(f"**Bid-Ask Spread:** `{spread:.2f}%` (Bid: ₹{bid:.2f} | Ask: ₹{ask:.2f})")
-                            except: pass
-
-                            tab1, tab2, tab3, tab4 = st.tabs(["Volume Delta & CVD", "VWAP & Price", "Compression Theory", "🧠 AI Deep Research"])
-                            
-                            with tab1:
-                                fig_cvd = go.Figure()
-                                fig_cvd.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['cvd'], name="CVD", line=dict(color="#00b4d8")))
-                                if 'delta' in df_5m.columns:
-                                    fig_cvd.add_trace(go.Bar(x=df_5m['timestamp'], y=df_5m['delta'], name="Delta", marker_color=np.where(df_5m['delta'] > 0, "#2d6a4f", "#c1121f")))
-                                fig_cvd.update_layout(title=f"{top_symbol} Order Flow", height=400)
-                                st.plotly_chart(fig_cvd, use_container_width=True, key=f"cvd_chart_{top_symbol}")
-
-                            with tab2:
-                                fig_price = go.Figure()
-                                fig_price.add_trace(go.Candlestick(x=df_5m['timestamp'], open=df_5m['open'], high=df_5m['high'], low=df_5m['low'], close=df_5m['close'], name="Price"))
-                                fig_price.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['vwap'], name="VWAP", line=dict(color="orange", width=2)))
-                                fig_price.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['supertrend'], name="Supertrend", line=dict(color="magenta", width=1, dash="dot")))
-                                if profile:
-                                    fig_price.add_hline(y=profile.point_of_control, line_dash="dash", line_color="white", annotation_text="POC")
-                                fig_price.update_layout(title=f"{top_symbol} Price vs VWAP & ST", height=400)
-                                st.plotly_chart(fig_price, use_container_width=True, key=f"price_vwap_chart_{top_symbol}")
-
-                            with tab3:
-                                st.subheader("⚡ Sudden Move Predictor")
-                                if 'range_compression' in df_5m.columns:
-                                    fig_comp = go.Figure()
-                                    fig_comp.add_trace(go.Scatter(x=df_5m['timestamp'], y=df_5m['range_compression'], name="Compression %", fill='tozeroy'))
-                                    fig_comp.update_layout(title="Volatility Coiling Chart", height=400)
-                                    st.plotly_chart(fig_comp, use_container_width=True, key=f"comp_chart_{top_symbol}")
-
-                            with tab4:
-                                st.subheader("📡 Swarm Intelligence Deep-Dive")
-                                if st.button(f"🔍 Perform Multi-Agent Research on {top_symbol}", key="multi_agent_research_btn"):
-                                    with st.spinner("Executing Swarm Deep Research..."):
-                                        try:
-                                            from trade_system.application.agent.option_chain_agent import OptionChainAgent
-                                            oc_agent = OptionChainAgent(broker)
-                                            import asyncio
-                                            oc_analysis = asyncio.run(oc_agent.analyze(top_symbol))
-                                            if oc_analysis:
-                                                st.metric("PCR", f"{oc_analysis.pcr:.2f}")
-                                        except Exception as e:
-                                            st.error(f"Research failed: {e}")
-                        else:
-                            st.warning(f"Insufficient intraday data for {top_symbol}.")
-                    except Exception as e:
-                        st.error(f"Deep dive failed: {e}")
+                    render_stock_deep_dive(broker, top_symbol)
             else:
                 st.info(f"No active data for {selected_sector}.")
         except Exception as e:

@@ -166,19 +166,16 @@ class LiveMarketDataService:
         self.oc_running = False
         self.oc_analyzers: dict[str, Any] = {}
         self.prev_oc_df: dict[str, pd.DataFrame | None] = {
-            "NIFTY50": None,
-            "NIFTYBANK": None,
-            "SENSEX": None
+            self._short_symbol(sym): None for sym in settings.index_symbols
         }
         self.latest_oc_analysis: dict[str, Any | None] = {
-            "NIFTY50": None,
-            "NIFTYBANK": None,
-            "SENSEX": None
+            self._short_symbol(sym): None for sym in settings.index_symbols
         }
         self.last_option_chain_direction: dict[str, int | None] = {
-            "NIFTY50": None,
-            "NIFTYBANK": None,
-            "SENSEX": None
+            self._short_symbol(sym): None for sym in settings.index_symbols
+        }
+        self.expiry_max_pain_sent: dict[str, date | None] = {
+            self._short_symbol(sym): None for sym in settings.index_symbols
         }
 
         self.eod_summary_sent_for: date | None = None
@@ -491,6 +488,9 @@ class LiveMarketDataService:
         self.gap_alert_sent = {symbol: False for symbol in self.symbols}
         self.first_live_price = {symbol: None for symbol in self.symbols}
         self.last_level_alert_time = {symbol: {} for symbol in self.symbols}
+        self.expiry_max_pain_sent = {
+            self._short_symbol(sym): None for sym in self.settings.index_symbols
+        }
 
         self.ict_fvg = {symbol: FVGDetector() for symbol in self.symbols}
         self.ict_ob = {symbol: OrderBlockDetector() for symbol in self.symbols}
@@ -1851,7 +1851,7 @@ class LiveMarketDataService:
         self.oc_thread.start()
 
     def _run_option_chain_loop(self) -> None:
-        indices = ["NIFTY50", "NIFTYBANK", "SENSEX"]
+        indices = [self._short_symbol(sym) for sym in self.settings.index_symbols]
         while self.oc_running and not self.shutdown:
             try:
                 now = self._now_ist().replace(tzinfo=None)
@@ -1890,20 +1890,44 @@ class LiveMarketDataService:
             self._maybe_alert_option_chain_direction_change(symbol, analysis, spot_price, now, current_df)
             
             # 2. Monitor for sudden forensics shifts (VOI, PCR, IV Skew)
-            full_symbol = f"NSE:{symbol}-INDEX" if symbol != "SENSEX" else "BSE:SENSEX-INDEX"
+            full_symbol = f"BSE:{symbol}-INDEX" if symbol == "SENSEX" else f"NSE:{symbol}-INDEX"
             self.alert_agent.monitor_option_chain_changes(full_symbol, analysis)
+
+            # Expiry Max Pain Alert at 2 PM (14:00 IST)
+            if symbol in ["NIFTY50", "SENSEX"]:
+                today_str = now.strftime("%d-%m-%Y")
+                nearest_expiry = getattr(analyzer, "nearest_expiry", None)
+                if nearest_expiry == today_str:
+                    if now.time() >= dt_time(14, 0):
+                        if self.expiry_max_pain_sent.get(symbol) != now.date():
+                            max_pain = analysis.max_pain if analysis else None
+                            if max_pain:
+                                spot_str = f"₹{spot_price:.2f}" if spot_price else "N/A"
+                                msg = (
+                                    f"🎯 <b>{symbol} EXPIRY MAX PAIN</b>\n\n"
+                                    f"<b>Expiry Date:</b> {nearest_expiry}\n"
+                                    f"<b>Time:</b> {now.strftime('%H:%M:%S')}\n"
+                                    f"<b>Spot Price:</b> {spot_str}\n"
+                                    f"<b>Max Pain Strike:</b> ₹{max_pain:.1f}\n"
+                                )
+                                self.notifier.send(msg)
+                                self.confirmed_notifier.send(msg)
+                                LOGGER.info(f"Sent expiry Max Pain alert for {symbol}: Max Pain = {max_pain}")
+                                self.expiry_max_pain_sent[symbol] = now.date()
             
         self.prev_oc_df[symbol] = current_df.copy()
 
     def _get_option_chain_analyzer(self, symbol: str):
         if symbol in self.oc_analyzers:
-            return self.oc_analyzers[symbol]
+            analyzer = self.oc_analyzers[symbol]
+            analyzer.fyers = self.broker.fyers
+            return analyzer
         try:
             from trade_system.application.analysis.option_chain_analyzer import OptionChainAnalyzer
         except Exception:
             LOGGER.exception("Failed to import OptionChainAnalyzer.")
             return None
-        self.oc_analyzers[symbol] = OptionChainAnalyzer(fyers_client=self.broker.fyers, symbol=symbol.replace("NSE:", "").replace("-INDEX", ""), strike_count=20)
+        self.oc_analyzers[symbol] = OptionChainAnalyzer(fyers_client=self.broker.fyers, symbol=symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", ""), strike_count=20)
         return self.oc_analyzers[symbol]
 
     def _save_option_chain_snapshot(self, symbol: str, now: datetime, current_df: pd.DataFrame, spot_price: float | None, vix: float | None) -> None:
@@ -1925,7 +1949,7 @@ class LiveMarketDataService:
         try:
             with Session(self.engine) as session:
                 # underlying symbol is now dynamic
-                full_symbol = f"NSE:{symbol}-INDEX" if symbol != "SENSEX" else "BSE:SENSEX-INDEX"
+                full_symbol = f"BSE:{symbol}-INDEX" if symbol == "SENSEX" else f"NSE:{symbol}-INDEX"
                 db_records = current_df.to_dict('records')
                 from trade_system.infrastructure.database.repository import save_option_chain_batch
                 save_option_chain_batch(session, full_symbol, now, db_records)
@@ -2115,9 +2139,10 @@ class LiveMarketDataService:
             LOGGER.warning("Failed to read OC history %s: %s", path, exc)
             return pd.DataFrame()
 
-    def _load_previous_day_option_chain_snapshot(self, timestamp: datetime) -> pd.DataFrame:
+    def _load_previous_day_option_chain_snapshot(self, symbol: str, timestamp: datetime) -> pd.DataFrame:
         current_tag = timestamp.strftime("%Y%m%d")
-        candidates = sorted(self.settings.option_chain_data_dir.glob("NIFTY50_strikes_*.csv"))
+        clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "")
+        candidates = sorted(self.settings.option_chain_data_dir.glob(f"{clean_sym}_strikes_*.csv"))
         previous_files = [path for path in candidates if path.stem.split("_")[-1] < current_tag]
         if not previous_files:
             return pd.DataFrame()
@@ -2453,7 +2478,7 @@ class LiveMarketDataService:
 
     @staticmethod
     def _short_symbol(symbol: str) -> str:
-        return symbol.replace("NSE:", "").replace("-INDEX", "")
+        return symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "")
 
     @staticmethod
     def _parse_clock(value: str) -> dt_time:

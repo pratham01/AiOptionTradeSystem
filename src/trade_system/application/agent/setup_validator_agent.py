@@ -46,8 +46,10 @@ class SetupValidatorAgent:
         weight_evolver: WeightsProvider | None = None,
         llm_client: LlmAdvisorClient | None = None,
         min_rr: float = DEFAULT_RISK_REWARD_MIN,
+        settings: Any = None,
     ) -> None:
         self.broker = broker
+        self.settings = settings
         if weight_evolver is None:
             from trade_system.application.evolution.weight_evolver import WeightEvolver
             self.weight_evolver = WeightEvolver()
@@ -94,6 +96,32 @@ class SetupValidatorAgent:
         # --- Institutional Strategy Merge (High-Probability Filter) ---
         confidence, is_unified = self._apply_institutional_merge(candidate, market_context, confidence)
 
+        # Check for User-defined AI Directive and analyze alignment
+        user_directive = None
+        if market_context and hasattr(market_context, "metadata") and market_context.metadata:
+            user_directive = market_context.metadata.get("user_directive")
+
+        if user_directive and self.llm.configured():
+            alignment_prompt = (
+                f"You are a trading strategy auditor.\n"
+                f"Candidate Trade: {candidate.direction} on {candidate.symbol} ({candidate.pattern or 'Unknown'})\n"
+                f"Strategy Directive: '{user_directive}'\n\n"
+                f"Rate the alignment of this trade with the directive on a scale of 0.0 to 1.0 "
+                f"(1.0 = perfect alignment/satisfies it, 0.0 = complete violation or mismatch).\n"
+                f"Respond with a single number only (e.g. 0.85)."
+            )
+            try:
+                align_str = await self.llm.complete(alignment_prompt)
+                alignment_score = float(align_str.strip())
+                if alignment_score < 0.4:
+                    confidence *= 0.5  # Heavy penalty for mismatch
+                    LOGGER.info(f"SetupValidatorAgent: Candidate {candidate.symbol} penalized for directive mismatch (score {alignment_score})")
+                else:
+                    confidence = min(1.0, confidence + (alignment_score - 0.5) * 0.15)
+                    LOGGER.info(f"SetupValidatorAgent: Candidate {candidate.symbol} adjusted by directive (score {alignment_score}, new conf {confidence})")
+            except Exception as e:
+                LOGGER.warning(f"Failed to check directive alignment: {e}")
+
         if confidence < self.CONFIDENCE_THRESHOLD:
             return None
 
@@ -117,7 +145,7 @@ class SetupValidatorAgent:
         if is_unified: narrative = "🌟 **UNIFIED SWARM SETUP:** " + narrative
 
         if self.llm.configured():
-            try: narrative = await self._llm_narrative(candidate, market_context, rr, confidence, narrative)
+            try: narrative = await self._llm_narrative(candidate, market_context, rr, confidence, narrative, user_directive=user_directive)
             except: pass
 
         tags = self._build_tags(candidate, market_context, confidence)
@@ -217,8 +245,10 @@ class SetupValidatorAgent:
     def _build_narrative(self, candidate, market_context, rr, confidence):
         return f"{candidate.direction} setup on {candidate.symbol}. R:R={rr:.1f}, Conf={confidence:.0%}"
 
-    async def _llm_narrative(self, candidate, market_context, rr, confidence, rule_narrative):
+    async def _llm_narrative(self, candidate, market_context, rr, confidence, rule_narrative, user_directive=None):
         prompt = f"Write a 2-sentence rationale for {candidate.direction} on {candidate.symbol} with {confidence:.0%} confidence."
+        if user_directive:
+            prompt += f" Respect this strategy directive: '{user_directive}'."
         return await self.llm.complete(prompt)
 
     def _build_tags(self, candidate, market_context, confidence):

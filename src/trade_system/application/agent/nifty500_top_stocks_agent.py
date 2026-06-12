@@ -61,6 +61,9 @@ class Nifty500TopStocksAgent:
             )
             try:
                 analysis = await self.llm.complete(prompt)
+                if analysis and "Error connecting to" in analysis:
+                    LOGGER.warning("LLM returned an error message. Using fallback raw table.")
+                    return table_str + f"\n\n({analysis})"
                 return analysis
             except Exception as e:
                 LOGGER.warning(f"LLM analysis failed, returning raw table. Error: {e}")

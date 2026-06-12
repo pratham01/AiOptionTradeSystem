@@ -35,7 +35,7 @@ services:
     # This runs a simple foreground cron loop. 
     # The actual crontab is loaded from a file or we can use a sleep loop for simplicity.
     command: >
-      sh -c "echo '15 16 * * 1-5 cd /app && python -m trade_system postmarket >> /proc/1/fd/1 2>&1' > /etc/cron.d/trade-cron &&
+      sh -c "echo '15 16 * * 1-5 cd /app && python scripts/run_post_market_swarm.py >> /proc/1/fd/1 2>&1' > /etc/cron.d/trade-cron &&
              chmod 0644 /etc/cron.d/trade-cron &&
              crontab /etc/cron.d/trade-cron &&
              cron -f"

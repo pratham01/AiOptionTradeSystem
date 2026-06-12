@@ -106,15 +106,16 @@ class BrokerManager:
         if not self.brokers:
             raise RuntimeError("No brokers configured. Please enable at least one broker.")
 
-    @staticmethod
-    def _create_fyers_broker(config: FyersConfig) -> FyersBroker:
+    def _create_fyers_broker(self, config: FyersConfig) -> FyersBroker:
         """Create Fyers broker instance."""
-        # TODO: Refactor FyersBroker to implement new Broker interface
-        # For now, use existing implementation
+        # Pass the authenticator to enable automated token refresh
+        from .legacy.fyers_auth import FyersAuthService
+        auth_service = FyersAuthService(self.settings)
         return FyersBroker(
             client_id=config.client_id,
             access_token=config.access_token,
             user_id=config.user_id,
+            authenticator=auth_service.authenticator,
         )
 
     @staticmethod

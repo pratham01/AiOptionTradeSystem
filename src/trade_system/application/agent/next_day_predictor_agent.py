@@ -55,6 +55,8 @@ PATTERN_WEIGHT = {
     "Weekly Breakdown": 0.20,
     "Daily ST Touch (Bull)": 0.15,
     "Daily ST Touch (Bear)": 0.15,
+    "NR7 Compression": 0.20,
+    "Inside Bar": 0.15,
 }
 
 
@@ -380,6 +382,38 @@ class NextDayPredictorAgent:
             return {"pattern": "Daily ST Flip (Bear)", "direction": "PUT", "strength": 1.5}
         return None
 
+    @staticmethod
+    def _detect_nr7(df: pd.DataFrame) -> dict | None:
+        if len(df) < 8:
+            return None
+        curr = df.iloc[-1]
+        ranges = df['high'] - df['low']
+        
+        is_nr7 = ranges.iloc[-1] == ranges.iloc[-7:].min()
+        if not is_nr7:
+            return None
+            
+        ema_20 = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
+        direction = "CALL" if curr['close'] > ema_20 else "PUT"
+        
+        return {"pattern": "NR7 Compression", "direction": direction, "strength": 1.0}
+
+    @staticmethod
+    def _detect_inside_bar(df: pd.DataFrame) -> dict | None:
+        if len(df) < 2:
+            return None
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        is_inside = (curr['high'] < prev['high']) & (curr['low'] > prev['low'])
+        if not is_inside:
+            return None
+            
+        ema_20 = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
+        direction = "CALL" if curr['close'] > ema_20 else "PUT"
+        
+        return {"pattern": "Inside Bar", "direction": direction, "strength": 1.0}
+
     # ─────────────── MAIN API ───────────────
 
     async def predict_next_day_setups(
@@ -456,6 +490,7 @@ class NextDayPredictorAgent:
             self._detect_compression_breakout, self._detect_vol_weighted_close,
             self._detect_momentum_surge, self._detect_mtf_breakout,
             self._detect_supertrend_touch, self._detect_st_flip,
+            self._detect_nr7, self._detect_inside_bar,
         ]:
             result = detector(df)
             if result:

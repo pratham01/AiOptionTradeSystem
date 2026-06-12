@@ -20,12 +20,13 @@ class FoStockSuggesterAgent:
     Scans the F&O universe and identifies stocks for Intraday or BTST trades.
     """
 
-    def __init__(self, broker: DataBroker) -> None:
+    def __init__(self, broker: DataBroker, settings: any = None) -> None:
         self.broker = broker
-        self.screener = CandidateScreenerAgent(broker=self.broker)
+        self.settings = settings
+        self.screener = CandidateScreenerAgent(broker=self.broker, settings=settings)
         self.gainers_fetcher = NSETop100GainersFetcher(broker=self.broker)
         self.rotation_analyzer = SectorRotationAnalyzer()
-        self.validator = SetupValidatorAgent(broker=self.broker)
+        self.validator = SetupValidatorAgent(broker=self.broker, settings=settings)
 
     async def suggest_trades(
         self, market_context: MarketContext, 

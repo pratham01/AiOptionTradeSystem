@@ -56,6 +56,14 @@ class FyersBrokerV2(DataBroker):
         self._last_request_time = 0.0
         self._rate_limit_lock = Lock()
 
+    def _check_auth_failure(self, response: dict[str, Any]) -> None:
+        """Helper to mark authenticated status as False if response indicates token expiry/auth error."""
+        if isinstance(response, dict) and response.get("s") != "ok":
+            code = response.get("code")
+            msg = str(response.get("errmsg") or response.get("message") or "").lower()
+            if code in [-8, -17] or "token" in msg or "auth" in msg:
+                self._authenticated = False
+
     def _apply_rate_limit(self):
         """Ensures at least 0.25s between requests across all threads."""
         with self._rate_limit_lock:
@@ -98,17 +106,39 @@ class FyersBrokerV2(DataBroker):
                 LOGGER.warning(f"Fyers /profile rate-limited (code {code}). Token accepted as valid.")
                 return True
 
-            if code in [-8, -17] and retry_with_totp and self.authenticator:
-                LOGGER.warning(f"Fyers authentication failed (code: {code}). Attempting automated refresh via TOTP...")
-                try:
-                    new_token = self.authenticator.generate_access_token()
-                    self.access_token = new_token
-                    if hasattr(self.authenticator, "update_env_file"):
-                        self.authenticator.update_env_file(new_token)
+            if code in [-8, -17] and retry_with_totp:
+                # Prior to triggering TOTP, check if another process wrote a valid token to fyers_token.json today
+                from pathlib import Path
+                import json
+                
+                cached_token = None
+                token_path = Path(".secrets/fyers_token.json")
+                if token_path.exists():
+                    try:
+                        payload = json.loads(token_path.read_text())
+                        token_val = payload.get("access_token")
+                        mtime = datetime.fromtimestamp(token_path.stat().st_mtime)
+                        if token_val and mtime.date() == date.today() and token_val != self.access_token:
+                            cached_token = token_val
+                            LOGGER.info("Found a newer cached token on disk. Reloading it.")
+                    except Exception:
+                        pass
+                
+                if cached_token:
+                    self.access_token = cached_token
                     return self.authenticate(retry_with_totp=False)
-                except Exception as exc:
-                    LOGGER.error(f"Failed to automatically refresh Fyers token: {exc}")
-                    return False
+                
+                if self.authenticator:
+                    LOGGER.warning(f"Fyers authentication failed (code: {code}). Attempting automated refresh via TOTP...")
+                    try:
+                        new_token = self.authenticator.generate_access_token()
+                        self.access_token = new_token
+                        if hasattr(self.authenticator, "update_env_file"):
+                            self.authenticator.update_env_file(new_token)
+                        return self.authenticate(retry_with_totp=False)
+                    except Exception as exc:
+                        LOGGER.error(f"Failed to automatically refresh Fyers token: {exc}")
+                        return False
 
             LOGGER.error(
                 f"Fyers authentication failed: {err_msg} "
@@ -122,6 +152,11 @@ class FyersBrokerV2(DataBroker):
 
     def verify_session(self) -> None:
         """Verify the current session is active, refresh if needed."""
+        from datetime import timedelta
+        now = datetime.now()
+        if getattr(self, "_last_session_check", None) and now - self._last_session_check < timedelta(seconds=300):
+            return
+
         if not self.fyers:
             if not self.authenticate():
                 if self.access_token:
@@ -136,9 +171,11 @@ class FyersBrokerV2(DataBroker):
                     LOGGER.warning("authenticate() failed but token present. Proceeding with SDK object.")
                 else:
                     raise AuthenticationError("Unable to authenticate with FYERS.")
+            self._last_session_check = now
             return
 
         profile = self.fyers.get_profile()
+        self._last_session_check = now
         if profile.get("s") == "ok":
             return
             
@@ -191,6 +228,7 @@ class FyersBrokerV2(DataBroker):
                     return {}
 
             if data.get("s") != "ok":
+                self._check_auth_failure(data)
                 # Return empty instead of raising to keep the UI alive
                 LOGGER.error(f"Fyers API error: {data.get('errmsg') or data.get('message')}")
                 return {}
@@ -293,6 +331,7 @@ class FyersBrokerV2(DataBroker):
             response = self.fyers.history(data=payload)
 
             if response.get("s") != "ok":
+                self._check_auth_failure(response)
                 err = response.get("errmsg") or response.get("message") or "Unknown Fyers API error"
                 raise DataFetchError(f"Fyers history API error: {err}")
 

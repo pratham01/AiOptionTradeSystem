@@ -22,14 +22,14 @@ class LlmAdvisorClient:
         api_key: str | None = None,
         model: str | None = None,
         provider: str | None = None,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = None,
     ) -> None:
         settings = Settings.load()
         self.provider = provider or settings.llm.provider
         self.api_key = api_key or settings.llm.api_key
         self.model = model or settings.llm.model
         self.base_url = settings.llm.base_url
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = timeout_seconds or settings.llm.timeout or 60
 
     def configured(self) -> bool:
         return bool(self.api_key)

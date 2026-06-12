@@ -1,32 +1,17 @@
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import logging
-logging.basicConfig(level=logging.INFO)
+# Add src to path
+root_path = Path(__file__).resolve().parent.parent
+if str(root_path / "src") not in sys.path:
+    sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.factory import get_broker_manager
-from trade_system.infrastructure.data.fo_universe import get_sector_mapping
+from trade_system.interfaces.dashboard.sector_scope_dashboard import fetch_live_quotes
 
-def test_quotes():
-    print("Loading settings...")
-    settings = Settings.load()
-    print("Initializing BrokerManager...")
-    manager = get_broker_manager(settings)
-    
-    fo_metadata = get_sector_mapping()
-    symbols = ["NSE:SBIN-EQ"]  # Just test one symbol
-    print(f"Fetching quotes for {len(symbols)} symbols...")
-    try:
-        quotes = manager.get_quotes(symbols)
-        print(f"Quotes fetched successfully: {len(quotes)} items.")
-        for sym, q in list(quotes.items())[:3]:
-            print(f" - {sym}: LTP={q.last_price}, PrevClose={q.previous_close}")
-    except Exception as e:
-        print(f"ERROR: Failed to fetch quotes: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
-    test_quotes()
+try:
+    quotes = fetch_live_quotes(['NSE:SBIN-EQ', 'NSE:TATAMOTORS-EQ'])
+    print("Successfully fetched quotes:")
+    for sym, q in quotes.items():
+        print(f"{sym}: ltp={q.last_price}, change={q.change_percent}%")
+except Exception as e:
+    print(f"Error fetching quotes: {e}")

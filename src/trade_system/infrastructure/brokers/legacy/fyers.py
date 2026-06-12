@@ -24,6 +24,18 @@ def _as_int(value: Any) -> int | None:
 
 
 def _parse_nse_market_status(market_status: list[dict[str, Any]]) -> tuple[bool, str]:
+    # Prioritize exchange 10, segment 10, NORMAL market type
+    for market in market_status:
+        exchange = _as_int(market.get("exchange"))
+        segment = _as_int(market.get("segment"))
+        market_type = str(market.get("market_type", "")).upper()
+        status = str(market.get("status", "")).upper()
+        if exchange == 10 and segment == 10 and market_type == "NORMAL":
+            if status in {"OPEN", "PREOPEN", "PREOPEN_CLOSED"}:
+                return True, status
+            return False, status or "CLOSED"
+            
+    # Fallback to the first matching exchange/segment if NORMAL is not found
     for market in market_status:
         exchange = _as_int(market.get("exchange"))
         segment = _as_int(market.get("segment"))
@@ -32,7 +44,9 @@ def _parse_nse_market_status(market_status: list[dict[str, Any]]) -> tuple[bool,
             if status in {"OPEN", "PREOPEN", "PREOPEN_CLOSED"}:
                 return True, status
             return False, status or "CLOSED"
+            
     return False, "NSE market status not present"
+
 
 
 class FyersBroker(BaseBroker):
@@ -56,6 +70,15 @@ class FyersBroker(BaseBroker):
         # Fyers API Limit: ~10 requests per second.
         self._last_request_time = 0.0
         self._rate_limit_lock = Lock()
+        self._last_session_check = None
+
+    def _check_auth_failure(self, response: dict[str, Any]) -> None:
+        """Helper to mark authenticated status as False by clearing self.fyers if token expired."""
+        if isinstance(response, dict) and response.get("s") != "ok":
+            code = response.get("code")
+            msg = str(response.get("errmsg") or response.get("message") or "").lower()
+            if code in [-8, -17] or "token" in msg or "auth" in msg:
+                self.fyers = None
 
     def _apply_rate_limit(self):
         """Ensures at least 0.11s between requests across all threads."""
@@ -103,16 +126,37 @@ class FyersBroker(BaseBroker):
                 )
                 return True
 
-            if code == -8 and retry_with_totp and self.authenticator:
-                logger.warning("Fyers token expired. Attempting automated refresh via TOTP...")
-                try:
-                    new_token = self.authenticator.generate_access_token()
-                    self.access_token = new_token
-                    self.authenticator.update_env_file(new_token)
+            if code in [-8, -17] and retry_with_totp:
+                # Prior to triggering TOTP, check if another process wrote a valid token to fyers_token.json today
+                from datetime import date
+                import json
+                cached_token = None
+                token_path = Path(".secrets/fyers_token.json")
+                if token_path.exists():
+                    try:
+                        payload = json.loads(token_path.read_text())
+                        token_val = payload.get("access_token")
+                        mtime = datetime.fromtimestamp(token_path.stat().st_mtime)
+                        if token_val and mtime.date() == date.today() and token_val != self.access_token:
+                            cached_token = token_val
+                            logger.info("Found a newer cached token on disk. Reloading it.")
+                    except Exception:
+                        pass
+                
+                if cached_token:
+                    self.access_token = cached_token
                     return self.authenticate(retry_with_totp=False)
-                except Exception as exc:
-                    logger.error("Failed to automatically refresh Fyers token: %s", exc)
-                    return False
+
+                if self.authenticator:
+                    logger.warning("Fyers token expired (code: %s). Attempting automated refresh via TOTP...", code)
+                    try:
+                        new_token = self.authenticator.generate_access_token()
+                        self.access_token = new_token
+                        self.authenticator.update_env_file(new_token)
+                        return self.authenticate(retry_with_totp=False)
+                    except Exception as exc:
+                        logger.error("Failed to automatically refresh Fyers token: %s", exc)
+                        return False
 
             logger.error(
                 "Fyers authentication failed: %s (code: %s)",
@@ -140,9 +184,18 @@ class FyersBroker(BaseBroker):
                     logger.warning("authenticate() failed but token present. Proceeding with SDK object.")
                 else:
                     raise RuntimeError("Unable to authenticate with FYERS.")
+            self._last_session_check = datetime.now()
             return
+        
+        # Check cache
+        from datetime import timedelta
+        now = datetime.now()
+        if getattr(self, "_last_session_check", None) and now - self._last_session_check < timedelta(seconds=300):
+            return
+
         # SDK object already exists — re-check profile only to detect token expiry.
         profile = self.fyers.get_profile()
+        self._last_session_check = now
         if profile.get("s") == "ok":
             return
         code = profile.get("code")
@@ -152,13 +205,40 @@ class FyersBroker(BaseBroker):
             logger.warning("Fyers /profile rate-limited during verify_session (code %s). Proceeding.", code)
             return
         # Token expired — refresh.
-        if code == -8 and self.authenticator:
-            logger.warning("FYERS session expired during verification. Refreshing token.")
-            new_token = self.authenticator.generate_access_token()
-            self.access_token = new_token
-            self.authenticator.update_env_file(new_token)
-            if not self.authenticate(retry_with_totp=False):
-                raise RuntimeError(profile.get("errmsg") or "Unable to re-authenticate with FYERS.")
+        if code in [-8, -17]:
+            # Prior to triggering TOTP, check if another process wrote a valid token to fyers_token.json today
+            from datetime import date
+            import json
+            cached_token = None
+            token_path = Path(".secrets/fyers_token.json")
+            if token_path.exists():
+                try:
+                    payload = json.loads(token_path.read_text())
+                    token_val = payload.get("access_token")
+                    mtime = datetime.fromtimestamp(token_path.stat().st_mtime)
+                    if token_val and mtime.date() == date.today() and token_val != self.access_token:
+                        cached_token = token_val
+                        logger.info("Found a newer cached token on disk. Reloading it.")
+                except Exception:
+                    pass
+            
+            if cached_token:
+                self.access_token = cached_token
+                if self.authenticate(retry_with_totp=False):
+                    return
+            
+            if self.authenticator:
+                logger.warning("FYERS session expired during verification (code: %s). Refreshing token.", code)
+                try:
+                    new_token = self.authenticator.generate_access_token()
+                    self.access_token = new_token
+                    self.authenticator.update_env_file(new_token)
+                    if not self.authenticate(retry_with_totp=False):
+                        raise RuntimeError(profile.get("errmsg") or "Unable to re-authenticate with FYERS.")
+                    return
+                except Exception as exc:
+                    logger.error("Failed to automatically refresh Fyers token: %s", exc)
+                    raise RuntimeError("Unable to authenticate with Fyers") from exc
             return
         raise RuntimeError(profile.get("errmsg") or err_msg or "FYERS session verification failed.")
 
@@ -194,6 +274,7 @@ class FyersBroker(BaseBroker):
         }
         response = self.fyers.history(data=payload)
         if response.get("s") != "ok":
+            self._check_auth_failure(response)
             logger.error("Failed to fetch FYERS history: %s", response.get("errmsg") or response.get("message"))
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
         columns = ["timestamp", "open", "high", "low", "close", "volume"]
@@ -242,19 +323,55 @@ class FyersBroker(BaseBroker):
             logger.error("Error fetching Fyers option chain: %s", exc)
         return None
 
-    def get_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    def get_quotes(self, symbols: List[str], _retry_count: int = 0) -> Dict[str, Dict[str, Any]]:
+        if not symbols:
+            return {}
+            
+        # Batch symbols (Fyers allows 50 symbols per call)
+        if len(symbols) > 50:
+            all_quotes = {}
+            for i in range(0, len(symbols), 50):
+                batch = symbols[i:i+50]
+                all_quotes.update(self.get_quotes(batch))
+                time.sleep(0.8) # Prevent 429 rate limits
+            return all_quotes
+
         self.verify_session()
         self._apply_rate_limit()
-        response = self.fyers.quotes(data={"symbols": ",".join(symbols)})
-        if response.get("s") != "ok":
-            logger.error("Failed to fetch FYERS quotes: %s", response.get("errmsg") or response.get("message"))
-            return {}
-        parsed: Dict[str, Dict[str, Any]] = {}
-        for item in response.get("d", []):
-            symbol = str(item.get("n", "")).strip()
-            if symbol:
-                parsed[symbol] = item.get("v") or {}
-        return parsed
+        
+        try:
+            response = self.fyers.quotes(data={"symbols": ",".join(symbols)})
+
+            # 429 Handling
+            if response.get("code") == 429 or "Limit Exceeded" in str(response.get("errmsg", "")):
+                if _retry_count < 3:
+                    logger.warning("Fyers Rate Limit (429) hit in legacy client. Retry %s/3 in 3s...", _retry_count+1)
+                    time.sleep(3.0)
+                    return self.get_quotes(symbols, _retry_count=_retry_count+1)
+                else:
+                    logger.error("Max retries hit for 429 in legacy client. Returning empty quotes.")
+                    return {}
+
+            if response.get("s") != "ok":
+                self._check_auth_failure(response)
+                logger.error("Failed to fetch FYERS quotes: %s", response.get("errmsg") or response.get("message"))
+                return {}
+
+            parsed: Dict[str, Dict[str, Any]] = {}
+            for item in response.get("d", []):
+                symbol = str(item.get("n", "")).strip()
+                if symbol:
+                    parsed[symbol] = item.get("v") or {}
+            return parsed
+
+        except Exception as exc:
+            if _retry_count < 3:
+                logger.warning("Fyers quotes request failed: %s. Retry %s/3 in 3.0s...", exc, _retry_count+1)
+                time.sleep(3.0)
+                return self.get_quotes(symbols, _retry_count=_retry_count+1)
+            else:
+                logger.error("Failed to fetch quotes in legacy client: %s", exc)
+                return {}
 
     def is_market_open_today(self) -> tuple[bool, str]:
         self.verify_session()

@@ -83,41 +83,53 @@ def _render_trade_cards(trades):
         return
     
     for t in trades:
-        tag_cls = "call-tag" if t.direction == "CALL" else "put-tag"
-        icon = "🟢" if t.direction == "CALL" else "🔴"
+        direction = t['direction'] if isinstance(t, dict) else t.direction
+        symbol = t['symbol'] if isinstance(t, dict) else t.symbol
+        confidence = t['confidence'] if isinstance(t, dict) else t.confidence
+        narrative = t['narrative'] if isinstance(t, dict) else t.narrative
+        horizon = t['horizon'] if isinstance(t, dict) else t.horizon
+        entry_zone_low = t['entry_zone_low'] if isinstance(t, dict) else t.entry_zone_low
+        entry_zone_high = t['entry_zone_high'] if isinstance(t, dict) else t.entry_zone_high
+        target = t['target'] if isinstance(t, dict) else t.target
+        stop_loss = t['stop_loss'] if isinstance(t, dict) else t.stop_loss
+        sector = t['sector'] if isinstance(t, dict) else t.sector
         
-        sym_short = t.symbol.split(":")[-1].replace("-EQ", "").replace("-INDEX", "")
+        tag_cls = "call-tag" if direction == "CALL" else "put-tag"
+        icon = "🟢" if direction == "CALL" else "🔴"
+        
+        sym_short = symbol.split(":")[-1].replace("-EQ", "").replace("-INDEX", "")
         
         # Identify Confluence Level
         conf_label = "STANDARD"
-        if t.confidence >= 0.85: conf_label = "🔥 HIGH CONVICTION"
-        elif t.confidence >= 0.70: conf_label = "💎 CONFLUENCE"
+        if confidence >= 0.85: conf_label = "🔥 HIGH CONVICTION"
+        elif confidence >= 0.70: conf_label = "💎 CONFLUENCE"
         
         # Check for RSI Divergence in narrative
-        rsi_icon = "📈" if "RSI Divergence" in (t.narrative or "") else ""
+        rsi_icon = "📈" if "RSI Divergence" in (narrative or "") else ""
 
         st.markdown(f"""
         <div class="trade-card {tag_cls}">
             <div class="confluence-badge">{conf_label}</div>
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                <span style="font-size:1.2rem; font-weight:bold;">{icon} {sym_short} — BUY {t.direction} {rsi_icon}</span>
-                <span class="metric-sub">{t.horizon}</span>
+                <span style="font-size:1.2rem; font-weight:bold;">{icon} {sym_short} — BUY {direction} {rsi_icon}</span>
+                <span class="metric-sub">{horizon}</span>
             </div>
             <div style="display:flex; gap:20px; margin: 10px 0;">
-                <div><span class="metric-sub">Entry Zone</span><br/><span class="price-tag">₹{t.entry_zone_low:.0f}-{t.entry_zone_high:.0f}</span></div>
-                <div><span class="metric-sub">Target</span><br/><span class="price-tag" style="color:#00d084">₹{t.target:.0f}</span></div>
-                <div><span class="metric-sub">Stop Loss</span><br/><span class="price-tag" style="color:#ff4d6d">₹{t.stop_loss:.0f}</span></div>
+                <div><span class="metric-sub">Entry Zone</span><br/><span class="price-tag">₹{entry_zone_low:.0f}-{entry_zone_high:.0f}</span></div>
+                <div><span class="metric-sub">Target</span><br/><span class="price-tag" style="color:#00d084">₹{target:.0f}</span></div>
+                <div><span class="metric-sub">Stop Loss</span><br/><span class="price-tag" style="color:#ff4d6d">₹{stop_loss:.0f}</span></div>
             </div>
             <div style="font-size:0.9rem; opacity:0.8; margin-top:10px; border-top:1px solid rgba(255,255,255,0.1); padding-top:10px;">
-                <b>Swarm Reasoning:</b> {t.narrative}
+                <b>Swarm Reasoning:</b> {narrative}
                 <br/>
-                <span class="metric-sub">Confidence Score: {t.confidence:.0%} | {t.sector or 'Market'}</span>
+                <span class="metric-sub">Confidence Score: {confidence:.0%} | {sector or 'Market'}</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
+@st.cache_data(ttl=60)
 def load_session_plan():
-    """Try to load today's session plan from DB."""
+    """Try to load today's session plan from DB (returns serializable dicts)."""
     try:
         from trade_system.infrastructure.database.connection import get_engine
         from trade_system.infrastructure.database.models import SuggestedTrade
@@ -130,10 +142,20 @@ def load_session_plan():
                 .filter(SuggestedTrade.date == today)
                 .all()
             )
-            return trades
+            return [
+                {
+                    "symbol": t.symbol, "direction": t.direction, "horizon": t.horizon,
+                    "entry_zone_low": t.entry_zone_low, "entry_zone_high": t.entry_zone_high,
+                    "target": t.target, "stop_loss": t.stop_loss, "confidence": t.confidence,
+                    "narrative": t.narrative, "sector": t.sector, "is_nifty": t.is_nifty,
+                    "outcome": t.outcome, "actual_pnl_pct": t.actual_pnl_pct,
+                }
+                for t in trades
+            ]
     except Exception:
         return []
 
+@st.cache_data(ttl=15)
 def load_thought_stream(limit=15):
     """Fetch live thoughts from the DB."""
     try:
@@ -147,8 +169,32 @@ def load_thought_stream(limit=15):
     except Exception:
         return pd.DataFrame()
 
+@st.cache_data(ttl=120)
+def load_latest_synthesis():
+    """Fetch the latest AI Swarm Synthesis Report."""
+    try:
+        from trade_system.infrastructure.database.connection import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        query = text("""
+            SELECT timestamp, message 
+            FROM agent_thought_stream 
+            WHERE agent_name = 'MarketSynthesizer' AND action = 'SYNTHESIS'
+            ORDER BY timestamp DESC 
+            LIMIT 1
+        """)
+        with engine.connect() as conn:
+            row = conn.execute(query).first()
+            if row:
+                ts_str = pd.to_datetime(row[0]).strftime('%d %b %Y %H:%M')
+                return ts_str, row[1]
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=120)
 def load_closed_trades(limit_days=30):
-    """Load recently closed trades for stats."""
+    """Load recently closed trades for stats (returns serializable dicts)."""
     try:
         from trade_system.infrastructure.database.connection import get_engine
         from trade_system.infrastructure.database.models import SuggestedTrade
@@ -156,16 +202,25 @@ def load_closed_trades(limit_days=30):
         engine = get_engine()
         cutoff = (date.today() - timedelta(days=limit_days)).isoformat()
         with Session(engine) as session:
-            return (
+            trades = (
                 session.query(SuggestedTrade)
                 .filter(SuggestedTrade.outcome != "PENDING")
                 .filter(SuggestedTrade.date >= cutoff)
                 .order_by(SuggestedTrade.date.desc())
                 .all()
             )
+            return [
+                {
+                    "symbol": t.symbol, "direction": t.direction,
+                    "outcome": t.outcome, "actual_pnl_pct": t.actual_pnl_pct,
+                    "date": t.date, "confidence": t.confidence,
+                }
+                for t in trades
+            ]
     except Exception:
         return []
 
+@st.cache_data(ttl=300)
 def load_agent_weights():
     """Load active scoring weights."""
     try:
@@ -235,6 +290,7 @@ def load_sector_performance():
         pass
     return pd.DataFrame()
 
+@st.cache_data(ttl=30)
 def load_agent_status():
     try:
         from trade_system.infrastructure.database.connection import get_engine
@@ -253,6 +309,7 @@ def load_agent_status():
     except Exception:
         return pd.DataFrame()
 
+@st.cache_data(ttl=15)
 def load_radar_alerts(limit=10):
     try:
         from trade_system.infrastructure.database.connection import get_engine
@@ -274,6 +331,7 @@ def load_radar_alerts(limit=10):
     except Exception:
         return pd.DataFrame()
         
+@st.cache_data(ttl=120)
 def load_latest_news():
     try:
         from trade_system.infrastructure.database.connection import get_engine
@@ -294,6 +352,162 @@ def load_latest_news():
         pass
     return "No recent macro news synthesis available."
 
+@st.cache_data(ttl=300)
+def fetch_live_headlines():
+    try:
+        from trade_system.utils.news_scraper import BusinessNewsScraper
+        scraper = BusinessNewsScraper()
+        return scraper.get_all_headlines()
+    except Exception as e:
+        return [f"Failed to load headlines: {e}"]
+
+async def analyze_news_impact_async(headlines: list[str]) -> str:
+    from trade_system.application.advisory.llm import LlmAdvisorClient
+    llm = LlmAdvisorClient()
+    if not llm.configured():
+        return "LLM not configured. Please check your GOOGLE_API_KEY."
+    
+    prompt = (
+        "You are an expert Indian derivatives strategist and advisor specializing in options trading.\n"
+        "Analyze the following macro news headlines to assess their direct impact on options buyers:\n\n"
+        "Headlines:\n" + "\n".join(f"- {h}" for h in headlines[:25]) + "\n\n"
+        "Provide a concise, premium Option Buyer's Macro Impact Report. Structure it with:\n"
+        "1. **Macro Sentiment Verdict**: (BULLISH, BEARISH, NEUTRAL, or VOLATILE) and short rationale.\n"
+        "2. **Sectoral Predictions**: Which sectors stand to benefit or suffer from momentum today.\n"
+        "3. **Option Buyer Guidance**: Clear warnings (IV crush, theta decay risk, momentum setups to target).\n"
+        "Keep it highly actionable, professional, and visually structured with emojis."
+    )
+    return await llm.complete(prompt)
+
+@st.cache_data(ttl=60)
+def load_detailed_suggested_trades(limit_days=30):
+    try:
+        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.infrastructure.database.models import SuggestedTrade
+        from sqlalchemy.orm import Session
+        from datetime import date, timedelta
+        engine = get_engine()
+        cutoff = (date.today() - timedelta(days=limit_days)).isoformat()
+        with Session(engine) as session:
+            trades = (
+                session.query(SuggestedTrade)
+                .filter(SuggestedTrade.date >= cutoff)
+                .order_by(SuggestedTrade.date.desc())
+                .all()
+            )
+            
+            rows = []
+            for t in trades:
+                f = t.features
+                rows.append({
+                    "id": t.id,
+                    "date": t.date,
+                    "symbol": t.symbol.split(":")[-1].replace("-EQ", "").replace("-INDEX", ""),
+                    "direction": t.direction,
+                    "entry_zone": f"₹{t.entry_zone_low:.0f}-{t.entry_zone_high:.0f}",
+                    "target": t.target,
+                    "stop_loss": t.stop_loss,
+                    "confidence": t.confidence,
+                    "outcome": t.outcome,
+                    "actual_pnl_pct": t.actual_pnl_pct or 0.0,
+                    "volume_surge": f.volume_surge if f else 1.0,
+                    "near_support": f.near_support if f else 0,
+                    "near_resistance": f.near_resistance if f else 0,
+                    "above_vwap": f.above_vwap if f else 0,
+                    "above_poc": f.above_poc if f else 0,
+                })
+            return rows
+    except Exception as e:
+        import logging
+        logging.error(f"Error loading detailed suggested trades: {e}")
+        return []
+
+def compute_option_buyer_metrics(trade_row):
+    vol_surge = trade_row.get("volume_surge") or 1.0
+    near_support = trade_row.get("near_support") or 0
+    near_resistance = trade_row.get("near_resistance") or 0
+    direction = trade_row.get("direction")
+    outcome = trade_row.get("outcome")
+    
+    # 1. Momentum Score (up to 40 points)
+    mom_score = min(40.0, vol_surge * 15.0)
+    
+    # 2. Entry Zone Quality (up to 30 points)
+    zone_score = 10.0
+    if direction == "CALL" and near_support == 1:
+        zone_score = 30.0
+    elif direction == "PUT" and near_resistance == 1:
+        zone_score = 30.0
+        
+    # 3. Efficiency Score (up to 30 points)
+    eff_score = 15.0
+    if outcome == "WIN":
+        eff_score = 30.0
+    elif outcome == "LOSS":
+        eff_score = 5.0
+        
+    return round(mom_score + zone_score + eff_score, 1)
+
+async def generate_option_buyer_eod_report(trades_data: list) -> str:
+    from trade_system.application.advisory.llm import LlmAdvisorClient
+    from trade_system.infrastructure.database import log_agent_thought, get_db_session
+    llm = LlmAdvisorClient()
+    if not llm.configured():
+        return "LLM not configured. Please check your GOOGLE_API_KEY."
+        
+    trade_summary = ""
+    for t in trades_data[:15]:
+        trade_summary += (
+            f"- {t['date']} | {t['symbol']} | {t['direction']} | Outcome: {t['outcome']} (PnL: {t['actual_pnl_pct']:.1f}%) | "
+            f"Vol Surge: {t['volume_surge']:.1f}x | Near Support: {t['near_support']} | Near Resistance: {t['near_resistance']}\n"
+        )
+        
+    prompt = (
+        "You are an expert Options Trading System Optimizer specializing in option buying strategy execution.\n"
+        "Review the following record of suggested trades generated by our automated multi-agent swarm:\n\n"
+        f"Trades Record:\n{trade_summary}\n"
+        "Option buyers need explosive momentum and perfect entry timing to combat theta decay and transaction friction.\n\n"
+        "Generate a comprehensive Post-Market Option Buyer System Optimization Report including:\n"
+        "1. **Trade Entry Quality Audit**: Critique the entries. Did we buy near key structures? Was volume surge present?\n"
+        "2. **Theta Decay Warning & Performance**: Assess holding durations and decay risk factors.\n"
+        "3. **Tuning Recommendations**: Suggest exact indicator modifications (e.g. increase ST multipliers, raise volume surge thresholds, adjust evolution weights).\n"
+        "Format your output in clean, premium Markdown with emojis."
+    )
+    
+    report = await llm.complete(prompt)
+    
+    try:
+        session = get_db_session()
+        log_agent_thought(
+            session,
+            agent_name="OptionBuyerOptimizer",
+            action="EOD_OPTIMIZATION",
+            message=report
+        )
+        session.close()
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to log optimizer report: {e}")
+        
+    return report
+
+@st.cache_data(ttl=300)
+def load_historical_optimizations(limit=5):
+    try:
+        from trade_system.infrastructure.database.connection import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        query = text("""
+            SELECT timestamp, message 
+            FROM agent_thought_stream 
+            WHERE agent_name = 'OptionBuyerOptimizer' AND action = 'EOD_OPTIMIZATION'
+            ORDER BY timestamp DESC LIMIT :limit
+        """)
+        with engine.connect() as conn:
+            return pd.read_sql(query, conn, params={"limit": limit})
+    except Exception:
+        return pd.DataFrame()
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("## 🤖 AI Trade Agent")
@@ -302,7 +516,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Quick Actions")
-    if st.button("🔄 Run Orchestrator Now", type="primary"):
+    if st.button("🔄 Run Orchestrator Now", type="primary", use_container_width=True):
         with st.spinner("Running agentic pipeline..."):
             try:
                 from trade_system.application.agent.factory import build_orchestrator
@@ -311,10 +525,59 @@ with st.sidebar:
                 settings = Settings.load()
                 settings.ensure_directories()
                 orc = build_orchestrator(settings)
-                # Run sync wrapper
                 import asyncio
                 plan = asyncio.run(orc.run_session())
                 st.success(f"✅ Generated {len(plan.all_suggestions())} suggestions!")
+            except Exception as e:
+                st.error(f"Failed: {e}")
+
+    st.markdown("---")
+    st.markdown("### 🧪 Swarm Strategy Lab")
+    st.caption("Customize indicators and write natural language instructions for the AI Swarm.")
+    
+    custom_strategy = st.selectbox(
+        "Active Strategy Family",
+        options=["Breakout/Momentum", "SMC (Smart Money)", "ICT / Liquidity Sweep", "SMA Cross", "RVOL Trend"],
+        key="custom_strat_family"
+    )
+    
+    col_st1, col_st2 = st.columns(2)
+    custom_st_period = col_st1.number_input("ST Period", 5, 20, 7, key="custom_st_period")
+    custom_st_mult = col_st2.number_input("ST Multiplier", 1, 5, 3, key="custom_st_multiplier")
+    
+    col_rsi1, col_rsi2 = st.columns(2)
+    custom_rsi_ob = col_rsi1.slider("RSI Overbought", 60, 85, 70, key="custom_rsi_ob")
+    custom_rsi_os = col_rsi2.slider("RSI Oversold", 15, 40, 30, key="custom_rsi_os")
+    
+    custom_directive = st.text_area(
+        "Swarm Prompt Directive",
+        placeholder="e.g. Focus on high volume breakouts, CALL options only",
+        value="Focus on high-conviction momentum setups, matching leading sectors.",
+        key="custom_directive"
+    )
+    
+    if st.button("⚡ Run Custom Swarm", type="primary", use_container_width=True):
+        with st.spinner("Instantiating custom swarm..."):
+            from trade_system.config import Settings
+            from dataclasses import replace
+            from trade_system.application.agent.factory import build_orchestrator
+            import asyncio
+            
+            try:
+                base_settings = Settings.load()
+                new_ind = replace(
+                    base_settings.indicator_config,
+                    supertrend_period=int(custom_st_period),
+                    supertrend_multiplier=int(custom_st_mult),
+                    rsi_overbought=float(custom_rsi_ob),
+                    rsi_oversold=float(custom_rsi_os)
+                )
+                custom_settings = replace(base_settings, indicator_config=new_ind)
+                
+                orc = build_orchestrator(custom_settings)
+                plan = asyncio.run(orc.run_session(user_directive=custom_directive))
+                st.session_state.custom_suggestions = plan.all_suggestions()
+                st.success(f"Generated {len(st.session_state.custom_suggestions)} recommendations!")
             except Exception as e:
                 st.error(f"Failed: {e}")
 
@@ -336,65 +599,92 @@ st.markdown(f"""
 
 
 # --- TOP: MACRO & SECTORS ---
-macro_c1, macro_c2 = st.columns([2, 1])
-with macro_c1:
-    st.markdown("### 🌐 Macro & News Flow")
-    news_msg = load_latest_news()
-    st.info(f"**Latest Synthesis:** {news_msg}")
+@st.fragment
+def _render_macro_and_sectors():
+    macro_c1, macro_c2 = st.columns([2, 1])
+    with macro_c1:
+        st.markdown("### 🌐 Macro & News Flow")
+        news_msg = load_latest_news()
+        st.info(f"**Latest Synthesis:** {news_msg}")
+        
+        # Scraped headlines
+        headlines = fetch_live_headlines()
+        with st.expander(f"📰 View Scraped Business Headlines ({len(headlines)})"):
+            for h in headlines[:10]:
+                st.markdown(f"- {h}")
+                
+        # News analysis trigger
+        if st.button("🤖 Analyze Macro News Impact", key="analyze_news_btn", use_container_width=True):
+            with st.spinner("Analyzing macro news impact for option buyers..."):
+                import asyncio
+                try:
+                    verdict = asyncio.run(analyze_news_impact_async(headlines))
+                    st.markdown(f"""
+                    <div style='background:#1e2130; padding:15px; border-radius:10px; border:1px solid #00b4d8; margin-top:10px;'>
+                        <h4 style='margin-top:0; color:#00b4d8;'>🧠 AI Macro Impact Analysis</h4>
+                        <div style='font-size:0.9rem; line-height:1.4;'>{verdict.replace(chr(10), '<br/>')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(f"Failed to analyze news: {e}")
 
-with macro_c2:
-    st.markdown("### 📊 Top Sectors")
-    sector_df = load_sector_performance()
-    if not sector_df.empty:
-        st.dataframe(sector_df.head(4), use_container_width=True, hide_index=True)
-    else:
-        st.caption("Waiting for sector data...")
+    with macro_c2:
+        st.markdown("### 📊 Top Sectors")
+        sector_df = load_sector_performance()
+        if not sector_df.empty:
+            st.dataframe(sector_df.head(4), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Waiting for sector data...")
 
+_render_macro_and_sectors()
 st.markdown("---")
 
 # --- MIDDLE: RADAR & AGENT STATUS ---
-mid_c1, mid_c2 = st.columns([1.5, 1.5])
-with mid_c1:
-    st.markdown("### 🎯 High-Conviction Radar")
-    st.caption("Live breakouts, volume spikes, and anomalies")
-    radar_df = load_radar_alerts(limit=6)
-    if not radar_df.empty:
-        for _, row in radar_df.iterrows():
-            ts = pd.to_datetime(row['timestamp']).strftime('%H:%M:%S')
-            action = row['action']
-            sym = row['symbol'].split(':')[-1].replace('-EQ', '').replace('-INDEX', '') if row['symbol'] else ''
-            icon = "⚡" if "VOL" in action else "🚀" if "BREAKOUT" in action else "🔥" if "GAMMA" in action else "🎯"
-            
-            st.markdown(f"""
-            <div style='background:#2b3044; padding:10px; border-radius:8px; margin-bottom:8px; border-left:4px solid #ffb703'>
-                <span style='color:#8b949e; font-size:0.8rem'>{ts}</span> &nbsp;
-                <b style='color:#00b4d8'>{icon} {sym}</b> &nbsp;
-                <span style='font-size:0.9rem'>{row['message']}</span>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("No anomalies detected recently.")
+@st.fragment
+def _render_radar_and_status():
+    mid_c1, mid_c2 = st.columns([1.5, 1.5])
+    with mid_c1:
+        st.markdown("### 🎯 High-Conviction Radar")
+        st.caption("Live breakouts, volume spikes, and anomalies")
+        radar_df = load_radar_alerts(limit=6)
+        if not radar_df.empty:
+            for _, row in radar_df.iterrows():
+                ts = pd.to_datetime(row['timestamp']).strftime('%H:%M:%S')
+                action = row['action']
+                sym = row['symbol'].split(':')[-1].replace('-EQ', '').replace('-INDEX', '') if row['symbol'] else ''
+                icon = "⚡" if "VOL" in action else "🚀" if "BREAKOUT" in action else "🔥" if "GAMMA" in action else "🎯"
+                
+                st.markdown(f"""
+                <div style='background:#2b3044; padding:10px; border-radius:8px; margin-bottom:8px; border-left:4px solid #ffb703'>
+                    <span style='color:#8b949e; font-size:0.8rem'>{ts}</span> &nbsp;
+                    <b style='color:#00b4d8'>{icon} {sym}</b> &nbsp;
+                    <span style='font-size:0.9rem'>{row['message']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("No anomalies detected recently.")
 
-with mid_c2:
-    st.markdown("### 🤖 Agent Grid Status")
-    status_df = load_agent_status()
-    if not status_df.empty:
-        for _, row in status_df.iterrows():
-            agent = row['agent_name']
-            msg = row['message'][:60] + "..." if len(row['message']) > 60 else row['message']
-            st.markdown(f"""
-            <div style='background:#161b22; padding:8px; border-radius:6px; margin-bottom:6px; border:1px solid #30363d'>
-                <div style='color:#58a6ff; font-weight:bold; font-size:0.85rem'>@{agent} <span style='float:right; color:#00d084'>● Active</span></div>
-                <div style='color:#c9d1d9; font-size:0.8rem'>{msg}</div>
-            </div>
-            """, unsafe_allow_html=True)
+    with mid_c2:
+        st.markdown("### 🤖 Agent Grid Status")
+        status_df = load_agent_status()
+        if not status_df.empty:
+            for _, row in status_df.iterrows():
+                agent = row['agent_name']
+                msg = row['message'][:60] + "..." if len(row['message']) > 60 else row['message']
+                st.markdown(f"""
+                <div style='background:#161b22; padding:8px; border-radius:6px; margin-bottom:6px; border:1px solid #30363d'>
+                    <div style='color:#58a6ff; font-weight:bold; font-size:0.85rem'>@{agent} <span style='float:right; color:#00d084'>● Active</span></div>
+                    <div style='color:#c9d1d9; font-size:0.8rem'>{msg}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
+_render_radar_and_status()
 st.markdown("---")
 
 # --- QUICK STATS & SUGGESTIONS ---
 today_trades = load_session_plan()
-nifty_trades = [t for t in today_trades if t.is_nifty]
-fo_trades = [t for t in today_trades if not t.is_nifty]
+nifty_trades = [t for t in today_trades if t.get('is_nifty')]
+fo_trades = [t for t in today_trades if not t.get('is_nifty')]
 
 # --- SWARM CONSENSUS ---
 with st.container():
@@ -429,14 +719,33 @@ with st.container():
 left_col, right_col = st.columns([1.8, 1.2])
 
 with left_col:
+    # --- CUSTOM RECOMMENDATIONS PANEL ---
+    if "custom_suggestions" in st.session_state and st.session_state.custom_suggestions:
+        st.markdown("### ✨ Custom Swarm Recommendations")
+        st.info("These suggestions were generated with your Strategy Lab overrides and custom directives.")
+        _render_trade_cards(st.session_state.custom_suggestions)
+        if st.button("🗑️ Clear Custom Recommendations"):
+            st.session_state.custom_suggestions = []
+            st.rerun()
+        st.markdown("---")
+
     st.subheader("📡 Multi-Agent Parallel Verdicts")
-    tab_nifty, tab_fo, tab_chat = st.tabs(["📊 NIFTY Master", "💎 Stock Momentum", "💬 Swarm Chat"])
+    tab_nifty, tab_fo, tab_chat, tab_synthesis, tab_optimizer = st.tabs(["📊 NIFTY Master", "💎 Stock Momentum", "💬 Swarm Chat", "🧠 AI Swarm Synthesis", "📉 Option Buyer EOD Optimizer"])
 
     with tab_nifty:
         _render_trade_cards(nifty_trades)
 
     with tab_fo:
         _render_trade_cards(fo_trades)
+
+    with tab_synthesis:
+        synthesis_data = load_latest_synthesis()
+        if synthesis_data:
+            ts_str, report_content = synthesis_data
+            st.caption(f"📅 Generated at: {ts_str} (IST)")
+            st.markdown(report_content)
+        else:
+            st.info("No AI Swarm Synthesis reports generated yet. Run the EOD post-market scan to generate the report.")
 
     with tab_chat:
         st.markdown("### 💬 Ask Swarm Data Agent")
@@ -470,50 +779,111 @@ with left_col:
                     except Exception as e:
                         st.error(f"Error querying agent: {e}")
 
+    with tab_optimizer:
+        st.markdown("### 📉 Option Buyer EOD Performance Analyzer & Optimizer")
+        st.caption("Auditing trade entry conditions, theta decay indicators, and volume node breakouts to optimize option buyer edge.")
+        
+        detailed_trades = load_detailed_suggested_trades(lookback_days)
+        
+        if not detailed_trades:
+            st.info("No suggested trades found in the lookback period to analyze.")
+        else:
+            trades_df_opt = pd.DataFrame(detailed_trades)
+            trades_df_opt["Buyer Edge Score"] = trades_df_opt.apply(compute_option_buyer_metrics, axis=1)
+            
+            avg_score = trades_df_opt["Buyer Edge Score"].mean()
+            win_rate_opt = (trades_df_opt["outcome"] == "WIN").sum() / max(1, len(trades_df_opt)) * 100
+            
+            mc1, mc2, mc3 = st.columns(3)
+            mc1.metric("Average Buyer Edge Score", f"{avg_score:.1f}/100", help="Based on volume surge, support proximity, and hold efficiency.")
+            mc2.metric("Win Rate", f"{win_rate_opt:.1f}%")
+            mc3.metric("Total Trades Audited", f"{len(trades_df_opt)}")
+            
+            st.dataframe(
+                trades_df_opt[["date", "symbol", "direction", "entry_zone", "outcome", "actual_pnl_pct", "volume_surge", "Buyer Edge Score"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "actual_pnl_pct": st.column_config.NumberColumn("PnL %", format="%.2f%%"),
+                    "volume_surge": st.column_config.NumberColumn("Vol Surge", format="%.2fx"),
+                    "Buyer Edge Score": st.column_config.ProgressColumn("Buyer Edge Score", min_value=0, max_value=100)
+                }
+            )
+            
+            st.markdown("---")
+            if st.button("🧠 Run AI EOD Optimization Audit", key="run_eod_opt_audit_btn", use_container_width=True):
+                with st.spinner("Analyzing trade metrics and generating system tuning advice..."):
+                    import asyncio
+                    try:
+                        opt_report = asyncio.run(generate_option_buyer_eod_report(detailed_trades))
+                        st.markdown(f"""
+                        <div style='background:#1e2130; padding:20px; border-radius:12px; border:1px solid #ff4d6d; margin-top:15px; margin-bottom:15px;'>
+                            <h3 style='margin-top:0; color:#ff4d6d;'>🧠 AI System Optimization Report</h3>
+                            <div style='font-size:0.9rem; line-height:1.5;'>{opt_report.replace(chr(10), '<br/>')}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Failed to generate optimization report: {e}")
+                        
+        st.markdown("---")
+        st.subheader("📚 Historical EOD Optimization Reports")
+        hist_opt = load_historical_optimizations()
+        if not hist_opt.empty:
+            for _, r in hist_opt.iterrows():
+                ts_formatted = pd.to_datetime(r['timestamp']).strftime('%d %b %Y %H:%M')
+                with st.expander(f"Report — {ts_formatted}"):
+                    st.markdown(r['message'])
+        else:
+            st.caption("No historical optimization reports found.")
+
 with right_col:
-    st.subheader("🧠 Swarm Thought Stream")
+    @st.fragment
+    def _render_thought_stream():
+        st.subheader("🧠 Swarm Thought Stream")
 
-    # Live Thought Stream with Color Coding
-    thoughts = load_thought_stream()
-    if not thoughts.empty:
-        for _, row in thoughts.iterrows():
-            ts = pd.to_datetime(row['timestamp']).strftime('%H:%M:%S')
-            agent = row['agent_name']
-            msg = row['message']
+        # Live Thought Stream with Color Coding
+        thoughts = load_thought_stream()
+        if not thoughts.empty:
+            for _, row in thoughts.iterrows():
+                ts = pd.to_datetime(row['timestamp']).strftime('%H:%M:%S')
+                agent = row['agent_name']
+                msg = row['message']
 
-            # Highlight key keywords
-            msg = msg.replace("Bullish", "<b><span style='color:#00d084'>Bullish</span></b>")
-            msg = msg.replace("Bearish", "<b><span style='color:#ff4d6d'>Bearish</span></b>")
+                # Highlight key keywords
+                msg = msg.replace("Bullish", "<b><span style='color:#00d084'>Bullish</span></b>")
+                msg = msg.replace("Bearish", "<b><span style='color:#ff4d6d'>Bearish</span></b>")
 
-            st.markdown(f"""
-            <div class="thought-card" style="border-left-color: {'#00b4d8' if 'News' in agent else '#ffb703' if 'OI' in agent else '#9b5de5'}">
-                <span class="thought-time">{ts}</span>
-                <div class="agent-name">@{agent} {f'[{row["symbol"]}]' if row['symbol'] else ''}</div>
-                <div class="thought-msg">{msg}</div>
-            </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("Waiting for agent deliberations...")
+                st.markdown(f"""
+                <div class="thought-card" style="border-left-color: {'#00b4d8' if 'News' in agent else '#ffb703' if 'OI' in agent else '#9b5de5'}">
+                    <span class="thought-time">{ts}</span>
+                    <div class="agent-name">@{agent} {f'[{row["symbol"]}]' if row['symbol'] else ''}</div>
+                    <div class="thought-msg">{msg}</div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info("Waiting for agent deliberations...")
 
 
-    st.divider()
-    st.markdown("### 🧬 Swarm Architecture Context")
-    st.info("""
-    **Significance of the Swarm:**
-    - **NewsAgent**: Processes macro sentiment (avoiding 'bad news' traps).
-    - **OptionChainAgent**: Tracks the 'Large Institutional Footprint' via OI.
-    - **ScreenerAgent**: Ensures technical structure (VWAP/ST) is confirmed.
-    *A trade is only suggested when these independent minds reach Confluence.*
-    """)
+        st.divider()
+        st.markdown("### 🧬 Swarm Architecture Context")
+        st.info("""
+        **Significance of the Swarm:**
+        - **NewsAgent**: Processes macro sentiment (avoiding 'bad news' traps).
+        - **OptionChainAgent**: Tracks the 'Large Institutional Footprint' via OI.
+        - **ScreenerAgent**: Ensures technical structure (VWAP/ST) is confirmed.
+        *A trade is only suggested when these independent minds reach Confluence.*
+        """)
 
-    st.divider()
-    st.markdown("### ⚙️ Evolved Weights")
-    weights = load_agent_weights()
-    if weights:
-        for agent_name, agent_weights in weights.items():
-            with st.expander(f"Weights: {agent_name.replace('_', ' ').title()}"):
-                for k, v in sorted(agent_weights.items(), key=lambda x: x[1], reverse=True):
-                    st.progress(v, text=f"{k}: {v:.2f}")
+        st.divider()
+        st.markdown("### ⚙️ Evolved Weights")
+        weights = load_agent_weights()
+        if weights:
+            for agent_name, agent_weights in weights.items():
+                with st.expander(f"Weights: {agent_name.replace('_', ' ').title()}"):
+                    for k, v in sorted(agent_weights.items(), key=lambda x: x[1], reverse=True):
+                        st.progress(v, text=f"{k}: {v:.2f}")
+    
+    _render_thought_stream()
 
 st.markdown("---")
 st.caption("🤖 AI Trading Agent | Agentic Options Trading System | Advisory Only — Not Financial Advice")

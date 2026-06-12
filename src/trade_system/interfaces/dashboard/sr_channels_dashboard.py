@@ -14,6 +14,122 @@ from trade_system.interfaces.live.helpers import resample_to_timeframe
 
 LOGGER = logging.getLogger(__name__)
 
+def load_latest_option_chain(symbol: str) -> pd.DataFrame:
+    try:
+        from trade_system.infrastructure.database.connection import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            ts_query = text("""
+                SELECT MAX(timestamp) as max_ts
+                FROM option_chain_data
+                WHERE underlying_symbol = :symbol
+            """)
+            ts_res = conn.execute(ts_query, {"symbol": symbol}).first()
+            if not ts_res or not ts_res[0]:
+                return pd.DataFrame()
+            
+            data_query = text("""
+                SELECT strike, option_type, oi, oi_change, ltp, volume
+                FROM option_chain_data
+                WHERE underlying_symbol = :symbol
+                  AND timestamp = :ts
+            """)
+            return pd.read_sql(data_query, conn, params={"symbol": symbol, "ts": ts_res[0]})
+    except Exception as e:
+        LOGGER.error(f"Error loading latest option chain: {e}")
+        return pd.DataFrame()
+
+def validate_channels_with_data(channels, df_candles, option_chain_df):
+    validated_rows = []
+    if df_candles.empty:
+        return validated_rows
+        
+    cur_close = df_candles["close"].iloc[-1]
+    total_volume = df_candles["volume"].sum() or 1.0
+    
+    for i, ch in enumerate(channels):
+        # 1. Volume Node Density
+        overlap_vol = df_candles[
+            (df_candles["high"] >= ch.low) & (df_candles["low"] <= ch.high)
+        ]["volume"].sum()
+        vol_pct = (overlap_vol / total_volume) * 100
+        
+        # 2. Option Chain Confluence
+        oi_desc = "N/A"
+        oi_val = 0.0
+        max_oi_strike = None
+        confluence_badge = "Neutral / Moderate OI"
+        
+        if not option_chain_df.empty:
+            buffer = cur_close * 0.005 # 0.5%
+            zone_strikes = option_chain_df[
+                (option_chain_df["strike"] >= ch.low - buffer) & 
+                (option_chain_df["strike"] <= ch.high + buffer)
+            ]
+            
+            if ch.channel_type == "support":
+                pe_strikes = zone_strikes[zone_strikes["option_type"] == "PE"]
+                if not pe_strikes.empty:
+                    oi_val = pe_strikes["oi"].sum()
+                    max_row = pe_strikes.loc[pe_strikes["oi"].idxmax()]
+                    max_oi_strike = max_row["strike"]
+                    oi_desc = f"PE OI: {oi_val:,.0f} (Max strike ₹{max_oi_strike:.0f})"
+                    avg_pe_oi = option_chain_df[option_chain_df["option_type"] == "PE"]["oi"].mean() or 1.0
+                    if oi_val > avg_pe_oi * 1.8:
+                        confluence_badge = "🛡️ Heavy PE OI (Strong Support)"
+                    elif oi_val > avg_pe_oi * 1.2:
+                        confluence_badge = "🟢 Good PE OI Confluence"
+            elif ch.channel_type == "resistance":
+                ce_strikes = zone_strikes[zone_strikes["option_type"] == "CE"]
+                if not ce_strikes.empty:
+                    oi_val = ce_strikes["oi"].sum()
+                    max_row = ce_strikes.loc[ce_strikes["oi"].idxmax()]
+                    max_oi_strike = max_row["strike"]
+                    oi_desc = f"CE OI: {oi_val:,.0f} (Max strike ₹{max_oi_strike:.0f})"
+                    avg_ce_oi = option_chain_df[option_chain_df["option_type"] == "CE"]["oi"].mean() or 1.0
+                    if oi_val > avg_ce_oi * 1.8:
+                        confluence_badge = "⚠️ Heavy CE OI (Stiff Resistance)"
+                    elif oi_val > avg_ce_oi * 1.2:
+                        confluence_badge = "🔴 High CE OI Resistance"
+                        
+        validated_rows.append({
+            "#": i + 1,
+            "Type": ch.channel_type.upper(),
+            "Zone High (₹)": f"{ch.high:.2f}",
+            "Zone Low (₹)": f"{ch.low:.2f}",
+            "Volume Node %": f"{vol_pct:.1f}%",
+            "OI Confluence Details": oi_desc,
+            "Validation Verdict": confluence_badge
+        })
+    return validated_rows
+
+async def analyze_sr_zones_with_ai(symbol: str, cur_close: float, validation_rows: list) -> str:
+    from trade_system.application.advisory.llm import LlmAdvisorClient
+    llm = LlmAdvisorClient()
+    if not llm.configured():
+        return "LLM not configured. Please set your GOOGLE_API_KEY in the environment."
+        
+    prompt = (
+        "You are an elite derivatives market risk manager. Analyze the following Support & Resistance zones "
+        f"for asset '{symbol}' (Current price: ₹{cur_close:.2f}):\n\n"
+        "Zones under audit:\n"
+    )
+    for r in validation_rows:
+        prompt += (
+            f"- Zone {r['#']} ({r['Type']}): ₹{r['Zone Low (₹)']} - ₹{r['Zone High (₹)']} | "
+            f"Volume Node Density: {r['Volume Node %']} | OI Details: {r['OI Confluence Details']} | "
+            f"Rule Verdict: {r['Validation Verdict']}\n"
+        )
+    prompt += (
+        "\nProvide a professional Option Buyer S/R Validation Report. Include:\n"
+        "1. **Audit Summary**: Critique these zones. Which zone is the strongest 'Fortress' for entry? Which is weak and likely to break?\n"
+        "2. **Trade Recommendations**: Precise action points for call/put buyers (e.g. 'Wait for bounce at Zone X, enter Call with target Zone Y').\n"
+        "3. **Decay Warning**: Advise if price is stuck between narrow ranges causing heavy option decay.\n"
+        "Output in clean, beautifully styled markdown with clear bullet points."
+    )
+    return await llm.complete(prompt)
+
 # ── PAGE HEADER ──────────────────────────────────────────────────────────────
 st.markdown("## 🏗️ Support & Resistance Channels")
 st.caption(
@@ -318,31 +434,36 @@ else:
 
     st.plotly_chart(fig, use_container_width=True, key="sr_channel_chart")
 
-    # ── CHANNEL SUMMARY TABLE ────────────────────────────────────────────
-    st.subheader("🏛️ Active Support & Resistance Zones")
+    # ── CHANNEL VALIDATOR PANEL ──────────────────────────────────────────
+    st.subheader("🏛️ Support & Resistance Zone Validator")
+    st.markdown("Evaluating pivots, option chain open interest confluence, and historical volume nodes.")
+    
     if latest and latest.channels:
-        rows = []
-        cur_close = df_candles["close"].iloc[-1]
-        for i, ch in enumerate(latest.channels):
-            emoji = (
-                "🔴" if ch.channel_type == "resistance"
-                else "🟢" if ch.channel_type == "support"
-                else "⚪"
-            )
-            dist = ((ch.high + ch.low) / 2 - cur_close) / cur_close * 100
-            rows.append(
-                {
-                    "#": i + 1,
-                    "Type": f"{emoji} {ch.channel_type.title()}",
-                    "Zone High (₹)": f"{ch.high:.2f}",
-                    "Zone Low (₹)": f"{ch.low:.2f}",
-                    "Width (₹)": f"{ch.high - ch.low:.2f}",
-                    "Distance %": f"{dist:+.2f}%",
-                }
-            )
-        st.dataframe(
-            pd.DataFrame(rows), use_container_width=True, hide_index=True
-        )
+        oc_df = load_latest_option_chain(selected_symbol)
+        validated_data = validate_channels_with_data(latest.channels, df_candles, oc_df)
+        
+        if validated_data:
+            val_df = pd.DataFrame(validated_data)
+            st.dataframe(val_df, use_container_width=True, hide_index=True)
+            
+            # AI Validation Section
+            st.markdown("---")
+            cur_close = df_candles["close"].iloc[-1]
+            if st.button("🤖 Run AI Zone Validation Verdict", key="ai_sr_validation_btn", use_container_width=True):
+                with st.spinner("Analyzing zones, option chain and volume nodes with Gemini..."):
+                    import asyncio
+                    try:
+                        verdict = asyncio.run(analyze_sr_zones_with_ai(selected_symbol, cur_close, validated_data))
+                        st.markdown(f"""
+                        <div style='background:#1e2130; padding:20px; border-radius:12px; border:1px solid #00e676; margin-top:15px; margin-bottom:15px;'>
+                            <h3 style='margin-top:0; color:#00e676;'>🧠 AI S/R Zone Validation Report</h3>
+                            <div style='font-size:0.9rem; line-height:1.5;'>{verdict.replace(chr(10), '<br/>')}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    except Exception as e:
+                        st.error(f"Failed to generate AI validation: {e}")
+        else:
+            st.info("No validation data available.")
     else:
         st.info("No active S/R channels detected with the current parameters.")
 

@@ -8,10 +8,10 @@ from pathlib import Path
 import logging
 
 from trade_system.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
+from trade_system.application.analysis import pro_oc_analyzer
 from trade_system.infrastructure.database.connection import get_engine
 from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -73,27 +73,12 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_resource
-def get_broker():
-    """Load and authenticate Fyers broker client."""
-    try:
-        settings = Settings.load()
-        auth_service = FyersAuthService(settings)
-        token = auth_service.get_valid_token()
-        if not token:
-            return None
-        broker = FyersBroker(
-            client_id=settings.fyers.client_id,
-            access_token=token,
-            user_id=settings.fyers.user_id,
-            authenticator=auth_service.authenticator
-        )
-        if broker.authenticate():
-            return broker
-    except Exception as e:
-        LOGGER.error(f"Fyers broker creation failed: {e}")
-    return None
 
+def get_broker():
+    """Return the shared cached broker instance."""
+    return get_cached_broker()
+
+@st.cache_data(ttl=300)
 def load_db_dates(symbol: str) -> list[str]:
     """Get all unique dates in the database for option chain snapshots."""
     try:
@@ -112,6 +97,7 @@ def load_db_dates(symbol: str) -> list[str]:
         LOGGER.error(f"Error loading dates: {e}")
         return []
 
+@st.cache_data(ttl=60)
 def load_db_snapshots(symbol: str, target_date: str) -> list[tuple[datetime, pd.DataFrame]]:
     """Load all snapshots for a specific symbol and date."""
     try:
@@ -119,14 +105,17 @@ def load_db_snapshots(symbol: str, target_date: str) -> list[tuple[datetime, pd.
         snapshots = []
         with engine.connect() as conn:
             from sqlalchemy import text
+            start_time = f"{target_date} 00:00:00"
+            end_time = f"{target_date} 23:59:59"
             query = text("""
                 SELECT DISTINCT timestamp 
                 FROM option_chain_data 
                 WHERE underlying_symbol = :symbol 
-                  AND date(timestamp) = :date_str 
+                  AND timestamp >= :start_time
+                  AND timestamp <= :end_time
                 ORDER BY timestamp ASC
             """)
-            ts_df = pd.read_sql(query, conn, params={"symbol": symbol, "date_str": target_date})
+            ts_df = pd.read_sql(query, conn, params={"symbol": symbol, "start_time": start_time, "end_time": end_time})
             if ts_df.empty:
                 return []
             
@@ -145,20 +134,24 @@ def load_db_snapshots(symbol: str, target_date: str) -> list[tuple[datetime, pd.
         LOGGER.error(f"Error loading snapshots: {e}")
         return []
 
+@st.cache_data(ttl=60)
 def load_db_price_data(symbol: str, target_date: str) -> pd.DataFrame:
     """Load 1m OHLCV price data for the selected date."""
     try:
         engine = get_engine()
         with engine.connect() as conn:
             from sqlalchemy import text
+            start_time = f"{target_date} 00:00:00"
+            end_time = f"{target_date} 23:59:59"
             query = text("""
                 SELECT timestamp, open, high, low, close, volume 
                 FROM ohlcv_1m 
                 WHERE symbol = :symbol 
-                  AND date(timestamp) = :date_str 
+                  AND timestamp >= :start_time
+                  AND timestamp <= :end_time
                 ORDER BY timestamp ASC
             """)
-            df = pd.read_sql(query, conn, params={"symbol": symbol, "date_str": target_date})
+            df = pd.read_sql(query, conn, params={"symbol": symbol, "start_time": start_time, "end_time": end_time})
             if not df.empty:
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
             return df
@@ -319,7 +312,13 @@ if confluence_data:
 st.markdown("---")
 
 # --- 2. TRANSITIONS & CHARTING ---
-tab_chart, tab_transitions, tab_strikes = st.tabs(["📈 Price Action & Smart OI Overlay", "⏱️ Signal Transitions Timeline", "🎯 Filtered Signal Strikes"])
+tab_chart, tab_transitions, tab_strikes, tab_pro_trader, tab_iv_greeks = st.tabs([
+    "📈 Price Action & Smart OI Overlay",
+    "⏱️ Signal Transitions Timeline",
+    "🎯 Filtered Signal Strikes",
+    "🏦 Pro Trader Analytics",
+    "📊 IV Skew & Greeks"
+])
 
 with tab_chart:
     st.subheader("Price vs. Smart OI & technical levels")
@@ -545,16 +544,62 @@ st.markdown("---")
 
 # --- 3. PCR & OPEN INTEREST WALLS ---
 st.subheader("🧱 Institutional Walls: CE vs. PE Open Interest")
-st.caption("Visualizing filtered CE vs PE positioning side-by-side to pinpoint key support & resistance zones.")
+st.caption("Compare cumulative open interest walls or daily fresh positioning (buildup/unwinding) across filtered Smart OI strikes.")
 
 if not latest_oc.empty:
-    # Filter latest_oc to near-ATM strikes to keep visualization clean
+    # 1. UI controls for visualization mode
+    col_toggle1, col_toggle2 = st.columns(2)
+    with col_toggle1:
+        view_mode = st.radio(
+            "Select Strikes Filter",
+            options=["Filtered Smart OI", "All Near-ATM Strikes"],
+            horizontal=True,
+            help="Filtered Smart OI shows only the high-conviction institutional strikes after filtering noise. All Near-ATM shows raw option chain data."
+        )
+    with col_toggle2:
+        metric_mode = st.radio(
+            "Select Metric",
+            options=["OI Change (Daily)", "Total Open Interest"],
+            horizontal=True,
+            help="OI Change shows the net contracts added (buildup) or unwound (exit) since market open. Total Open Interest shows outstanding position walls."
+        )
+
+    # 2. Calculate daily change in OI if selected
+    df_to_plot = latest_oc.copy()
+    if metric_mode == "OI Change (Daily)" and snapshots:
+        first_oc = snapshots[0][1]
+        latest_aligned = df_to_plot.set_index(["strike", "option_type"])
+        first_aligned = first_oc.set_index(["strike", "option_type"])
+        # Calculate daily change
+        latest_aligned["oi_change_daily"] = latest_aligned["oi"] - first_aligned["oi"]
+        latest_aligned["oi_change_daily"] = latest_aligned["oi_change_daily"].fillna(latest_aligned["oi"])
+        df_to_plot = latest_aligned.reset_index()
+        y_col = "oi_change_daily"
+        yaxis_title = "Change in Open Interest (Contracts)"
+        chart_title_metric = "Change in Open Interest (Buildup vs. Unwinding)"
+    else:
+        y_col = "oi"
+        yaxis_title = "Open Interest (Contracts)"
+        chart_title_metric = "Total Open Interest Concentration"
+
+    # 3. Filter strikes based on view mode
     atm_strike = summary["atm_strike"]
-    visual_df = latest_oc[latest_oc["strike"].apply(lambda s: abs(s - atm_strike) <= 5 * analyzer.strike_step)].copy()
-    
+    if view_mode == "Filtered Smart OI" and signal_strikes:
+        sig_keys = {(s["strike"], s["option_type"]) for s in signal_strikes}
+        visual_df = df_to_plot[df_to_plot.apply(lambda row: (row["strike"], row["option_type"]) in sig_keys, axis=1)].copy()
+        if visual_df.empty:
+            st.info("No active signal strikes passed the filters at this snapshot. Showing all near-ATM strikes.")
+            visual_df = df_to_plot[df_to_plot["strike"].apply(lambda s: abs(s - atm_strike) <= 5 * analyzer.strike_step)].copy()
+            chart_title_filter = "All Near-ATM Strikes"
+        else:
+            chart_title_filter = "Filtered Smart OI Strikes"
+    else:
+        visual_df = df_to_plot[df_to_plot["strike"].apply(lambda s: abs(s - atm_strike) <= 5 * analyzer.strike_step)].copy()
+        chart_title_filter = "All Near-ATM Strikes"
+
     # Sort
     visual_df = visual_df.sort_values("strike")
-    
+
     # Create side-by-side bar chart
     fig_walls = go.Figure()
     
@@ -563,31 +608,475 @@ if not latest_oc.empty:
     
     fig_walls.add_trace(go.Bar(
         x=ce_data["strike"],
-        y=ce_data["oi"],
+        y=ce_data[y_col],
         name="Call OI (Resistance)",
         marker_color="#ff4d6d"
     ))
     
     fig_walls.add_trace(go.Bar(
         x=pe_data["strike"],
-        y=pe_data["oi"],
+        y=pe_data[y_col],
         name="Put OI (Support)",
         marker_color="#00d084"
     ))
     
     fig_walls.update_layout(
-        title="Open Interest Concentration at Key Strikes",
+        title=f"{chart_title_filter} — {chart_title_metric}",
         xaxis_title="Strike Price",
-        yaxis_title="Open Interest (Contracts)",
+        yaxis_title=yaxis_title,
         barmode="group",
         template="plotly_dark",
-        height=350,
-        margin=dict(l=20, r=20, t=40, b=20)
+        height=380,
+        margin=dict(l=20, r=20, t=40, b=20),
+        hovermode="x unified"
     )
     
     st.plotly_chart(fig_walls, use_container_width=True, key="oi_walls_chart")
 else:
     st.info("Waiting for option chain data to render visual walls...")
+
+# ===================================================================
+# --- TAB 4: PRO TRADER ANALYTICS ---
+# ===================================================================
+with tab_pro_trader:
+    st.subheader("🏦 Pro Trader Option Chain Analytics")
+    st.caption("Institutional-grade breakdown: who is buying, who is selling, where the walls are, and what the premium market is pricing.")
+
+    # Compute all pro analytics
+    first_oc = snapshots[0][1] if snapshots else None
+    pro_positioning = pro_oc_analyzer.compute_buyer_seller_positioning(
+        latest_oc, first_oc, spot_price, analyzer.strike_step
+    )
+    pro_oi_conc = pro_oc_analyzer.compute_oi_concentration(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+    pro_vol_conc = pro_oc_analyzer.compute_volume_concentration(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+    pro_ce_pe = pro_oc_analyzer.compute_ce_pe_difference(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+    pro_atm = pro_oc_analyzer.compute_atm_premium_analysis(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+    pro_iv = pro_oc_analyzer.compute_iv_skew(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+
+    # ── 4a. BUYER vs SELLER SCOREBOARD ─────────────────────────────────
+    st.markdown("### 🥊 Buyer vs Seller Scoreboard")
+    st.caption("Aggregate OI flow breakdown — who is adding positions and which side dominates.")
+
+    dom = pro_positioning.get("dominant", "BALANCED")
+    dom_colors = {"BUYERS": "#00d084", "SELLERS": "#ff4d6d", "BALANCED": "#ffb703"}
+    dom_color = dom_colors.get(dom, "#8b949e")
+
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    with pc1:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #00d084;">
+            <div class="status-title">CE Buyers (Long Buildup)</div>
+            <div class="status-value" style="color: #00d084; font-size:1.6rem;">{pro_positioning['ce_buyer_oi']:,}</div>
+            <div class="status-desc">Contracts added by call buyers</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with pc2:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #ff4d6d;">
+            <div class="status-title">CE Sellers (Short Buildup)</div>
+            <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">{pro_positioning['ce_seller_oi']:,}</div>
+            <div class="status-desc">Contracts added by call writers</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with pc3:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #00b4d8;">
+            <div class="status-title">PE Buyers (Long Buildup)</div>
+            <div class="status-value" style="color: #00b4d8; font-size:1.6rem;">{pro_positioning['pe_buyer_oi']:,}</div>
+            <div class="status-desc">Contracts added by put buyers</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with pc4:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #9b5de5;">
+            <div class="status-title">PE Sellers (Short Buildup)</div>
+            <div class="status-value" style="color: #9b5de5; font-size:1.6rem;">{pro_positioning['pe_seller_oi']:,}</div>
+            <div class="status-desc">Contracts added by put writers</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Dominant badge
+    st.markdown(f"""
+    <div style="background:#1e2130; padding:12px 20px; border-radius:8px; border-left:6px solid {dom_color}; margin:10px 0 20px 0;">
+        <span style="color:{dom_color}; font-weight:bold; font-size:1.1rem;">Market Dominant: {dom}</span>
+        <span style="color:#8b949e; margin-left:15px;">CE Unwind: {pro_positioning['ce_unwind_oi']:,} | PE Unwind: {pro_positioning['pe_unwind_oi']:,}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 4b. ATM PREMIUM ANALYSIS ───────────────────────────────────────
+    st.markdown("### 💰 ATM Straddle Premium & Expected Move")
+
+    atm_c1, atm_c2, atm_c3, atm_c4 = st.columns(4)
+    with atm_c1:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #ffb703;">
+            <div class="status-title">ATM Strike</div>
+            <div class="status-value" style="color: #ffb703; font-size:1.5rem;">₹{pro_atm['atm_strike']:,.0f}</div>
+            <div class="status-desc">CE: ₹{pro_atm['ce_ltp']:,.2f} | PE: ₹{pro_atm['pe_ltp']:,.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with atm_c2:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #00e6ff;">
+            <div class="status-title">Straddle Premium</div>
+            <div class="status-value" style="color: #00e6ff; font-size:1.5rem;">₹{pro_atm['straddle_premium']:,.2f}</div>
+            <div class="status-desc">CE+PE premium at ATM strike</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with atm_c3:
+        exp_mv_color = "#ff4d6d" if pro_atm['expected_move_pct'] > 2.0 else ("#ffb703" if pro_atm['expected_move_pct'] > 1.0 else "#00d084")
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid {exp_mv_color};">
+            <div class="status-title">Expected Move</div>
+            <div class="status-value" style="color: {exp_mv_color}; font-size:1.5rem;">±{pro_atm['expected_move_pct']:.2f}%</div>
+            <div class="status-desc">±{pro_atm['expected_move_pts']:,.0f} pts from ATM</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with atm_c4:
+        skew_color = "#00d084" if "BULLISH" in pro_atm['premium_skew'] else ("#ff4d6d" if "BEARISH" in pro_atm['premium_skew'] else "#8b949e")
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid {skew_color};">
+            <div class="status-title">Premium Skew</div>
+            <div class="status-value" style="color: {skew_color}; font-size:1.1rem;">{pro_atm['premium_skew']}</div>
+            <div class="status-desc">CE/PE Ratio: {pro_atm['ce_pe_ratio']:.2f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Breakeven levels
+    st.markdown(f"""
+    <div style="background:#161b22; padding:10px 18px; border-radius:8px; margin:5px 0 20px 0; display:flex; justify-content:space-around;">
+        <div style="text-align:center;"><span style="color:#8b949e; font-size:0.8rem;">LOWER BREAKEVEN</span><br><span style="color:#ff4d6d; font-weight:bold; font-size:1.1rem;">₹{pro_atm['lower_breakeven']:,.0f}</span></div>
+        <div style="text-align:center;"><span style="color:#8b949e; font-size:0.8rem;">ATM IV</span><br><span style="color:#ffb703; font-weight:bold; font-size:1.1rem;">{f"{pro_atm['atm_iv']:.2f}%" if pro_atm['atm_iv'] else 'N/A'}</span></div>
+        <div style="text-align:center;"><span style="color:#8b949e; font-size:0.8rem;">ATM OI (CE | PE)</span><br><span style="color:#00b4d8; font-weight:bold; font-size:1.1rem;">{pro_atm['ce_oi']:,} | {pro_atm['pe_oi']:,}</span></div>
+        <div style="text-align:center;"><span style="color:#8b949e; font-size:0.8rem;">UPPER BREAKEVEN</span><br><span style="color:#00d084; font-weight:bold; font-size:1.1rem;">₹{pro_atm['upper_breakeven']:,.0f}</span></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 4c. CE − PE OI DIFFERENCE CHART ────────────────────────────────
+    st.markdown("### 📊 CE − PE Open Interest Difference")
+    st.caption("Positive = CE OI dominates (bearish wall) | Negative = PE OI dominates (bullish support)")
+
+    diff_data = pro_ce_pe.get("strike_diff", [])
+    if diff_data:
+        diff_df = pd.DataFrame(diff_data)
+        # Color: red for positive (bearish), green for negative (bullish)
+        diff_df["color"] = diff_df["oi_diff"].apply(lambda x: "#ff4d6d" if x > 0 else "#00d084")
+
+        fig_diff = go.Figure()
+        fig_diff.add_trace(go.Bar(
+            x=diff_df["strike"],
+            y=diff_df["oi_diff"],
+            marker_color=diff_df["color"],
+            name="CE − PE OI",
+            hovertemplate="Strike: ₹%{x:,.0f}<br>CE−PE OI: %{y:,}<extra></extra>"
+        ))
+
+        # ATM marker line
+        fig_diff.add_vline(
+            x=pro_atm["atm_strike"],
+            line_dash="dash",
+            line_color="#ffb703",
+            annotation_text=f"ATM ₹{pro_atm['atm_strike']:,.0f}",
+            annotation_position="top"
+        )
+
+        fig_diff.update_layout(
+            title=f"CE − PE OI Difference | Net Bias: {pro_ce_pe['net_bias']}",
+            xaxis_title="Strike Price",
+            yaxis_title="OI Difference (Contracts)",
+            template="plotly_dark",
+            height=380,
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        st.plotly_chart(fig_diff, use_container_width=True, key="ce_pe_diff_chart")
+    else:
+        st.info("No strike data available for CE−PE difference chart.")
+
+    # ── 4d. OI & VOLUME CONCENTRATION ──────────────────────────────────
+    st.markdown("### 🧱 Top OI & Volume Concentration")
+
+    conc_col1, conc_col2 = st.columns(2)
+    with conc_col1:
+        st.markdown("#### 🔴 Call (CE) Resistance Walls")
+        ce_walls = pro_oi_conc.get("ce_walls", [])
+        if ce_walls:
+            ce_df = pd.DataFrame(ce_walls)
+            st.dataframe(
+                ce_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "strike": st.column_config.NumberColumn("Strike", format="₹%,.0f"),
+                    "oi": st.column_config.NumberColumn("Open Interest", format="%,d"),
+                    "volume": st.column_config.NumberColumn("Volume", format="%,d"),
+                    "ltp": st.column_config.NumberColumn("LTP", format="₹%.2f"),
+                }
+            )
+        else:
+            st.info("No CE wall data.")
+
+    with conc_col2:
+        st.markdown("#### 🟢 Put (PE) Support Walls")
+        pe_walls = pro_oi_conc.get("pe_walls", [])
+        if pe_walls:
+            pe_df = pd.DataFrame(pe_walls)
+            st.dataframe(
+                pe_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "strike": st.column_config.NumberColumn("Strike", format="₹%,.0f"),
+                    "oi": st.column_config.NumberColumn("Open Interest", format="%,d"),
+                    "volume": st.column_config.NumberColumn("Volume", format="%,d"),
+                    "ltp": st.column_config.NumberColumn("LTP", format="₹%.2f"),
+                }
+            )
+        else:
+            st.info("No PE wall data.")
+
+    # Volume concentration
+    st.markdown("#### ⚡ Highest Volume Strikes (Intraday Action)")
+    vol_col1, vol_col2 = st.columns(2)
+    with vol_col1:
+        st.caption("🔴 CE — Most Active")
+        ce_active = pro_vol_conc.get("ce_active", [])
+        if ce_active:
+            st.dataframe(
+                pd.DataFrame(ce_active),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "strike": st.column_config.NumberColumn("Strike", format="₹%,.0f"),
+                    "volume": st.column_config.NumberColumn("Volume", format="%,d"),
+                    "oi": st.column_config.NumberColumn("OI", format="%,d"),
+                    "ltp": st.column_config.NumberColumn("LTP", format="₹%.2f"),
+                }
+            )
+    with vol_col2:
+        st.caption("🟢 PE — Most Active")
+        pe_active = pro_vol_conc.get("pe_active", [])
+        if pe_active:
+            st.dataframe(
+                pd.DataFrame(pe_active),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "strike": st.column_config.NumberColumn("Strike", format="₹%,.0f"),
+                    "volume": st.column_config.NumberColumn("Volume", format="%,d"),
+                    "oi": st.column_config.NumberColumn("OI", format="%,d"),
+                    "ltp": st.column_config.NumberColumn("LTP", format="₹%.2f"),
+                }
+            )
+
+    # ── 4e. ACTIONABLE TRADE INSIGHT ───────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🧠 Pro Trader Actionable Insight")
+    pro_narrative = pro_oc_analyzer.generate_pro_summary(
+        pro_positioning, pro_oi_conc, pro_atm, pro_ce_pe, pro_iv, spot_price
+    )
+    st.markdown(f"""
+    <div style="background:#1e2130; padding:20px 25px; border-radius:12px; border:1px solid #30363d; line-height:1.7;">
+    {pro_narrative.replace(chr(10), '<br>')}
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ===================================================================
+# --- TAB 5: IV SKEW & GREEKS ---
+# ===================================================================
+with tab_iv_greeks:
+    st.subheader("📊 Implied Volatility Skew & Greeks Analysis")
+    st.caption("Visualize the volatility surface and risk exposures across strikes.")
+
+    # Compute IV and Greeks
+    pro_iv_data = pro_oc_analyzer.compute_iv_skew(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+    pro_greeks = pro_oc_analyzer.compute_greeks_heatmap(
+        latest_oc, spot_price, analyzer.strike_step
+    )
+
+    # ── 5a. IV SKEW INFO CARDS ─────────────────────────────────────────
+    iv_c1, iv_c2, iv_c3, iv_c4 = st.columns(4)
+    with iv_c1:
+        atm_iv_val = pro_iv_data.get("atm_iv")
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #ffb703;">
+            <div class="status-title">ATM IV</div>
+            <div class="status-value" style="color: #ffb703; font-size:1.5rem;">{f"{atm_iv_val:.2f}%" if atm_iv_val else "N/A"}</div>
+            <div class="status-desc">At-the-money implied volatility</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with iv_c2:
+        otm_put = pro_iv_data.get("avg_otm_put_iv")
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #ff4d6d;">
+            <div class="status-title">OTM Put IV (Avg)</div>
+            <div class="status-value" style="color: #ff4d6d; font-size:1.5rem;">{f"{otm_put:.2f}%" if otm_put else "N/A"}</div>
+            <div class="status-desc">Downside protection cost</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with iv_c3:
+        otm_call = pro_iv_data.get("avg_otm_call_iv")
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid #00d084;">
+            <div class="status-title">OTM Call IV (Avg)</div>
+            <div class="status-value" style="color: #00d084; font-size:1.5rem;">{f"{otm_call:.2f}%" if otm_call else "N/A"}</div>
+            <div class="status-desc">Upside speculation cost</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with iv_c4:
+        skew_t = pro_iv_data.get("skew_type", "UNKNOWN")
+        skew_c = "#ff4d6d" if "PUT" in skew_t else ("#00d084" if "CALL" in skew_t else ("#ffb703" if "SMILE" in skew_t else "#8b949e"))
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 4px solid {skew_c};">
+            <div class="status-title">Skew Pattern</div>
+            <div class="status-value" style="color: {skew_c}; font-size:1.0rem;">{skew_t}</div>
+            <div class="status-desc">Current volatility surface shape</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── 5b. IV SMILE / SKEW CURVE ──────────────────────────────────────
+    st.markdown("### 📈 IV Smile / Skew Curve")
+    ce_iv_curve = pro_iv_data.get("ce_iv_curve", [])
+    pe_iv_curve = pro_iv_data.get("pe_iv_curve", [])
+
+    if ce_iv_curve or pe_iv_curve:
+        fig_iv = go.Figure()
+
+        if ce_iv_curve:
+            ce_iv_df = pd.DataFrame(ce_iv_curve)
+            fig_iv.add_trace(go.Scatter(
+                x=ce_iv_df["strike"],
+                y=ce_iv_df["iv"],
+                mode="lines+markers",
+                name="CE IV",
+                line=dict(color="#ff4d6d", width=2.5),
+                marker=dict(size=5),
+            ))
+
+        if pe_iv_curve:
+            pe_iv_df = pd.DataFrame(pe_iv_curve)
+            fig_iv.add_trace(go.Scatter(
+                x=pe_iv_df["strike"],
+                y=pe_iv_df["iv"],
+                mode="lines+markers",
+                name="PE IV",
+                line=dict(color="#00d084", width=2.5),
+                marker=dict(size=5),
+            ))
+
+        # ATM vertical line
+        atm_s = pro_atm.get("atm_strike", spot_price)
+        fig_iv.add_vline(
+            x=atm_s,
+            line_dash="dash",
+            line_color="#ffb703",
+            annotation_text=f"ATM ₹{atm_s:,.0f}",
+            annotation_position="top"
+        )
+
+        fig_iv.update_layout(
+            title="Implied Volatility vs Strike Price",
+            xaxis_title="Strike Price",
+            yaxis_title="Implied Volatility (%)",
+            template="plotly_dark",
+            height=400,
+            margin=dict(l=20, r=20, t=50, b=20),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_iv, use_container_width=True, key="iv_skew_chart")
+    else:
+        st.info("No IV data available for the selected snapshot.")
+
+    # ── 5c. GREEKS HEATMAP TABLE ───────────────────────────────────────
+    st.markdown("### 🔥 Greeks Heatmap (Near-ATM Strikes)")
+    st.caption("Delta, Gamma, Theta, Vega for CE and PE side-by-side. ATM row highlighted.")
+
+    heatmap_data = pro_greeks.get("heatmap_data", [])
+    if heatmap_data:
+        gdf = pd.DataFrame(heatmap_data)
+        display_df = gdf[[
+            "strike", "ce_ltp", "ce_delta", "ce_gamma", "ce_theta", "ce_vega",
+            "pe_ltp", "pe_delta", "pe_gamma", "pe_theta", "pe_vega"
+        ]].copy()
+        display_df.columns = [
+            "Strike", "CE LTP", "CE Δ", "CE Γ", "CE Θ", "CE ν",
+            "PE LTP", "PE Δ", "PE Γ", "PE Θ", "PE ν"
+        ]
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Strike": st.column_config.NumberColumn("Strike", format="₹%,.0f"),
+                "CE LTP": st.column_config.NumberColumn("CE LTP", format="₹%.2f"),
+                "CE Δ": st.column_config.NumberColumn("CE Delta", format="%.4f"),
+                "CE Γ": st.column_config.NumberColumn("CE Gamma", format="%.6f"),
+                "CE Θ": st.column_config.NumberColumn("CE Theta", format="%.2f"),
+                "CE ν": st.column_config.NumberColumn("CE Vega", format="%.2f"),
+                "PE LTP": st.column_config.NumberColumn("PE LTP", format="₹%.2f"),
+                "PE Δ": st.column_config.NumberColumn("PE Delta", format="%.4f"),
+                "PE Γ": st.column_config.NumberColumn("PE Gamma", format="%.6f"),
+                "PE Θ": st.column_config.NumberColumn("PE Theta", format="%.2f"),
+                "PE ν": st.column_config.NumberColumn("PE Vega", format="%.2f"),
+            }
+        )
+
+        if not pro_greeks.get("has_meaningful_greeks", False):
+            st.warning("⚠️ Greeks values appear uniform — the broker may not be providing granular Greeks data. Delta/Gamma/Theta/Vega accuracy depends on broker feed quality.")
+    else:
+        st.info("No Greeks data available for the selected snapshot.")
+
+    # ── 5d. THETA DECAY BAR CHART ─────────────────────────────────────
+    st.markdown("### ⏳ Theta Decay by Strike")
+    st.caption("Negative theta = time decay eating premium. Identify max-decay zones favored by option sellers.")
+
+    if heatmap_data:
+        theta_df = pd.DataFrame(heatmap_data)
+        theta_df = theta_df[theta_df["ce_theta"].notna() | theta_df["pe_theta"].notna()].copy()
+
+        if not theta_df.empty:
+            fig_theta = go.Figure()
+            fig_theta.add_trace(go.Bar(
+                x=theta_df["strike"],
+                y=theta_df["ce_theta"],
+                name="CE Theta",
+                marker_color="#ff4d6d",
+            ))
+            fig_theta.add_trace(go.Bar(
+                x=theta_df["strike"],
+                y=theta_df["pe_theta"],
+                name="PE Theta",
+                marker_color="#00d084",
+            ))
+            fig_theta.update_layout(
+                title="Theta Decay Across Strikes",
+                xaxis_title="Strike Price",
+                yaxis_title="Theta (₹/day)",
+                barmode="group",
+                template="plotly_dark",
+                height=350,
+                margin=dict(l=20, r=20, t=50, b=20),
+            )
+            st.plotly_chart(fig_theta, use_container_width=True, key="theta_decay_chart")
+        else:
+            st.info("No theta data available.")
+    else:
+        st.info("No Greeks data available for theta visualization.")
+
 
 # Add help section at bottom
 st.divider()

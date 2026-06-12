@@ -20,6 +20,8 @@ pages = {
         st.Page(HERE / "sector_scope_dashboard.py", title="Sector Scope", icon="🧭"),
     ],
     "Research & Strategy": [
+        st.Page(HERE / "option_research_dashboard.py", title="Option Research Lab", icon="🔬"),
+        st.Page(HERE / "candlestick_pattern_dashboard.py", title="Candlestick Pattern Lab", icon="🕯️"),
         st.Page(HERE / "strategy_dashboard.py", title="Strategy Lab", icon="🧪"),
         st.Page(HERE / "volumetric_order_flow_dashboard.py", title="Volumetric Order Flow", icon="📊"),
         st.Page(HERE / "sr_channels_dashboard.py", title="S/R Channels", icon="🏗️"),

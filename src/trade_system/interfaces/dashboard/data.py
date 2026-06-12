@@ -134,12 +134,16 @@ def load_strategy_summaries(root: Path | str) -> pd.DataFrame:
         summary_path = base / source.summary_path
         if not summary_path.exists():
             continue
-        frame = pd.read_csv(summary_path)
-        if frame.empty:
-            continue
-        if "year" in frame.columns:
-            frame = frame[frame["year"].astype(str).str.upper() != "ALL"].copy()
-        frames.append(_normalize_summary(frame, source=source, root=base))
+        try:
+            frame = pd.read_csv(summary_path)
+            if frame.empty:
+                continue
+            if "year" in frame.columns:
+                frame = frame[frame["year"].astype(str).str.upper() != "ALL"].copy()
+            frames.append(_normalize_summary(frame, source=source, root=base))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error loading summary {summary_path}: {e}")
     if not frames:
         return pd.DataFrame()
     result = pd.concat(frames, ignore_index=True)
@@ -208,33 +212,37 @@ def load_strategy_trades(root: Path | str, strategy: str, years: list[int] | Non
     paths = _candidate_trade_paths(base, strategy, years)
     frames: list[pd.DataFrame] = []
     for path in paths:
-        frame = pd.read_csv(path)
-        if frame.empty:
-            continue
-        frame["source_path"] = str(path.resolve())
-        frame["strategy"] = strategy
-        if "entry_time" in frame.columns:
-            frame["entry_time"] = pd.to_datetime(frame["entry_time"], errors="coerce")
-        if "exit_time" in frame.columns:
-            frame["exit_time"] = pd.to_datetime(frame["exit_time"], errors="coerce")
-        if "year" not in frame.columns:
-            if "entry_time" in frame.columns and frame["entry_time"].notna().any():
-                frame["year"] = frame["entry_time"].dt.year
-            else:
-                stem_parts = path.stem.split("_")
-                maybe_year = stem_parts[-2] if stem_parts[-1] == "trades" and len(stem_parts) >= 2 else stem_parts[-1]
-                frame["year"] = pd.to_numeric(maybe_year, errors="coerce")
-        if "points_captured" not in frame.columns:
-            if "gross_points" in frame.columns:
-                frame["points_captured"] = pd.to_numeric(frame["gross_points"], errors="coerce").fillna(0.0)
-            elif {"entry_price", "exit_price", "direction"}.issubset(frame.columns):
-                side = frame["direction"].astype(str).str.upper().map({"LONG": 1, "SHORT": -1}).fillna(0)
-                frame["points_captured"] = (pd.to_numeric(frame["exit_price"], errors="coerce").fillna(0.0) - pd.to_numeric(frame["entry_price"], errors="coerce").fillna(0.0)) * side
-            else:
-                frame["points_captured"] = 0.0
-        if "r_multiple" not in frame.columns:
-            frame["r_multiple"] = 0.0
-        frames.append(frame)
+        try:
+            frame = pd.read_csv(path)
+            if frame.empty:
+                continue
+            frame["source_path"] = str(path.resolve())
+            frame["strategy"] = strategy
+            if "entry_time" in frame.columns:
+                frame["entry_time"] = pd.to_datetime(frame["entry_time"], errors="coerce")
+            if "exit_time" in frame.columns:
+                frame["exit_time"] = pd.to_datetime(frame["exit_time"], errors="coerce")
+            if "year" not in frame.columns:
+                if "entry_time" in frame.columns and frame["entry_time"].notna().any():
+                    frame["year"] = frame["entry_time"].dt.year
+                else:
+                    stem_parts = path.stem.split("_")
+                    maybe_year = stem_parts[-2] if stem_parts[-1] == "trades" and len(stem_parts) >= 2 else stem_parts[-1]
+                    frame["year"] = pd.to_numeric(maybe_year, errors="coerce")
+            if "points_captured" not in frame.columns:
+                if "gross_points" in frame.columns:
+                    frame["points_captured"] = pd.to_numeric(frame["gross_points"], errors="coerce").fillna(0.0)
+                elif {"entry_price", "exit_price", "direction"}.issubset(frame.columns):
+                    side = frame["direction"].astype(str).str.upper().map({"LONG": 1, "SHORT": -1}).fillna(0)
+                    frame["points_captured"] = (pd.to_numeric(frame["exit_price"], errors="coerce").fillna(0.0) - pd.to_numeric(frame["entry_price"], errors="coerce").fillna(0.0)) * side
+                else:
+                    frame["points_captured"] = 0.0
+            if "r_multiple" not in frame.columns:
+                frame["r_multiple"] = 0.0
+            frames.append(frame)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error loading trades from {path}: {e}")
     if not frames:
         return pd.DataFrame()
     result = pd.concat(frames, ignore_index=True)
@@ -259,22 +267,27 @@ def load_agent_lab_runs(root: Path | str) -> pd.DataFrame:
         candidate_path = run_dir / "candidate_config.json"
         if not comparison_path.exists():
             continue
-        comparison = pd.read_csv(comparison_path)
-        pivot = comparison.set_index("metric")
-        rows.append(
-            {
-                "run_name": run_dir.name,
-                "comparison_path": str(comparison_path.resolve()),
-                "report_path": str(report_path.resolve()) if report_path.exists() else "",
-                "candidate_config_path": str(candidate_path.resolve()) if candidate_path.exists() else "",
-                "baseline_net_points": float(pivot.loc["net_points", "baseline"]) if "net_points" in pivot.index else 0.0,
-                "upgraded_net_points": float(pivot.loc["net_points", "upgraded"]) if "net_points" in pivot.index else 0.0,
-                "baseline_win_rate": float(pivot.loc["win_rate", "baseline"]) if "win_rate" in pivot.index else 0.0,
-                "upgraded_win_rate": float(pivot.loc["win_rate", "upgraded"]) if "win_rate" in pivot.index else 0.0,
-                "baseline_trades": float(pivot.loc["trades", "baseline"]) if "trades" in pivot.index else 0.0,
-                "upgraded_trades": float(pivot.loc["trades", "upgraded"]) if "trades" in pivot.index else 0.0,
-            }
-        )
+        try:
+            comparison = pd.read_csv(comparison_path)
+            if not comparison.empty:
+                pivot = comparison.set_index("metric")
+                rows.append(
+                    {
+                        "run_name": run_dir.name,
+                        "comparison_path": str(comparison_path.resolve()),
+                        "report_path": str(report_path.resolve()) if report_path.exists() else "",
+                        "candidate_config_path": str(candidate_path.resolve()) if candidate_path.exists() else "",
+                        "baseline_net_points": float(pivot.loc["net_points", "baseline"]) if "net_points" in pivot.index else 0.0,
+                        "upgraded_net_points": float(pivot.loc["net_points", "upgraded"]) if "net_points" in pivot.index else 0.0,
+                        "baseline_win_rate": float(pivot.loc["win_rate", "baseline"]) if "win_rate" in pivot.index else 0.0,
+                        "upgraded_win_rate": float(pivot.loc["win_rate", "upgraded"]) if "win_rate" in pivot.index else 0.0,
+                        "baseline_trades": float(pivot.loc["trades", "baseline"]) if "trades" in pivot.index else 0.0,
+                        "upgraded_trades": float(pivot.loc["trades", "upgraded"]) if "trades" in pivot.index else 0.0,
+                    }
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Error loading comparison from {comparison_path}: {e}")
     return pd.DataFrame(rows)
 
 
@@ -287,12 +300,20 @@ def load_agent_lab_detail(root: Path | str, run_name: str) -> dict[str, object]:
     upgraded_summary_path = next(iter(sorted((run_dir / "upgraded").glob("*summary.csv"))), None)
     baseline_trades_path = next(iter(sorted((run_dir / "baseline").glob("*trades.csv"))), None)
     upgraded_trades_path = next(iter(sorted((run_dir / "upgraded").glob("*trades.csv"))), None)
+    def _safe_read(p, **kwargs):
+        if not p or not Path(p).exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(p, **kwargs)
+        except Exception:
+            return pd.DataFrame()
+
     return {
-        "comparison": pd.read_csv(comparison_path) if comparison_path.exists() else pd.DataFrame(),
+        "comparison": _safe_read(comparison_path),
         "candidate": candidate_path.read_text() if candidate_path.exists() else "{}",
         "report": report_path.read_text() if report_path.exists() else "",
-        "baseline_summary": pd.read_csv(baseline_summary_path) if baseline_summary_path else pd.DataFrame(),
-        "upgraded_summary": pd.read_csv(upgraded_summary_path) if upgraded_summary_path else pd.DataFrame(),
-        "baseline_trades": pd.read_csv(baseline_trades_path, parse_dates=["entry_time", "exit_time"]) if baseline_trades_path else pd.DataFrame(),
-        "upgraded_trades": pd.read_csv(upgraded_trades_path, parse_dates=["entry_time", "exit_time"]) if upgraded_trades_path else pd.DataFrame(),
+        "baseline_summary": _safe_read(baseline_summary_path),
+        "upgraded_summary": _safe_read(upgraded_summary_path),
+        "baseline_trades": _safe_read(baseline_trades_path, parse_dates=["entry_time", "exit_time"]),
+        "upgraded_trades": _safe_read(upgraded_trades_path, parse_dates=["entry_time", "exit_time"]),
     }

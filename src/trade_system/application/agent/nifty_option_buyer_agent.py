@@ -7,6 +7,7 @@ import logging
 import uuid
 from datetime import datetime, time
 from typing import Any, List, Optional
+import pandas as pd
 
 from trade_system.core import (
     TradeSuggestion, 
@@ -46,6 +47,7 @@ class NiftyOptionBuyerAgent:
 
     async def analyze_and_suggest(
         self, 
+        symbol: str,
         market_context: MarketContext,
         oc_analysis: OptionChainAnalysis,
         current_price: float
@@ -53,7 +55,6 @@ class NiftyOptionBuyerAgent:
         """
         Runs the full technical checklist including Supertrend confirmation.
         """
-        symbol = "NSE:NIFTY50-INDEX"
         LOGGER.info(f"NiftyOptionBuyerAgent: Analyzing {symbol} with Supertrend (7,3) confluence...")
 
         # 1. Broad Bias Filter

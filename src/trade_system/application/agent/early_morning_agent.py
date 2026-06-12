@@ -113,36 +113,188 @@ class EarlyMorningAgent:
             LOGGER.error(f"Error checking Gap & Go for {symbol}: {e}")
         return None
 
-    async def _check_orb(self, symbol: str, today_df: pd.DataFrame, leaders: set, laggards: set) -> Optional[TradeSuggestion]:
-        """Detects 15-minute Opening Range Breakout."""
+    def _get_nifty_trend(self) -> str:
+        """Determines Nifty 50 short-term direction based on 5-period SMA of 1-minute close prices."""
         try:
-            # 1. Define the 15m Range (09:15 to 09:30)
-            range_df = today_df.between_time("09:15", "09:30")
-            if range_df.empty or len(range_df) < 10: return None
+            with Session(self.engine) as session:
+                bars = get_market_data(session, "NSE:NIFTY50-INDEX", "1", limit=10)
+                if len(bars) >= 5:
+                    closes = [b.close for b in bars]
+                    sma_5 = sum(closes[-5:]) / 5.0
+                    latest_close = closes[-1]
+                    if latest_close > sma_5:
+                        return "BULLISH"
+                    elif latest_close < sma_5:
+                        return "BEARISH"
+        except Exception as e:
+            LOGGER.error(f"Failed to get Nifty trend: {e}")
+        return "NEUTRAL"
+
+    def _calculate_daily_atr(self, symbol: str, period: int = 14) -> Optional[float]:
+        """Calculates the daily ATR for the given symbol."""
+        try:
+            with Session(self.engine) as session:
+                bars = get_market_data(session, symbol, "D", limit=period + 1)
+                if len(bars) < 5:
+                    return None
+                
+                highs = [b.high for b in bars]
+                lows = [b.low for b in bars]
+                closes = [b.close for b in bars]
+                
+                trs = []
+                for i in range(1, len(bars)):
+                    tr = max(
+                        highs[i] - lows[i],
+                        abs(highs[i] - closes[i-1]),
+                        abs(lows[i] - closes[i-1])
+                    )
+                    trs.append(tr)
+                return sum(trs) / len(trs)
+        except Exception as e:
+            LOGGER.error(f"Failed to calculate ATR for {symbol}: {e}")
+        return None
+
+    def _load_watchlist(self) -> dict[str, dict]:
+        """Loads today's priority watchlist if available."""
+        try:
+            import json
+            from pathlib import Path
+            watchlist_dir = Path("data/watchlist")
+            today_str = datetime.now().strftime("%Y%m%d")
+            path = watchlist_dir / f"watchlist_{today_str}.json"
             
-            orb_high = range_df['high'].max()
-            orb_low = range_df['low'].min()
-            current_price = today_df.iloc[-1]['close']
+            if path.exists():
+                data = json.loads(path.read_text())
+                return {item["symbol"]: item for item in data}
+        except Exception as e:
+            LOGGER.error(f"Failed to load watchlist: {e}")
+        return {}
+
+    async def _check_orb(self, symbol: str, today_df: pd.DataFrame, leaders: set, laggards: set) -> Optional[TradeSuggestion]:
+        """Detects 15-minute Opening Range Breakout or NR7/IB yesterday's bracket breakout with advanced filters."""
+        try:
+            latest_bar = today_df.iloc[-1]
+            current_price = latest_bar['close']
             
+            # Check watchlist for compression coiling (NR7 / Inside Bar)
+            watchlist = self._load_watchlist()
+            watchlist_item = watchlist.get(symbol)
+            is_compression_stock = False
+            
+            if watchlist_item:
+                is_compression_stock = any(p in ["NR7 Compression", "Inside Bar"] for p in watchlist_item.get("patterns", []))
+                
+            pattern_name = "ORB"
+            range_df = None
+            
+            if is_compression_stock:
+                with Session(self.engine) as session:
+                    daily_bars = get_market_data(session, symbol, "D", limit=1)
+                if daily_bars:
+                    prev_day = daily_bars[0]
+                    orb_high = prev_day.high
+                    orb_low = prev_day.low
+                    pattern_name = "NR7/IB Bracket"
+                else:
+                    is_compression_stock = False
+                    
+            if not is_compression_stock:
+                # Fallback to standard 15m range (09:15 to 09:30)
+                range_df = today_df.between_time("09:15", "09:30")
+                if range_df.empty or len(range_df) < 2: return None
+                orb_high = range_df['high'].max()
+                orb_low = range_df['low'].min()
+            
+            # Check if this is a raw breakout candle
+            is_breakout_call = current_price > orb_high
+            is_breakout_put = current_price < orb_low
+            
+            if not is_breakout_call and not is_breakout_put:
+                return None
+                
             # Avoid repeated alerts
             if symbol in self._opening_ranges and self._opening_ranges[symbol].get('alerted'):
                 return None
 
             sector = FO_METADATA.get(symbol, "Other")
+            direction = TradeDirection.CALL if is_breakout_call else TradeDirection.PUT
+            sl = orb_low if direction == TradeDirection.CALL else orb_high
+            risk = abs(current_price - sl)
+            target = current_price + (risk * 2) if direction == TradeDirection.CALL else current_price - (risk * 2)
             
-            # Bullish ORB
-            if current_price > orb_high:
-                if sector in leaders or not leaders: # Confirm with sector heat
-                    self._thought(f"15M ORB Breakout: {symbol} sector {sector} is leading.", symbol, "ORB")
-                    self._opening_ranges[symbol] = {'alerted': True}
-                    return self._build_suggestion(symbol, TradeDirection.CALL, current_price, orb_low, "ORB")
+            # Apply Filters in order and log rejection reason if any fails
+            rejection_reason = None
+            
+            # Filter 1: Nifty Index Trend Alignment
+            nifty_trend = self._get_nifty_trend()
+            if direction == TradeDirection.CALL and nifty_trend != "BULLISH":
+                rejection_reason = f"Index trend is not BULLISH (current Nifty: {nifty_trend})"
+            elif direction == TradeDirection.PUT and nifty_trend != "BEARISH":
+                rejection_reason = f"Index trend is not BEARISH (current Nifty: {nifty_trend})"
+                
+            # Filter 2: ATR Exhaustion Filter (Opening Range size <= 35% ATR)
+            if not rejection_reason:
+                atr = self._calculate_daily_atr(symbol)
+                if atr is not None:
+                    range_size = orb_high - orb_low
+                    if range_size > 0.35 * atr:
+                        rejection_reason = f"Opening range size ({range_size:.2f}) exceeds 35% of daily ATR ({atr:.2f})"
+                        
+            # Filter 3: Volume Expansion (RVOL >= 1.5x)
+            if not rejection_reason:
+                if is_compression_stock:
+                    avg_vol = today_df['volume'].iloc[:-1].mean() if len(today_df) > 1 else latest_bar['volume']
+                else:
+                    avg_vol = range_df['volume'].mean() if range_df is not None else latest_bar['volume']
+                latest_vol = latest_bar['volume']
+                rvol = latest_vol / avg_vol if avg_vol > 0 else 1.0
+                if rvol < 1.5:
+                    rejection_reason = f"Breakout volume expansion is too low (RVOL: {rvol:.2f}x, required: 1.5x)"
+                    
+            # Filter 4: VWAP Alignment
+            if not rejection_reason:
+                temp_df = today_df.copy()
+                temp_df['tp'] = (temp_df['high'] + temp_df['low'] + temp_df['close']) / 3.0
+                temp_df['tp_vol'] = temp_df['tp'] * temp_df['volume']
+                cum_tp_vol = temp_df['tp_vol'].cumsum().iloc[-1]
+                cum_vol = temp_df['volume'].cumsum().iloc[-1]
+                vwap = cum_tp_vol / cum_vol if cum_vol > 0 else current_price
+                if direction == TradeDirection.CALL and current_price <= vwap:
+                    rejection_reason = f"Price ({current_price:.2f}) is below VWAP ({vwap:.2f})"
+                elif direction == TradeDirection.PUT and current_price >= vwap:
+                    rejection_reason = f"Price ({current_price:.2f}) is above VWAP ({vwap:.2f})"
+                    
+            # Filter 5: Strict Sector Alignment
+            if not rejection_reason:
+                if direction == TradeDirection.CALL:
+                    if leaders and sector not in leaders:
+                        rejection_reason = f"Sector {sector} is not leading (Leading: {list(leaders)})"
+                else:
+                    if laggards and sector not in laggards:
+                        rejection_reason = f"Sector {sector} is not lagging (Lagging: {list(laggards)})"
 
-            # Bearish ORB
-            if current_price < orb_low:
-                if sector in laggards or not laggards:
-                    self._thought(f"15M ORB Breakdown: {symbol} sector {sector} is lagging.", symbol, "ORB")
-                    self._opening_ranges[symbol] = {'alerted': True}
-                    return self._build_suggestion(symbol, TradeDirection.PUT, current_price, orb_high, "ORB")
+            # Handle Filter Rejection
+            if rejection_reason:
+                import json
+                params = {
+                    "type": "ORB_REJECTED",
+                    "symbol": symbol,
+                    "direction": direction.value,
+                    "entry": float(current_price),
+                    "sl": float(sl),
+                    "target": float(target),
+                    "reason": rejection_reason,
+                    "timestamp": datetime.now().isoformat()
+                }
+                self._thought(json.dumps(params), symbol=symbol, action="ORB_REJECTED")
+                self._opening_ranges[symbol] = {'alerted': True}
+                return None
+                
+            # If all filters pass, generate and return suggestion
+            self._thought(f"15M ORB {'Breakout' if direction == TradeDirection.CALL else 'Breakdown'} Confirmed: {symbol} sector {sector}.", symbol, "ORB")
+            self._opening_ranges[symbol] = {'alerted': True}
+            return self._build_suggestion(symbol, direction, current_price, sl, "ORB")
 
         except Exception as e:
             LOGGER.error(f"Error checking ORB for {symbol}: {e}")

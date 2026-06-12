@@ -42,7 +42,7 @@ class OptionChainAgent:
         
         try:
             # Initialize the heavy-lifting analyzer
-            analyzer = OptionChainAnalyzer(self.broker.fyers, symbol=symbol.replace("NSE:", "").replace("-INDEX", ""))
+            analyzer = OptionChainAnalyzer(self.broker.fyers, symbol=symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", ""))
             result = analyzer.analyze()
             
             if not result: return None

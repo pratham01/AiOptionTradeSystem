@@ -156,21 +156,49 @@ class FyersAuthService:
         self.settings = settings
         self.authenticator = FyersAuthenticator(settings)
 
+    def _is_token_from_today(self, token: str) -> bool:
+        if not token:
+            return False
+        try:
+            token_part = token.split(":")[-1]
+            parts = token_part.split(".")
+            if len(parts) != 3:
+                return False
+            payload_b64 = parts[1]
+            padding = "=" * (4 - len(payload_b64) % 4)
+            import base64
+            import json
+            payload_json = base64.urlsafe_b64decode(payload_b64 + padding).decode("utf-8")
+            payload = json.loads(payload_json)
+            iat = payload.get("iat")
+            if iat:
+                dt = datetime.fromtimestamp(iat)
+                return dt.date() == date.today()
+        except Exception as e:
+            logger.warning(f"Failed to parse token JWT: {e}")
+        return False
+
     def get_valid_token(self, force_refresh: bool = False) -> str | None:
         """
         Retrieves a valid token. 
         Checks cache first, then environment, and finally triggers TOTP if needed.
         """
-        # 1. Try Memory/Config
-        token = self.settings.fyers.access_token
-        
-        # 2. Try Cache File
-        if not token or force_refresh:
+        # 1. Try Cache File first (always prefer the shared token on disk if valid)
+        token = None
+        if not force_refresh:
             token = self.read_cached_token()
+            if token and not self._is_token_from_today(token):
+                token = None
+            
+        # 2. Try Memory/Config (loaded from env)
+        if not token:
+            env_token = self.settings.fyers.access_token
+            if env_token and self._is_token_from_today(env_token):
+                token = env_token
             
         # 3. Trigger TOTP only if absolutely required
         if not token or force_refresh:
-            logger.info("Shared Auth: No valid token found. Triggering once-per-day TOTP flow.")
+            logger.info("Shared Auth: No valid token found or token expired. Triggering once-per-day TOTP flow.")
             try:
                 token = self.authenticate_totp()
                 # Update .env so other processes pick it up
@@ -209,7 +237,7 @@ class FyersAuthService:
         return self.authenticate_totp()
 
     def _cache_token(self, token: str, source: str = "totp") -> None:
-        self.settings.fyers.access_token = token
+        object.__setattr__(self.settings.fyers, "access_token", token)
         self.settings.fyers.token_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"access_token": token, "source": source}
         self.settings.fyers.token_path.write_text(json.dumps(payload, indent=2))

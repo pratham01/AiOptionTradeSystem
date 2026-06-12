@@ -861,7 +861,7 @@ def test_load_previous_day_option_chain_snapshot_returns_latest_reference(tmp_pa
         ]
     ).to_csv(previous_day, index=False)
 
-    snapshot = service._load_previous_day_option_chain_snapshot(pd.Timestamp("2026-03-25 10:30:00"))
+    snapshot = service._load_previous_day_option_chain_snapshot("NIFTY50", pd.Timestamp("2026-03-25 10:30:00"))
 
     assert len(snapshot) == 2
     assert set(snapshot["strike"].tolist()) == {22950, 23050}

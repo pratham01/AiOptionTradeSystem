@@ -32,7 +32,7 @@ class BrokerTopGainersAgent:
         self,
         broker: FyersBroker,
         symbols: list[str] | None = None,
-        workers: int = 4,
+        workers: int = 1,
         batch_size: int = 200,
     ) -> None:
         self.broker = broker

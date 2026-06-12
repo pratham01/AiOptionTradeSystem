@@ -29,6 +29,7 @@ class OptionChainAnalyzer:
         self.symbol = symbol
         self.strike_count = strike_count
         self.expiries = []
+        self.nearest_expiry = None
         self._pcr_history = []
         self._pcr_history_max = 5
         self._fetch_and_set_expiries()
@@ -116,6 +117,12 @@ class OptionChainAnalyzer:
             if not response or response.get('s') != 'ok': return None, None
             
             spot_price = response.get('data', {}).get('ltp')
+            
+            expiry_data = response.get('data', {}).get('expiryData', [])
+            if expiry_data:
+                self.nearest_expiry = expiry_data[0].get('date')  # Format: DD-MM-YYYY
+            else:
+                self.nearest_expiry = None
             
             oc_list = response.get('data', {}).get('optionsChain', [])
             if not oc_list: return None, spot_price

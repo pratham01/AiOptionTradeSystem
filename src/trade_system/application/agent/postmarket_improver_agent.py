@@ -36,6 +36,8 @@ from trade_system.infrastructure.database.connection import get_engine
 from sqlalchemy.orm import Session
 
 from trade_system.application.analysis.weekly_gainers import NSEWeeklyGainersFetcher
+from trade_system.application.agent.market_synthesis_agent import MarketSynthesisAgent
+from trade_system.application.advisory.llm import LlmAdvisorClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -52,12 +54,14 @@ class PostMarketImproverAgent:
     ) -> None:
         self.broker = broker
         self.settings = settings or Settings.load()
+        self.llm_client = llm_client or LlmAdvisorClient()
         self.evolution_loop = EvolutionLoop()
-        self.skill_creator = SkillCreatorAgent(llm_client=llm_client)
-        self.missed_opportunity_agent = MissedOpportunityAgent(broker=broker, llm_client=llm_client)
-        self.correlation_agent = CorrelationAgent(llm_client=llm_client)
+        self.skill_creator = SkillCreatorAgent(llm_client=self.llm_client)
+        self.missed_opportunity_agent = MissedOpportunityAgent(broker=broker, llm_client=self.llm_client)
+        self.correlation_agent = CorrelationAgent(llm_client=self.llm_client)
         self.next_day_predictor = NextDayPredictorAgent(broker=broker)
         self.st_touch_agent = SupertrendTouchAgent(broker=broker)
+        self.market_synthesis_agent = MarketSynthesisAgent(llm_client=self.llm_client, settings=self.settings)
         self.mwpl_analyzer = MwplAnalyzer()
         self.vcp_scanner = VcpScannerAgent()
         self.sectoral_analyzer = SectoralAnalyzer()
@@ -124,6 +128,10 @@ class PostMarketImproverAgent:
         self._thought("PerformanceCritic", "Comparing today's suggested trades against actual market outcomes...", action="EVALUATING")
         trade_stats = await self.missed_opportunity_agent.analyze_today_performance()
         
+        # 3.5 Filter Diagnostics (True/False Negatives)
+        self._thought("PerformanceCritic", "Analyzing ORB breakouts that were filtered out today...", action="EVALUATING")
+        true_negatives = await self.missed_opportunity_agent.analyze_true_negatives()
+        
         # 4. Missed Momentum Detection
         top_symbols = [s.symbol for s in gainer_result.gainers[:15]] if gainer_result else []
         self._thought("OpportunityAgent", "Scanning top gainers for missed high-momentum setups...", action="SCANNING")
@@ -157,8 +165,29 @@ class PostMarketImproverAgent:
         self._thought("PostMarketOrchestrator", "Analyzing F&O candlestick patterns for technical setups...", action="ANALYZING")
         candle_patterns = self._analyze_candlestick_patterns(fo_universe)
         
+        # 11. AI Synthesis Report Generation
+        self._thought("PostMarketOrchestrator", "Triggering Swarm intelligence market synthesis...", action="SYNTHESIS")
+        synthesis_report = None
+        try:
+            synthesis_report = await self.market_synthesis_agent.generate_daily_synthesis(
+                stats=trade_stats,
+                missed=missed_insights,
+                correlation=correlation_summary,
+                skills=skills,
+                patterns=candle_patterns,
+                st_touches=st_touches,
+                rotation_df=rotation_df,
+                vcp=vcp_candidates
+            )
+        except Exception as exc:
+            LOGGER.error(f"Market synthesis generation failed: {exc}")
+
         # Final Report
-        self._send_comprehensive_report(trade_stats, missed_insights, correlation_summary, skills, candle_patterns, st_touches, rotation_df)
+        self._send_comprehensive_report(
+            trade_stats, missed_insights, correlation_summary, skills,
+            candle_patterns, st_touches, rotation_df, vcp=vcp_candidates, synthesis=synthesis_report,
+            true_negatives=true_negatives
+        )
         self._thought("PostMarketOrchestrator", "Post-market Swarm ritual finalized. Memory updated.", action="FINISH")
         
         return {"stats": trade_stats, "missed": missed_insights, "skills": skills}
@@ -353,7 +382,7 @@ class PostMarketImproverAgent:
             created.append(skill_msg)
         return created
 
-    def _send_comprehensive_report(self, stats, missed, correlation, skills, patterns=None, st_touches=None, rotation_df=None, vcp=None):
+    def _send_comprehensive_report(self, stats, missed, correlation, skills, patterns=None, st_touches=None, rotation_df=None, vcp=None, synthesis=None, true_negatives=None):
         lines = [
             "🏁 <b>Post-Market Swarm Analysis</b>",
             f"📅 Session: {date.today().strftime('%d %b %Y')}",
@@ -366,6 +395,25 @@ class PostMarketImproverAgent:
         ]
         for m in missed[:3]:
             lines.append(f" • {m}")
+
+        if true_negatives:
+            lines.append("\n🛡️ <b>Filter Diagnostics (True/False Negatives):</b>")
+            avoided_losses = [tn for tn in true_negatives if tn["outcome"] == "SL_HIT"]
+            missed_wins = [tn for tn in true_negatives if tn["outcome"] == "TARGET_HIT"]
+            lines.append(f" • Avoided Losses (True Negatives): {len(avoided_losses)}")
+            lines.append(f" • Missed Winners (False Negatives): {len(missed_wins)}")
+            
+            if avoided_losses:
+                lines.append("\n🟢 <b>Saved Trades (Avoided Losses):</b>")
+                for tn in avoided_losses[:5]:
+                    sym = tn["symbol"].split(':')[-1].replace('-EQ', '')
+                    lines.append(f" • <b>{sym}</b> ({tn['direction']}): Rejected because <i>{tn['reason']}</i>. (Simulated SL was hit)")
+                    
+            if missed_wins:
+                lines.append("\n🔴 <b>Missed Winners (False Negatives):</b>")
+                for tn in missed_wins[:5]:
+                    sym = tn["symbol"].split(':')[-1].replace('-EQ', '')
+                    lines.append(f" • <b>{sym}</b> ({tn['direction']}): Rejected because <i>{tn['reason']}</i>. (Simulated Target was hit)")
             
         if patterns:
             lines.append("\n🕯️ <b>Technical Patterns (Daily):</b>")
@@ -409,6 +457,12 @@ class PostMarketImproverAgent:
             
         lines.append("\n<i>Swarm Memory Synchronized.</i>")
         self.notifier.send("\n".join(lines))
+        
+        if synthesis:
+            try:
+                self.notifier.send(synthesis)
+            except Exception as e:
+                LOGGER.error(f"Failed to send Telegram synthesis report: {e}")
 
 def run_main():
     import asyncio

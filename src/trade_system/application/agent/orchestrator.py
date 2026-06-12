@@ -106,8 +106,11 @@ class TradeOrchestrator:
         self._thought("PreMarketNewsAgent", "Scraping headlines from MoneyControl, Mint, and ET...", action="SCANNING")
         news_task = asyncio.create_task(self.premarket_agent.analyze())
         
-        self._thought("OptionChainAgent", "Fetching Nifty option chain data and calculating Greeks...", action="SCANNING")
-        oc_task = asyncio.create_task(self.option_chain_agent.analyze("NSE:NIFTY50-INDEX"))
+        self._thought("OptionChainAgent", f"Fetching option chain data for {self.settings.index_symbols}...", action="SCANNING")
+        oc_tasks = {
+            symbol: asyncio.create_task(self.option_chain_agent.analyze(symbol))
+            for symbol in self.settings.index_symbols
+        }
         
         # Load learned skills in parallel
         skills = self.skill_registry.get_all_skills_text()
@@ -131,7 +134,7 @@ class TradeOrchestrator:
         self._thought("MarketContextAgent", "Determining market regime and volatility bias...", action="EVALUATING")
         market_context = await self.market_context_agent.analyze(
             vix=vix, pcr=pcr, option_chain=option_chain,
-            global_ctx=global_ctx, extra_context=extra_context,
+            global_ctx=global_ctx, extra_context=full_context,
         )
         plan.market_context = market_context
         self._thought("MarketContextAgent", f"Regime: {market_context.regime} | Bias: {market_context.bias}", action="DECISION")
@@ -147,24 +150,26 @@ class TradeOrchestrator:
         await self.event_bus.emit(EventType.MARKET_CONTEXT_READY, market_context)
 
         # 3. Process Live Data Streams (Option Chain & Index Decisions)
-        oc_analysis = await oc_task
-        if oc_analysis:
-            self._thought("OptionChainAgent", f"PCR: {oc_analysis.pcr:.2f} | Max Pain: {oc_analysis.max_pain}", action="DECISION")
-            
-            # Step 3: Index Decisions
-            self._thought("NiftyOptionBuyerAgent", "Analyzing high-conviction Nifty setups...", action="EVALUATING")
-            current_price = oc_analysis.atm_strike 
-            suggestion = await self.nifty_agent.analyze_and_suggest(
-                market_context=market_context,
-                oc_analysis=oc_analysis,
-                current_price=current_price
-            )
-            
-            if suggestion:
-                self._thought("NiftyOptionBuyerAgent", f"APPROVED: {suggestion.direction.value} setup found for NIFTY at {current_price}", action="APPROVED", symbol="NIFTY")
-                plan.add_nifty(suggestion)
-            else:
-                self._thought("NiftyOptionBuyerAgent", "No high-conviction Nifty setups found.", action="REJECTED")
+        for symbol, task in oc_tasks.items():
+            oc_analysis = await task
+            if oc_analysis:
+                self._thought("OptionChainAgent", f"PCR: {oc_analysis.pcr:.2f} | Max Pain: {oc_analysis.max_pain} for {symbol}", action="DECISION")
+                
+                # Step 3: Index Decisions
+                self._thought("NiftyOptionBuyerAgent", f"Analyzing high-conviction setups for {symbol}...", action="EVALUATING")
+                current_price = oc_analysis.atm_strike 
+                suggestion = await self.nifty_agent.analyze_and_suggest(
+                    symbol=symbol,
+                    market_context=market_context,
+                    oc_analysis=oc_analysis,
+                    current_price=current_price
+                )
+                
+                if suggestion:
+                    self._thought("NiftyOptionBuyerAgent", f"APPROVED: {suggestion.direction.value} setup found for {symbol} at {current_price}", action="APPROVED", symbol=symbol)
+                    plan.add_nifty(suggestion)
+                else:
+                    self._thought("NiftyOptionBuyerAgent", f"No high-conviction setups found for {symbol}.", action="REJECTED")
 
         # --- Step 4: F&O Stock Suggestions ---
         total_suggestions = len(plan.all_suggestions())

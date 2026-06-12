@@ -126,7 +126,7 @@ class LlmConfig:
     model: str = "gpt-4o-mini"
     api_key: str = ""
     base_url: str | None = None
-    timeout: int = 30
+    timeout: int = 120
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +160,7 @@ class Settings:
 
     # Trading settings
     live_symbols: list[str] = field(default_factory=lambda: ["NSE:NIFTY50-INDEX"])
+    index_symbols: list[str] = field(default_factory=lambda: ["NSE:NIFTY50-INDEX"])
     live_timeframe_minutes: int = 1
     option_chain_interval_seconds: int = 180
     option_chain_adjacent_strikes: int = 7
@@ -291,7 +292,7 @@ class Settings:
             model=llm_model,
             api_key=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY", ""),
             base_url=os.getenv("LLM_BASE_URL"),
-            timeout=int(os.getenv("LLM_TIMEOUT", "30")),
+            timeout=int(os.getenv("LLM_TIMEOUT", "120")),
         )
 
         return cls(
@@ -309,6 +310,7 @@ class Settings:
             option_chain_dir=_parse_path(os.getenv("OPTION_CHAIN_DATA_DIR"), "data/option_chain_data"),
             market_data_dir=_parse_path(os.getenv("MARKET_DATA_DIR"), "data/market_data"),
             live_symbols=_split_csv(os.getenv("LIVE_SYMBOLS"), ["NSE:NIFTY50-INDEX"]),
+            index_symbols=_split_csv(os.getenv("INDEX_SYMBOLS"), ["NSE:NIFTY50-INDEX"]),
             live_timeframe_minutes=int(os.getenv("LIVE_TIMEFRAME_MINUTES", "1")),
             option_chain_interval_seconds=int(os.getenv("OPTION_CHAIN_INTERVAL_SECONDS", "180")),
             option_chain_adjacent_strikes=int(os.getenv("OPTION_CHAIN_ADJACENT_STRIKES", "7")),
