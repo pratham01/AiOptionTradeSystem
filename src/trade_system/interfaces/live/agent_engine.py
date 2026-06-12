@@ -17,6 +17,7 @@ from trade_system.infrastructure.brokers.factory import get_broker_manager
 from trade_system.core.ports.broker import OrderRequest, OrderSide, OrderType, BrokerError
 from trade_system.core.ports.repository import TradeRepository
 from trade_system.application.agent.orchestrator import TradeOrchestrator
+from trade_system.application.agent.option_buyer_workflow import OptionBuyerExecutionWorkflow
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ class AgenticLiveEngine:
         self.orchestrator = orchestrator
         self.trade_repository = trade_repository
         self.is_running = False
+        self.option_buyer_workflow = OptionBuyerExecutionWorkflow(
+            broker=self.broker,
+            notifier=getattr(self.orchestrator, "notifier", None)
+        )
 
     async def run_loop(self, interval_seconds: int = 3600):
         """
@@ -48,31 +53,63 @@ class AgenticLiveEngine:
                 LOGGER.error("Broker authentication failed. Exiting.")
                 return
 
+        # Start position monitoring loop in the background
+        monitor_task = asyncio.create_task(self._monitor_positions_loop())
+
+        try:
+            while self.is_running:
+                try:
+                    # 1. Fetch live context (simplified for now, Orchestrator fetches internally)
+                    LOGGER.info("Fetching market data and invoking AI Agents...")
+                    
+                    # 2. Agent Decision Making
+                    plan = await self.orchestrator.run_session()
+                    
+                    if plan.is_tradeable_day and plan.all_suggestions():
+                        LOGGER.info(f"Agents generated {len(plan.all_suggestions())} trade suggestions.")
+                        # 3. Execution
+                        await self._execute_plan(plan)
+                    else:
+                        LOGGER.info("No actionable trades generated or market is non-tradeable.")
+
+                except Exception as e:
+                    LOGGER.error(f"Error in agentic loop: {e}", exc_info=True)
+                
+                if self.is_running:
+                    LOGGER.info(f"Sleeping for {interval_seconds} seconds...")
+                    await asyncio.sleep(interval_seconds)
+        finally:
+            self.is_running = False
+            LOGGER.info("Cancelling option positions monitoring background task...")
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _monitor_positions_loop(self):
+        """Background loop to monitor open option positions."""
+        LOGGER.info("Starting option positions monitoring background loop...")
         while self.is_running:
             try:
-                # 1. Fetch live context (simplified for now, Orchestrator fetches internally)
-                LOGGER.info("Fetching market data and invoking AI Agents...")
-                
-                # 2. Agent Decision Making
-                plan = await self.orchestrator.run_session()
-                
-                if plan.is_tradeable_day and plan.all_suggestions():
-                    LOGGER.info(f"Agents generated {len(plan.all_suggestions())} trade suggestions.")
-                    # 3. Execution
-                    await self._execute_plan(plan)
-                else:
-                    LOGGER.info("No actionable trades generated or market is non-tradeable.")
-
+                await self.option_buyer_workflow.manage_open_positions()
             except Exception as e:
-                LOGGER.error(f"Error in agentic loop: {e}", exc_info=True)
-            
-            if self.is_running:
-                LOGGER.info(f"Sleeping for {interval_seconds} seconds...")
-                await asyncio.sleep(interval_seconds)
+                LOGGER.error(f"Error in position monitoring background loop: {e}", exc_info=True)
+            await asyncio.sleep(15)
+        LOGGER.info("Option positions monitoring background loop stopped.")
 
     async def _execute_plan(self, plan: Any) -> None:
         """Execute the trade suggestions via the active broker."""
         for suggestion in plan.all_suggestions():
+            # Route Nifty or suggestions with option parameters to OptionBuyerExecutionWorkflow
+            if suggestion.is_nifty or (suggestion.option_params is not None):
+                LOGGER.info(f"Routing Suggestion {suggestion.id} for {suggestion.symbol} to Option Buyer Workflow")
+                try:
+                    await self.option_buyer_workflow.execute_buy_order(suggestion)
+                except Exception as e:
+                    LOGGER.error(f"Failed to execute buy order in Option Buyer Workflow: {e}", exc_info=True)
+                continue
+
             LOGGER.info(f"Executing Trade: {suggestion.direction.value} on {suggestion.symbol}")
             
             # Map Agent terminology to Broker API terms
