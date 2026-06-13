@@ -21,8 +21,15 @@ def fetch_live_loop():
     logging.info(f"Starting continuous live 15m fetcher for {len(symbols)} F&O symbols...")
 
     while True:
+        # Reload settings dynamically to pick up any updates (e.g. from other active processes)
+        settings = Settings.load()
         auth = FyersAuthService(settings)
-        token = auth.read_cached_token() or settings.fyers.access_token
+        token = auth.get_valid_token()
+
+        if not token:
+            logging.error("Failed to retrieve a valid Fyers token. Retrying in 60 seconds...")
+            time.sleep(60)
+            continue
 
         broker = FyersBrokerClient(
             client_id=settings.fyers.client_id,
