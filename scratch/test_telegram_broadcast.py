@@ -18,12 +18,9 @@ async def run_broadcast():
     print("Loading settings...")
     settings = Settings.load()
     
-    # Define all Telegram sub groups
+    # Define all Telegram sub groups - restrict strictly to Top Gainers subgroup only
     groups = {
-        "General/Default": settings.telegram,
-        "ST Confirmed": settings.st_confirmed_telegram,
         "Top Gainers": settings.top_gainer_telegram,
-        "Top Sectors": settings.top_sectors_telegram
     }
     
     print("\nConfigured Telegram Groups:")
