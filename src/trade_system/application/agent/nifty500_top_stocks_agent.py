@@ -24,7 +24,7 @@ class Nifty500TopStocksAgent:
         # Check if today is between Monday (0) and Friday (4)
         today = datetime.now()
         if today.weekday() > 4:
-            return "Market is closed today (Weekend). I can only provide real-time top Nifty 500 stocks from Monday to Friday."
+            return "Market is closed today (Weekend). I can only provide real-time top stocks from Monday to Friday."
 
         # Fetch broker dynamically if not provided
         try:
@@ -33,31 +33,51 @@ class Nifty500TopStocksAgent:
             LOGGER.error(f"Failed to initialize broker: {e}")
             return f"Error initializing broker connection: {e}"
 
-        # Use the underlying top gainers logic which runs against NSE_UNIVERSE (Nifty 500+)
-        agent = BrokerTopGainersAgent(broker=active_broker)
-        LOGGER.info("Fetching top 10 stocks from Nifty 500 universe...")
-        top_10_gainers = agent.top_gainers(top_n=10)
+        from trade_system.infrastructure.data.nse_universe import (
+            NSE_UNIVERSE, NIFTY_NEXT_50, NIFTY_MIDCAP_100, NIFTY_SMALLCAP_100
+        )
 
-        # Fetch top 5 and worst 5 FO stocks
+        # Create agents for each universe segment
+        agent_n500 = BrokerTopGainersAgent(broker=active_broker, symbols=NSE_UNIVERSE)
+        agent_next50 = BrokerTopGainersAgent(broker=active_broker, symbols=NIFTY_NEXT_50)
+        agent_mid100 = BrokerTopGainersAgent(broker=active_broker, symbols=NIFTY_MIDCAP_100)
+        agent_small100 = BrokerTopGainersAgent(broker=active_broker, symbols=NIFTY_SMALLCAP_100)
         fo_agent = BrokerTopGainersAgent(broker=active_broker, symbols=get_fo_universe())
-        LOGGER.info("Fetching top 5 and worst 5 stocks from FO universe...")
-        fo_top_5, fo_worst_5 = fo_agent.top_and_worst(n=5)
 
-        if not top_10_gainers:
-            return "No data retrieved from broker for the Nifty 500 universe."
+        LOGGER.info("Fetching top stocks across universes in parallel...")
+        import asyncio
+        loop = asyncio.get_running_loop()
+
+        # Execute all fetches in parallel using run_in_executor
+        tasks = [
+            loop.run_in_executor(None, agent_n500.top_gainers, 10),
+            loop.run_in_executor(None, agent_next50.top_gainers, 10),
+            loop.run_in_executor(None, agent_mid100.top_gainers, 10),
+            loop.run_in_executor(None, agent_small100.top_gainers, 10),
+            loop.run_in_executor(None, fo_agent.top_and_worst, 5),
+        ]
+
+        results = await asyncio.gather(*tasks)
+        top_500, top_next50, top_mid100, top_small100, (fo_top_5, fo_worst_5) = results
+
+        if not top_500 and not top_next50 and not top_mid100 and not top_small100:
+            return "No data retrieved from broker for any of the universes."
 
         # Format as tables
-        table_str = format_top_gainers_table(top_10_gainers, title_prefix="Top (Nifty 500)")
+        table_str = format_top_gainers_table(top_500, title_prefix="Top (Nifty 500)")
+        table_str += "\n\n" + format_top_gainers_table(top_next50, title_prefix="Top (Nifty Next 50)")
+        table_str += "\n\n" + format_top_gainers_table(top_mid100, title_prefix="Top (Nifty Midcap 100)")
+        table_str += "\n\n" + format_top_gainers_table(top_small100, title_prefix="Top (Nifty Smallcap 100)")
         table_str += "\n\n" + format_top_gainers_table(fo_top_5, title_prefix="Top F&O")
         table_str += "\n\n" + format_top_gainers_table(fo_worst_5, title_prefix="Worst F&O")
 
         # Let the AI Brain (LLM) synthesize a quick narrative if configured
         if self.llm.configured():
             prompt = (
-                "You are an AI Trading Assistant. Here are the top 10 gainers in the Nifty 500, and the top and worst 5 F&O stocks today:\n\n"
+                "You are an AI Trading Assistant. Here are the top 10 gainers across Nifty 500, Nifty Next 50, Nifty Midcap 100, Nifty Smallcap 100, and the top and worst 5 F&O stocks today:\n\n"
                 f"{table_str}\n\n"
-                "Provide a very brief 2-sentence market narrative based on these stocks (e.g., Which sectors seem to be leading or lagging? Are these defensive or high-beta?). "
-                "Output just the table and your 2-sentence summary."
+                "Provide a brief market narrative (2-3 sentences max) summarizing the sentiment, sector leadership, and strength across the different index fields (large, mid, small caps, and F&O) today. "
+                "Output just the tables and your summary."
             )
             try:
                 analysis = await self.llm.complete(prompt)
