@@ -730,7 +730,7 @@ else:
 
     # ---- TAB 3: Breakout Scanner ----
     with tab_scanner:
-        with st.expander("⚙️ Scanner Filters", expanded=False):
+        with st.expander("⚙️ Scanner Filters & Strategies", expanded=True):
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
                 use_sector = st.checkbox("Sector Leadership", value=False)
@@ -742,6 +742,7 @@ else:
                 use_index = st.checkbox("Index Alignment", value=True)
             with col5:
                 vol_surge = st.selectbox("Min Vol", options=[1.0, 1.2, 1.5, 1.8, 2.0, 2.5], index=2, format_func=lambda x: f"{x}x")
+            
             col1b, col2b, col3b, col4b = st.columns(4)
             with col1b:
                 use_52w = st.checkbox("52W High", value=False)
@@ -751,7 +752,27 @@ else:
                 use_daily_st_touch = st.checkbox("Daily ST Touch", value=False)
             with col4b:
                 use_abnormal_vol = st.checkbox("Abnormal Vol", value=False)
+                
+            selected_strategies = st.multiselect(
+                "🎯 Strategy Selection",
+                options=["ORB Breakout", "Consolidation Breakout", "Gap Fill", "Mean Reversion", "VWAP Pullback", "Momentum Mover", "Previous Day High/Low"],
+                default=["ORB Breakout", "Consolidation Breakout", "Gap Fill", "Mean Reversion", "VWAP Pullback"],
+                help="Filter the scanner results by one or more trading strategies"
+            )
         
+        strategy_map = {
+            "ORB Breakout": ["ORB_BREAKOUT"],
+            "Consolidation Breakout": ["CONSOLIDATION_BREAKOUT"],
+            "Gap Fill": ["GAP_FILL"],
+            "Mean Reversion": ["MEAN_REVERSION"],
+            "VWAP Pullback": ["VWAP_PULLBACK"],
+            "Momentum Mover": ["MOMENTUM_MOVER"],
+            "Previous Day High/Low": ["PREV_DAY_HIGH", "PREV_DAY_LOW"]
+        }
+        allowed_types = []
+        for s in selected_strategies:
+            allowed_types.extend(strategy_map[s])
+
         screener = BreakoutScreener()
         try:
             alerts = screener.scan_for_breakouts(
@@ -768,14 +789,42 @@ else:
             alerts = []
         
         if alerts:
+            alerts = [a for a in alerts if a.get('alert_type') in allowed_types]
+            
+        if alerts:
             alert_rows = []
             for a in alerts:
                 clean_sym = a['symbol'].replace("NSE:", "").replace("-EQ", "")
                 vol_ratio = a['volume'] / a['vol_sma'] if a['vol_sma'] > 0 else 0
-                direction_badge = "🟢 LONG" if a['direction'] == "LONG" else "🔴 SHORT"
-                ref_level = a['orb_high'] if a['direction'] == "LONG" else a['orb_low']
-                type_badges = {"ORB_BREAKOUT": "📊 ORB", "MOMENTUM_MOVER": "🚀 Mom", "PREV_DAY_HIGH": "⬆️ PDH", "PREV_DAY_LOW": "⬇️ PDL"}
+                direction_badge = "🟢 LONG" if a['direction'] in ["LONG", "CALL"] else "🔴 SHORT"
+                
+                type_badges = {
+                    "ORB_BREAKOUT": "📊 ORB",
+                    "CONSOLIDATION_BREAKOUT": "📦 Cons",
+                    "GAP_FILL": "🔄 GapFill",
+                    "MEAN_REVERSION": "🎯 Rev",
+                    "VWAP_PULLBACK": "⚓ Pullback",
+                    "MOMENTUM_MOVER": "🚀 Mom",
+                    "PREV_DAY_HIGH": "⬆️ PDH",
+                    "PREV_DAY_LOW": "⬇️ PDL"
+                }
                 type_badge = type_badges.get(a.get('alert_type', 'ORB_BREAKOUT'), a.get('alert_type', ''))
+                
+                # Format Trigger/Ref info based on strategy
+                ref_level = a.get('orb_high') if a.get('direction') == "LONG" else a.get('orb_low')
+                if a.get('alert_type') == 'ORB_BREAKOUT':
+                    ref_str = f"ORB: {ref_level:.2f}" if ref_level else "—"
+                elif a.get('alert_type') == 'CONSOLIDATION_BREAKOUT':
+                    ref_str = f"R/S: {a.get('resistance', 0.0):.1f}/{a.get('support', 0.0):.1f}"
+                elif a.get('alert_type') == 'GAP_FILL':
+                    ref_str = f"Gap: {a.get('gap_pct', 0.0):+.1f}%"
+                elif a.get('alert_type') == 'MEAN_REVERSION':
+                    ref_str = f"RSI: {a.get('rsi', 0.0):.0f}"
+                elif a.get('alert_type') == 'VWAP_PULLBACK':
+                    ref_str = f"VWAP: {a.get('vwap', 0.0):.1f}"
+                else:
+                    ref_str = f"{ref_level:.2f}" if ref_level else "—"
+                    
                 tags = []
                 if a.get('is_52w_high'): tags.append("52W🔥")
                 if a.get('is_weekly_high'): tags.append("Wk📈")
@@ -785,12 +834,12 @@ else:
                     "Time": trigger_time_str, "Symbol": clean_sym, "Sector": a['sector'],
                     "Type": type_badge, "Dir": direction_badge,
                     "Chg%": f"{a.get('pchange', 0):+.2f}%",
-                    "LTP": f"{a['close']:.2f}", "ORB": f"{ref_level:.2f}",
+                    "LTP": f"{a['close']:.2f}", "Trigger/Ref": ref_str,
                     "VolX": f"{vol_ratio:.1f}x", "Tags": ", ".join(tags) or "—"
                 })
             st.dataframe(pd.DataFrame(alert_rows).set_index("Time"), use_container_width=True)
         else:
-            st.info("No active breakouts or breakdowns under current filters.")
+            st.info("No active alerts found for the selected strategies and filters.")
 
     # ---- TAB 4: Sector Drill-Down ----
     with tab_drilldown:

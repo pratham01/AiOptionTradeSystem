@@ -38,6 +38,13 @@ class BreakoutScreener:
             return {}
         with open(config_path, "r") as f:
             return json.load(f)
+
+    def _calculate_rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / (loss + 1e-9)
+        return 100 - (100 / (1 + rs))
             
     def scan_for_breakouts(
         self, 
@@ -155,12 +162,30 @@ class BreakoutScreener:
         lagging_sectors = sector_perf_asc.head(top_sectors_count)['sector'].tolist()
         
         LOGGER.info(f"Leading Sectors (Long): {leading_sectors}")
-        LOGGER.info(f"Lagging Sectors (Short): {lagging_sectors}")
-        
-        # 3. Load Index Data for sentiment checks
+        LOGGER.info(f"Lagging Sectors (Short): {lagging_sectors}")        # 3. Load Index Data for sentiment checks
         nifty_candles = df[(df['symbol'] == 'NSE:NIFTY50-INDEX') & (df['timestamp'].dt.date == today)].sort_values('timestamp')
         banknifty_candles = df[(df['symbol'] == 'NSE:NIFTYBANK-INDEX') & (df['timestamp'].dt.date == today)].sort_values('timestamp')
         
+        # Load daily consolidation watchlist levels
+        consolidation_levels = {}
+        try:
+            query_consolidation = text("""
+                SELECT symbol, resistance, support 
+                FROM consolidation_watchlist_stocks 
+                WHERE date = (
+                    SELECT max(date) 
+                    FROM consolidation_watchlist_stocks 
+                    WHERE date <= :target_date
+                )
+            """)
+            with self.engine.connect() as conn:
+                res = conn.execute(query_consolidation, {"target_date": today.isoformat()}).fetchall()
+                for row in res:
+                    consolidation_levels[row[0]] = {"resistance": row[1], "support": row[2]}
+            LOGGER.info(f"Loaded {len(consolidation_levels)} consolidation watchlists for {today}")
+        except Exception as e:
+            LOGGER.warning(f"Failed to fetch consolidation watchlists: {e}")
+
         alerts = []
         
         # 4. Scan F&O universe — prepare per-stock data once
@@ -318,7 +343,7 @@ class BreakoutScreener:
                         if direction == "LONG":
                             upper_wick = candle['high'] - candle['close']
                             if (upper_wick / candle_range) > 0.35:
-                                continue
+                                  continue
                         else:
                             lower_wick = candle['close'] - candle['low']
                             if (lower_wick / candle_range) > 0.35:
@@ -368,53 +393,251 @@ class BreakoutScreener:
                 seen_symbols.add(symbol)
 
             # ─────────────────────────────────────────────────────────────────
-            # Scan Type 2: Momentum Mover (catches big movers without ORB breach)
+            # Scan Type 5: Consolidation Breakout / Breakdown
+            # ─────────────────────────────────────────────────────────────────
+            if symbol not in seen_symbols:
+                latest_candle = today_candles.iloc[-1]
+                latest_pchange = ((latest_candle['close'] - prev_close) / prev_close) * 100 if prev_close is not None else 0.0
+                latest_vol_sma = latest_candle['prev_vol_sma']
+                latest_vol_ratio = latest_candle['volume'] / latest_vol_sma if pd.notna(latest_vol_sma) and latest_vol_sma > 0 else 0.0
+                
+                resistance = None
+                support = None
+                
+                # Check DB watchlist levels first
+                if symbol in consolidation_levels:
+                    resistance = consolidation_levels[symbol]["resistance"]
+                    support = consolidation_levels[symbol]["support"]
+                else:
+                    # Check intraday consolidation on the fly
+                    # Look at last 15 bars (excluding the current one)
+                    if len(group) >= 16:
+                        recent_15 = group.iloc[-16:-1]
+                        high_max = recent_15['high'].max()
+                        low_min = recent_15['low'].min()
+                        range_pct = (high_max - low_min) / low_min * 100
+                        if range_pct <= 1.2:
+                            resistance = high_max
+                            support = low_min
+                            
+                if resistance is not None and support is not None:
+                    close_last = float(latest_candle['close'])
+                    prev_close_15m = float(group.iloc[-2]['close'])
+                    min_ratio = vol_surge_threshold if use_abnormal_vol_filter else 1.2
+                    
+                    if close_last > resistance and prev_close_15m <= resistance and latest_vol_ratio >= min_ratio:
+                        alerts.append({
+                            "symbol": symbol,
+                            "sector": latest_candle['sector'],
+                            "direction": "LONG",
+                            "close": close_last,
+                            "orb_high": orb_high,
+                            "orb_low": orb_low,
+                            "volume": latest_candle['volume'],
+                            "vol_sma": latest_vol_sma if pd.notna(latest_vol_sma) else 0.0,
+                            "vwap": latest_candle['vwap'],
+                            "is_bypass": False,
+                            "pchange": latest_pchange,
+                            "trigger_time": latest_candle['timestamp'],
+                            "alert_type": "CONSOLIDATION_BREAKOUT",
+                            "resistance": resistance,
+                            "support": support,
+                            "is_52w_high": is_52w_high,
+                            "is_weekly_high": is_weekly_high,
+                            "touches_daily_st": touches_daily_st
+                        })
+                        seen_symbols.add(symbol)
+                    elif close_last < support and prev_close_15m >= support and latest_vol_ratio >= min_ratio:
+                        alerts.append({
+                            "symbol": symbol,
+                            "sector": latest_candle['sector'],
+                            "direction": "SHORT",
+                            "close": close_last,
+                            "orb_high": orb_high,
+                            "orb_low": orb_low,
+                            "volume": latest_candle['volume'],
+                            "vol_sma": latest_vol_sma if pd.notna(latest_vol_sma) else 0.0,
+                            "vwap": latest_candle['vwap'],
+                            "is_bypass": False,
+                            "pchange": latest_pchange,
+                            "trigger_time": latest_candle['timestamp'],
+                            "alert_type": "CONSOLIDATION_BREAKOUT",
+                            "resistance": resistance,
+                            "support": support,
+                            "is_52w_high": is_52w_high,
+                            "is_weekly_high": is_weekly_high,
+                            "touches_daily_st": touches_daily_st
+                        })
+                        seen_symbols.add(symbol)
+
+            # ─────────────────────────────────────────────────────────────────
+            # Scan Type 4: Gap Fill (verge of gap filling)
             # ─────────────────────────────────────────────────────────────────
             if symbol not in seen_symbols and prev_close is not None:
                 latest_candle = today_candles.iloc[-1]
                 latest_pchange = ((latest_candle['close'] - prev_close) / prev_close) * 100
-                latest_vol_sma = latest_candle['prev_vol_sma']
-                latest_vol_ratio = latest_candle['volume'] / latest_vol_sma if pd.notna(latest_vol_sma) and latest_vol_sma > 0 else 0.0
-                latest_vwap = latest_candle['vwap']
+                today_open = float(today_candles.iloc[0]['open'])
+                gap_pct = ((today_open - prev_close) / prev_close) * 100
                 
-                # Momentum Long: up ≥ 2%, close > VWAP, volume ≥ 1.2x
-                min_ratio = vol_surge_threshold if use_abnormal_vol_filter else 1.2
-                if latest_pchange >= 2.0 and latest_candle['close'] > latest_vwap and latest_vol_ratio >= min_ratio:
+                # Check if we had a gap of at least 0.75%
+                if abs(gap_pct) >= 0.75:
+                    close_last = float(latest_candle['close'])
+                    # Gap Up: today opened higher. We are filling down towards prev_close
+                    if gap_pct >= 0.75:
+                        # Price is between prev_close and today_open, and filled at least 30%
+                        if prev_close < close_last < today_open and (today_open - close_last) >= 0.3 * (today_open - prev_close):
+                            alerts.append({
+                                "symbol": symbol,
+                                "sector": latest_candle['sector'],
+                                "direction": "SHORT",
+                                "close": close_last,
+                                "orb_high": orb_high,
+                                "orb_low": orb_low,
+                                "volume": latest_candle['volume'],
+                                "vol_sma": latest_candle['prev_vol_sma'] if pd.notna(latest_candle['prev_vol_sma']) else 0.0,
+                                "vwap": latest_candle['vwap'],
+                                "is_bypass": False,
+                                "pchange": latest_pchange,
+                                "trigger_time": latest_candle['timestamp'],
+                                "alert_type": "GAP_FILL",
+                                "gap_pct": gap_pct,
+                                "unfilled_gap_pct": ((close_last - prev_close) / prev_close) * 100,
+                                "is_52w_high": is_52w_high,
+                                "is_weekly_high": is_weekly_high,
+                                "touches_daily_st": touches_daily_st
+                            })
+                            seen_symbols.add(symbol)
+                    # Gap Down: today opened lower. We are filling up towards prev_close
+                    elif gap_pct <= -0.75:
+                        if today_open < close_last < prev_close and (close_last - today_open) >= 0.3 * (prev_close - today_open):
+                            alerts.append({
+                                "symbol": symbol,
+                                "sector": latest_candle['sector'],
+                                "direction": "LONG",
+                                "close": close_last,
+                                "orb_high": orb_high,
+                                "orb_low": orb_low,
+                                "volume": latest_candle['volume'],
+                                "vol_sma": latest_candle['prev_vol_sma'] if pd.notna(latest_candle['prev_vol_sma']) else 0.0,
+                                "vwap": latest_candle['vwap'],
+                                "is_bypass": False,
+                                "pchange": latest_pchange,
+                                "trigger_time": latest_candle['timestamp'],
+                                "alert_type": "GAP_FILL",
+                                "gap_pct": gap_pct,
+                                "unfilled_gap_pct": ((prev_close - close_last) / prev_close) * 100,
+                                "is_52w_high": is_52w_high,
+                                "is_weekly_high": is_weekly_high,
+                                "touches_daily_st": touches_daily_st
+                            })
+                            seen_symbols.add(symbol)
+
+            # ─────────────────────────────────────────────────────────────────
+            # Scan Type 6: Mean Reversion (Overbought / Oversold Reversals)
+            # ─────────────────────────────────────────────────────────────────
+            if symbol not in seen_symbols:
+                latest_candle = today_candles.iloc[-1]
+                latest_pchange = ((latest_candle['close'] - prev_close) / prev_close) * 100 if prev_close is not None else 0.0
+                close_last = float(latest_candle['close'])
+                vwap_last = float(latest_candle['vwap'])
+                
+                # Compute 15-minute RSI
+                rsi_series = self._calculate_rsi(group['close'], period=14)
+                rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
+                
+                # Oversold Long setup: RSI <= 25, price stretched below VWAP by at least 2%
+                if rsi_val <= 25 and close_last <= vwap_last * 0.98:
                     alerts.append({
                         "symbol": symbol,
                         "sector": latest_candle['sector'],
                         "direction": "LONG",
-                        "close": latest_candle['close'],
+                        "close": close_last,
                         "orb_high": orb_high,
                         "orb_low": orb_low,
                         "volume": latest_candle['volume'],
-                        "vol_sma": latest_vol_sma if pd.notna(latest_vol_sma) else 0.0,
-                        "vwap": latest_vwap,
+                        "vol_sma": latest_candle['prev_vol_sma'] if pd.notna(latest_candle['prev_vol_sma']) else 0.0,
+                        "vwap": vwap_last,
                         "is_bypass": False,
                         "pchange": latest_pchange,
                         "trigger_time": latest_candle['timestamp'],
-                        "alert_type": "MOMENTUM_MOVER",
+                        "alert_type": "MEAN_REVERSION",
+                        "rsi": rsi_val,
                         "is_52w_high": is_52w_high,
                         "is_weekly_high": is_weekly_high,
                         "touches_daily_st": touches_daily_st
                     })
                     seen_symbols.add(symbol)
-                # Momentum Short: down ≤ -2%, close < VWAP, volume ≥ 1.2x
-                elif latest_pchange <= -2.0 and latest_candle['close'] < latest_vwap and latest_vol_ratio >= min_ratio:
+                # Overbought Short setup: RSI >= 75, price stretched above VWAP by at least 2%
+                elif rsi_val >= 75 and close_last >= vwap_last * 1.02:
                     alerts.append({
                         "symbol": symbol,
                         "sector": latest_candle['sector'],
                         "direction": "SHORT",
-                        "close": latest_candle['close'],
+                        "close": close_last,
                         "orb_high": orb_high,
                         "orb_low": orb_low,
                         "volume": latest_candle['volume'],
-                        "vol_sma": latest_vol_sma if pd.notna(latest_vol_sma) else 0.0,
-                        "vwap": latest_vwap,
+                        "vol_sma": latest_candle['prev_vol_sma'] if pd.notna(latest_candle['prev_vol_sma']) else 0.0,
+                        "vwap": vwap_last,
                         "is_bypass": False,
                         "pchange": latest_pchange,
                         "trigger_time": latest_candle['timestamp'],
-                        "alert_type": "MOMENTUM_MOVER",
+                        "alert_type": "MEAN_REVERSION",
+                        "rsi": rsi_val,
+                        "is_52w_high": is_52w_high,
+                        "is_weekly_high": is_weekly_high,
+                        "touches_daily_st": touches_daily_st
+                    })
+                    seen_symbols.add(symbol)
+
+            # ─────────────────────────────────────────────────────────────────
+            # Scan Type 7: VWAP Pullback / Trend Support
+            # ─────────────────────────────────────────────────────────────────
+            if symbol not in seen_symbols:
+                latest_candle = today_candles.iloc[-1]
+                latest_pchange = ((latest_candle['close'] - prev_close) / prev_close) * 100 if prev_close is not None else 0.0
+                close_last = float(latest_candle['close'])
+                low_last = float(latest_candle['low'])
+                high_last = float(latest_candle['high'])
+                vwap_last = float(latest_candle['vwap'])
+                
+                # 1. Bullish Pullback: Daily change is strong (>= 1.5%), low touches or comes near VWAP, close >= VWAP
+                if latest_pchange >= 1.5 and low_last <= vwap_last * 1.0015 and close_last >= vwap_last:
+                    alerts.append({
+                        "symbol": symbol,
+                        "sector": latest_candle['sector'],
+                        "direction": "LONG",
+                        "close": close_last,
+                        "orb_high": orb_high,
+                        "orb_low": orb_low,
+                        "volume": latest_candle['volume'],
+                        "vol_sma": latest_candle['prev_vol_sma'] if pd.notna(latest_candle['prev_vol_sma']) else 0.0,
+                        "vwap": vwap_last,
+                        "is_bypass": False,
+                        "pchange": latest_pchange,
+                        "trigger_time": latest_candle['timestamp'],
+                        "alert_type": "VWAP_PULLBACK",
+                        "is_52w_high": is_52w_high,
+                        "is_weekly_high": is_weekly_high,
+                        "touches_daily_st": touches_daily_st
+                    })
+                    seen_symbols.add(symbol)
+                # 2. Bearish Pullback: Daily change is weak (<= -1.5%), high touches or comes near VWAP, close <= VWAP
+                elif latest_pchange <= -1.5 and high_last >= vwap_last * 0.9985 and close_last <= vwap_last:
+                    alerts.append({
+                        "symbol": symbol,
+                        "sector": latest_candle['sector'],
+                        "direction": "SHORT",
+                        "close": close_last,
+                        "orb_high": orb_high,
+                        "orb_low": orb_low,
+                        "volume": latest_candle['volume'],
+                        "vol_sma": latest_candle['prev_vol_sma'] if pd.notna(latest_candle['prev_vol_sma']) else 0.0,
+                        "vwap": vwap_last,
+                        "is_bypass": False,
+                        "pchange": latest_pchange,
+                        "trigger_time": latest_candle['timestamp'],
+                        "alert_type": "VWAP_PULLBACK",
                         "is_52w_high": is_52w_high,
                         "is_weekly_high": is_weekly_high,
                         "touches_daily_st": touches_daily_st
@@ -472,9 +695,72 @@ class BreakoutScreener:
                         "touches_daily_st": touches_daily_st
                     })
                     seen_symbols.add(symbol)
+
+            # ─────────────────────────────────────────────────────────────────
+            # Scan Type 2: Momentum Mover (catches big movers without ORB breach)
+            # ─────────────────────────────────────────────────────────────────
+            if symbol not in seen_symbols and prev_close is not None:
+                latest_candle = today_candles.iloc[-1]
+                latest_pchange = ((latest_candle['close'] - prev_close) / prev_close) * 100
+                latest_vol_sma = latest_candle['prev_vol_sma']
+                latest_vol_ratio = latest_candle['volume'] / latest_vol_sma if pd.notna(latest_vol_sma) and latest_vol_sma > 0 else 0.0
+                latest_vwap = latest_candle['vwap']
+                
+                # Momentum Long: up ≥ 2%, close > VWAP, volume ≥ 1.2x
+                min_ratio = vol_surge_threshold if use_abnormal_vol_filter else 1.2
+                if latest_pchange >= 2.0 and latest_candle['close'] > latest_vwap and latest_vol_ratio >= min_ratio:
+                    alerts.append({
+                        "symbol": symbol,
+                        "sector": latest_candle['sector'],
+                        "direction": "LONG",
+                        "close": latest_candle['close'],
+                        "orb_high": orb_high,
+                        "orb_low": orb_low,
+                        "volume": latest_candle['volume'],
+                        "vol_sma": latest_vol_sma if pd.notna(latest_vol_sma) else 0.0,
+                        "vwap": latest_vwap,
+                        "is_bypass": False,
+                        "pchange": latest_pchange,
+                        "trigger_time": latest_candle['timestamp'],
+                        "alert_type": "MOMENTUM_MOVER",
+                        "is_52w_high": is_52w_high,
+                        "is_weekly_high": is_weekly_high,
+                        "touches_daily_st": touches_daily_st
+                    })
+                    seen_symbols.add(symbol)
+                # Momentum Short: down ≤ -2%, close < VWAP, volume ≥ 1.2x
+                elif latest_pchange <= -2.0 and latest_candle['close'] < latest_vwap and latest_vol_ratio >= min_ratio:
+                    alerts.append({
+                        "symbol": symbol,
+                        "sector": latest_candle['sector'],
+                        "direction": "SHORT",
+                        "close": latest_candle['close'],
+                        "orb_high": orb_high,
+                        "orb_low": orb_low,
+                        "volume": latest_candle['volume'],
+                        "vol_sma": latest_vol_sma if pd.notna(latest_vol_sma) else 0.0,
+                        "vwap": latest_vwap,
+                        "is_bypass": False,
+                        "pchange": latest_pchange,
+                        "trigger_time": latest_candle['timestamp'],
+                        "alert_type": "MOMENTUM_MOVER",
+                        "is_52w_high": is_52w_high,
+                        "is_weekly_high": is_weekly_high,
+                        "touches_daily_st": touches_daily_st
+                    })
+                    seen_symbols.add(symbol)
             
         # Sort alerts: ORB first, then by volume surge strength
-        type_priority = {"ORB_BREAKOUT": 0, "PREV_DAY_HIGH": 1, "PREV_DAY_LOW": 1, "MOMENTUM_MOVER": 2}
+        type_priority = {
+            "ORB_BREAKOUT": 0,
+            "CONSOLIDATION_BREAKOUT": 1,
+            "GAP_FILL": 2,
+            "VWAP_PULLBACK": 3,
+            "MEAN_REVERSION": 4,
+            "PREV_DAY_HIGH": 5,
+            "PREV_DAY_LOW": 5,
+            "MOMENTUM_MOVER": 6
+        }
         alerts.sort(key=lambda x: (
             type_priority.get(x.get('alert_type', 'ORB_BREAKOUT'), 9),
             -(x['volume'] / x['vol_sma'] if x['vol_sma'] > 0 else 0)
