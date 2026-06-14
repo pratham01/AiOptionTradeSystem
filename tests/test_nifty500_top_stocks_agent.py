@@ -32,6 +32,7 @@ async def test_get_top_stocks_analysis_success(mock_dt, MockAgent, mock_create_b
     # Mock the BrokerTopGainersAgent methods
     mock_agent_instance = MagicMock()
     mock_agent_instance.top_gainers.return_value = mock_gainer_rows
+    mock_agent_instance.top_and_worst.return_value = (mock_gainer_rows[:1], mock_fo_worst_rows)
     MockAgent.return_value = mock_agent_instance
     
     # Mock LLM Client
@@ -55,14 +56,14 @@ async def test_get_top_stocks_analysis_success(mock_dt, MockAgent, mock_create_b
     assert MockTelegramNotifier.call_count == 1
     assert mock_notifier_instance.send.call_count == 1
     
-    # Verify the prompt contained only Nifty 500
+    # Verify the prompt contained all the index names
     prompt_sent = mock_llm.complete.call_args[0][0]
     assert "Top (Nifty 500)" in prompt_sent
-    assert "Top (Nifty Next 50)" not in prompt_sent
-    assert "Top (Nifty Midcap 100)" not in prompt_sent
-    assert "Top (Nifty Smallcap 100)" not in prompt_sent
-    assert "Top F&O" not in prompt_sent
-    assert "Worst F&O" not in prompt_sent
+    assert "Top (Nifty Next 50)" in prompt_sent
+    assert "Top (Nifty Midcap 100)" in prompt_sent
+    assert "Top (Nifty Smallcap 100)" in prompt_sent
+    assert "Top F&O" in prompt_sent
+    assert "Worst F&O" in prompt_sent
 
 @pytest.mark.asyncio
 @patch("trade_system.application.agent.nifty500_top_stocks_agent.TelegramNotifier")
@@ -79,6 +80,7 @@ async def test_get_top_stocks_analysis_no_llm(mock_dt, MockAgent, mock_create_br
     # Mock the BrokerTopGainersAgent methods
     mock_agent_instance = MagicMock()
     mock_agent_instance.top_gainers.return_value = mock_gainer_rows
+    mock_agent_instance.top_and_worst.return_value = (mock_gainer_rows[:1], mock_fo_worst_rows)
     MockAgent.return_value = mock_agent_instance
     
     # Mock LLM Client not configured
@@ -95,11 +97,11 @@ async def test_get_top_stocks_analysis_no_llm(mock_dt, MockAgent, mock_create_br
     
     # Should output raw formatted tables
     assert "Top (Nifty 500)" in result
-    assert "Top (Nifty Next 50)" not in result
-    assert "Top (Nifty Midcap 100)" not in result
-    assert "Top (Nifty Smallcap 100)" not in result
-    assert "Top F&O" not in result
-    assert "Worst F&O" not in result
+    assert "Top (Nifty Next 50)" in result
+    assert "Top (Nifty Midcap 100)" in result
+    assert "Top (Nifty Smallcap 100)" in result
+    assert "Top F&O" in result
+    assert "Worst F&O" in result
     assert "STOCK1" in result
     assert MockTelegramNotifier.call_count == 1
     assert mock_notifier_instance.send.call_count == 1
