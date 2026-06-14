@@ -613,11 +613,12 @@ else:
     # -------------------------------------------------------------
     # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Drill-Down
     # -------------------------------------------------------------
-    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown = st.tabs([
+    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown, tab_compression = st.tabs([
         "📊 Gainers & Losers",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
-        "🔎 Sector Drill-Down"
+        "🔎 Sector Drill-Down",
+        "📦 Volatility Squeeze"
     ])
 
     # ---- TAB 1: Gainers & Losers ----
@@ -985,6 +986,114 @@ else:
                 )
             else:
                 st.caption("No stock data matching filters.")
+
+    # ---- TAB 5: Volatility Squeeze ----
+    with tab_compression:
+        st.subheader("📦 Volatility Compression & Squeeze Radar")
+        st.caption("Scans F&O and liquid stocks for low-volatility coiling patterns (NR7, Inside Bars) that typically precede explosive moves.")
+        
+        from trade_system.application.indicators.compression import CompressionIndicator
+        
+        screener = BreakoutScreener()
+        fo_symbols = list(screener.fo_metadata.keys())
+        
+        if not fo_symbols:
+            st.info("No F&O symbols available in configuration.")
+        else:
+            with st.spinner("Scanning database for volatility compression setups..."):
+                engine = get_engine()
+                # Fetch recent 30 bars of 15m candles for all stocks up to target_date
+                query_comp = text("""
+                    SELECT symbol, timestamp, open, high, low, close, volume 
+                    FROM ohlcv_15m 
+                    WHERE timestamp >= date(:target_date, '-10 days') AND timestamp <= :target_date
+                    ORDER BY symbol, timestamp ASC
+                """)
+                try:
+                    with engine.connect() as conn:
+                        df_comp = pd.read_sql(query_comp, conn, params={"target_date": target_date.isoformat()})
+                    df_comp['timestamp'] = pd.to_datetime(df_comp['timestamp'])
+                except Exception as ex:
+                    st.error(f"Failed to query database for compression scan: {ex}")
+                    df_comp = pd.DataFrame()
+            
+            if df_comp.empty:
+                st.info("No 15-minute candle data available to scan for compression.")
+            else:
+                # Group and apply CompressionIndicator
+                compression_rows = []
+                indicator = CompressionIndicator(atr_period=14, lookback=4)
+                
+                for symbol, group in df_comp.groupby('symbol'):
+                    group = group.sort_values('timestamp').reset_index(drop=True)
+                    if len(group) < 20:
+                        continue
+                    
+                    # Calculate compression
+                    calc_df = indicator.calculate(group)
+                    if calc_df.empty:
+                        continue
+                        
+                    latest_bar = calc_df.iloc[-1]
+                    is_comp = latest_bar.get('is_compressed', False)
+                    is_nr7 = latest_bar.get('nr7', False)
+                    is_inside = latest_bar.get('inside_bar', False)
+                    comp_score = latest_bar.get('range_compression', 0.0)
+                    atr = latest_bar.get('atr', 0.0)
+                    close = latest_bar.get('close', 0.0)
+                    
+                    status = []
+                    if is_nr7: status.append("NR7 🎯")
+                    if is_inside: status.append("Inside Bar 📥")
+                    if comp_score > 20: status.append(f"Range Squeeze ({comp_score:.0f}%)")
+                    
+                    status_str = ", ".join(status) if status else "No Squeeze"
+                    
+                    clean_sym = symbol.replace("NSE:", "").replace("-EQ", "")
+                    sector = screener.fo_metadata.get(symbol, "UNKNOWN")
+                    
+                    compression_rows.append({
+                        "Symbol": clean_sym,
+                        "Sector": sector,
+                        "Close (₹)": close,
+                        "ATR (₹)": atr,
+                        "Squeeze Score": comp_score,
+                        "Setup Signals": status_str,
+                        "Coiled": "🔥 YES" if is_comp else "—",
+                        "_is_comp": is_comp
+                    })
+                
+                if compression_rows:
+                    comp_df = pd.DataFrame(compression_rows)
+                    
+                    col_show_all, = st.columns([1])
+                    with col_show_all:
+                        show_all = st.checkbox("Show all stocks (including uncoiled)", value=False, key="comp_show_all_cb")
+                    
+                    if not show_all:
+                        display_df = comp_df[comp_df["_is_comp"] == True]
+                    else:
+                        display_df = comp_df
+                        
+                    display_df = display_df.drop(columns=["_is_comp"]).sort_values(by="Squeeze Score", ascending=False)
+                    
+                    if display_df.empty:
+                        st.info("No coiled or compressed setups found for this date. Check 'Show all' to browse raw values.")
+                    else:
+                        st.dataframe(
+                            display_df.style.format({
+                                "Close (₹)": "{:.2f}",
+                                "ATR (₹)": "{:.2f}",
+                                "Squeeze Score": "{:.1f}%"
+                            }).applymap(
+                                lambda v: "color: #ff9f1c; font-weight:700" if v == "🔥 YES" else "",
+                                subset=["Coiled"]
+                            ),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                else:
+                    st.info("No stock data returned from indicator scanning.")
 
     # Footer
     st.caption("🧭 Sector Scope | AI Trade System V2 | Data refreshes every 60s")
