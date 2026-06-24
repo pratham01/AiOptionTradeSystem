@@ -29,7 +29,7 @@ class Nifty500TopStocksAgent:
         self.llm = llm_client or LlmAdvisorClient()
         self.settings = settings or Settings.load()
 
-    async def get_top_stocks_analysis(self) -> str:
+    async def get_top_stocks_analysis(self, send_telegram: bool = True) -> str:
         # Check if today is between Monday (0) and Friday (4)
         today = datetime.now()
         if today.weekday() > 4:
@@ -80,37 +80,41 @@ class Nifty500TopStocksAgent:
         table_str += "\n\n" + format_top_gainers_table(fo_top_5, title_prefix="Top F&O")
         table_str += "\n\n" + format_top_gainers_table(fo_worst_5, title_prefix="Worst F&O")
 
-        result_str = table_str
+        result_str = f"```\n{table_str}\n```"
         # Let the AI Brain (LLM) synthesize a quick narrative if configured
         if self.llm.configured():
             prompt = (
                 "You are an AI Trading Assistant. Here are the top 10 gainers across Nifty 500, Nifty Next 50, Nifty Midcap 100, Nifty Smallcap 100, and the top and worst 5 F&O stocks today:\n\n"
                 f"{table_str}\n\n"
-                "Provide a brief market narrative (2-3 sentences max) summarizing the sentiment, sector leadership, and strength across the different index fields (large, mid, small caps, and F&O) today. "
+                "Provide a brief market narrative (3-4 sentences max) summarizing:\n"
+                "1. Overall sentiment and sector leadership across large, mid, small caps, and F&O.\n"
+                "2. Volume conviction — highlight any stocks with notably high or low volume relative to their usual patterns.\n"
+                "3. Key takeaway for a swing/positional trader.\n"
                 "Output just the tables and your summary."
             )
             try:
                 analysis = await self.llm.complete(prompt)
                 if analysis and "Error connecting to" in analysis:
                     LOGGER.warning("LLM returned an error message. Using fallback raw table.")
-                    result_str = table_str + f"\n\n({analysis})"
+                    result_str = f"```\n{table_str}\n```\n\n({analysis})"
                 else:
                     result_str = analysis
             except Exception as e:
                 LOGGER.warning(f"LLM analysis failed, returning raw table. Error: {e}")
-                result_str = table_str + "\n\n(AI Brain analysis unavailable)"
+                result_str = f"```\n{table_str}\n```\n\n(AI Brain analysis unavailable)"
         
         # Send only to the dedicated Nifty 500 top gainer stocks Telegram subgroup
-        try:
-            bot_token = self.settings.top_gainer_telegram.bot_token or self.settings.telegram.bot_token
-            chat_id = self.settings.top_gainer_telegram.chat_id or self.settings.telegram.chat_id
-            if bot_token and chat_id:
-                LOGGER.info("Sending top stocks analysis to Telegram (Nifty 500 Top Gainers)...")
-                notifier = TelegramNotifier(token=bot_token, chat_id=chat_id)
-                if not notifier.send(result_str, parse_mode="Markdown"):
-                    notifier.send(result_str, parse_mode=None)
-        except Exception as e:
-            LOGGER.warning(f"Failed to send top stocks analysis to Telegram: {e}")
+        if send_telegram:
+            try:
+                bot_token = self.settings.top_gainer_telegram.bot_token or self.settings.telegram.bot_token
+                chat_id = self.settings.top_gainer_telegram.chat_id or self.settings.telegram.chat_id
+                if bot_token and chat_id:
+                    LOGGER.info("Sending top stocks analysis to Telegram (Nifty 500 Top Gainers)...")
+                    notifier = TelegramNotifier(token=bot_token, chat_id=chat_id)
+                    if not notifier.send(result_str, parse_mode="Markdown"):
+                        notifier.send(result_str, parse_mode=None)
+            except Exception as e:
+                LOGGER.warning(f"Failed to send top stocks analysis to Telegram: {e}")
             
         return result_str
 

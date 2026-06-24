@@ -15,6 +15,14 @@ from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 
 LOGGER = logging.getLogger(__name__)
 
+# Options signal color mapping
+signal_styles = {
+    "long buildup": {"color": "#00d084", "desc": "Put Writing Accumulation (Bullish Positioning)"},
+    "short buildup": {"color": "#ff4d6d", "desc": "Call Writing (Bearish Positioning)"},
+    "unwind": {"color": "#9b5de5", "desc": "Position Exiting (Unwinding)"},
+    "neutral": {"color": "#00b4d8", "desc": "No Clear Institutional Commitment"}
+}
+
 # --- STYLING & CUSTOM CSS ---
 st.markdown("""
 <style>
@@ -223,27 +231,25 @@ if not price_df.empty:
     snap_price_df = price_df[price_df["timestamp"] <= latest_ts]
     confluence_data = analyzer.detect_confluence_divergence(signal, snap_price_df if not snap_price_df.empty else price_df)
 
-# --- 1. CURRENT SMART OI VERDICT ---
-st.subheader("🏁 Swarm Verdict & Metrics")
-c1, c2, c3, c4 = st.columns(4)
+# --- 1. CURRENT SMART OI VERDICT & OPTION BUYER'S PANEL ---
+st.subheader("🚀 Option Buyer's Gamma & Short Covering Panel")
 
-# Set signal badge style
-signal_styles = {
-    "long buildup": {"color": "#00d084", "desc": "Put Writing Accumulation (Bullish Positioning)"},
-    "short buildup": {"color": "#ff4d6d", "desc": "Call Writing (Bearish Positioning)"},
-    "unwind": {"color": "#9b5de5", "desc": "Position Exiting (Unwinding)"},
-    "neutral": {"color": "#00b4d8", "desc": "No Clear Institutional Commitment"}
-}
-style = signal_styles.get(signal, {"color": "#8b949e", "desc": "Unknown"})
+# Advanced Option Buyer computations
+ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
+pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
 
-with c1:
-    st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid {style['color']};">
-        <div class="status-title">Smart OI Signal</div>
-        <div class="status-value" style="color: {style['color']};">{signal.upper()}</div>
-        <div class="status-desc">{style['desc']}</div>
-    </div>
-    """, unsafe_allow_html=True)
+call_wall = ce_oc.loc[ce_oc["oi"].idxmax()]["strike"] if not ce_oc.empty else 0
+put_wall = pe_oc.loc[pe_oc["oi"].idxmax()]["strike"] if not pe_oc.empty else 0
+
+call_wall_oi = ce_oc.loc[ce_oc["oi"].idxmax()]["oi"] if not ce_oc.empty else 0
+put_wall_oi = pe_oc.loc[pe_oc["oi"].idxmax()]["oi"] if not pe_oc.empty else 0
+
+dist_to_call_wall = ((call_wall - spot_price) / spot_price) * 100 if spot_price else 0
+dist_to_put_wall = ((spot_price - put_wall) / spot_price) * 100 if spot_price else 0
+
+atm_strike = summary["atm_strike"]
+ce_unwinding_atm = ce_oc[(ce_oc["strike"] == atm_strike) & (ce_oc["oi_change"] < 0)]
+pe_unwinding_atm = pe_oc[(pe_oc["strike"] == atm_strike) & (pe_oc["oi_change"] < 0)]
 
 # Calculate Put Call Ratio (PCR) from raw data
 total_ce_oi = latest_oc[latest_oc["option_type"] == "CE"]["oi"].sum()
@@ -251,13 +257,10 @@ total_pe_oi = latest_oc[latest_oc["option_type"] == "PE"]["oi"].sum()
 pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1.0
 
 # Calculate Max Pain
-# Minimize total pain
 strikes = latest_oc["strike"].unique()
 total_pain = []
 for s in strikes:
     pain = 0
-    # Calls pain: buyers profit if strike > s
-    # PE pain: buyers profit if strike < s
     for _, row in latest_oc.iterrows():
         stk = row["strike"]
         oi_val = row["oi"]
@@ -269,30 +272,101 @@ for s in strikes:
     total_pain.append(pain)
 max_pain_strike = strikes[np.argmin(total_pain)] if len(total_pain) > 0 else spot_price
 
+# Determine Option Buyer Actionable Signal
+buyer_verdict = "⚠️ NO TRADE (Rangebound Chop / High Theta Decay)"
+buyer_desc = "Spot is trapped between major option walls. Buying options now will lead to time decay. Wait for a breakout."
+buyer_color = "#8b949e"
+
+if dist_to_call_wall > 0 and dist_to_call_wall <= 0.6:
+    is_vwap_above = True
+    if not price_df.empty:
+        # Calculate VWAP
+        price_df["typical_price"] = (price_df["high"] + price_df["low"] + price_df["close"]) / 3
+        price_df["tp_vol"] = price_df["typical_price"] * price_df["volume"]
+        price_df["cum_vol"] = price_df["volume"].cumsum()
+        price_df["cum_tp_vol"] = price_df["tp_vol"].cumsum()
+        price_df["vwap"] = price_df["cum_tp_vol"] / price_df["cum_vol"].replace(0, 1)
+        is_vwap_above = spot_price > price_df["vwap"].iloc[-1]
+    
+    if is_vwap_above:
+        buyer_verdict = "🚀 CALL BUYING ALIGNMENT (Near Call Wall Breakout)"
+        buyer_desc = f"Spot is only {dist_to_call_wall:.2f}% below the major Call Wall (₹{call_wall:,.0f}). A breakout above this level will trigger aggressive Call short covering."
+        buyer_color = "#00d084"
+elif dist_to_put_wall > 0 and dist_to_put_wall <= 0.6:
+    is_vwap_below = True
+    if not price_df.empty:
+        is_vwap_below = spot_price < price_df["vwap"].iloc[-1]
+        
+    if is_vwap_below:
+        buyer_verdict = "🔥 PUT BUYING ALIGNMENT (Near Put Wall Breakdown)"
+        buyer_desc = f"Spot is only {dist_to_put_wall:.2f}% above the major Put Wall (₹{put_wall:,.0f}). A breakdown below this level will trigger rapid Put short covering and panic selling."
+        buyer_color = "#ff4d6d"
+elif not ce_unwinding_atm.empty:
+    buyer_verdict = "🟢 CALL BUYING ALIGNMENT (Intraday Short Covering)"
+    buyer_desc = f"Institutional Call writers are covering positions at the ATM strike ₹{atm_strike:,.0f} (OI Change: {ce_unwinding_atm.iloc[0]['oi_change']:,} contracts). Strong bullish tailwind."
+    buyer_color = "#00d084"
+elif not pe_unwinding_atm.empty:
+    buyer_verdict = "🔴 PUT BUYING ALIGNMENT (Intraday Put Long Liquidation)"
+    buyer_desc = f"Put writers are unwinding/exiting support at the ATM strike ₹{atm_strike:,.0f} (OI Change: {pe_unwinding_atm.iloc[0]['oi_change']:,} contracts). Momentum shifting bearish."
+    buyer_color = "#ff4d6d"
+
+# Render Option Buyer Verdict Card
+st.markdown(f"""
+<div style="background:#1e2130; padding:20px; border-radius:12px; border-left:8px solid {buyer_color}; border-top:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:20px;">
+    <div style="font-size:0.8rem; color:#8b949e; text-transform:uppercase; font-weight:600; margin-bottom:5px;">Actionable Option Buyer Verdict</div>
+    <div style="font-size:1.6rem; font-weight:bold; color:{buyer_color}; margin-bottom:8px;">{buyer_verdict}</div>
+    <div style="font-size:0.95rem; color:#c9d1d9; line-height:1.5;">{buyer_desc}</div>
+</div>
+""", unsafe_allow_html=True)
+
+# Metrics Grid
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+    st.markdown(f"""
+    <div class="status-card" style="border-top: 5px solid #ff4d6d;">
+        <div class="status-title">🔴 Call Wall (Resistance)</div>
+        <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">₹{call_wall:,.0f}</div>
+        <div class="status-desc">{dist_to_call_wall:.2f}% away | OI: {call_wall_oi:,.0f}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 with c2:
     st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid #ffb703;">
-        <div class="status-title">Spot Price</div>
-        <div class="status-value" style="color: #ffb703;">₹{spot_price:,.2f}</div>
-        <div class="status-desc">Snapshot Timestamp: {latest_ts.strftime('%H:%M:%S')}</div>
+    <div class="status-card" style="border-top: 5px solid #00d084;">
+        <div class="status-title">🟢 Put Wall (Support)</div>
+        <div class="status-value" style="color: #00d084; font-size:1.6rem;">₹{put_wall:,.0f}</div>
+        <div class="status-desc">{dist_to_put_wall:.2f}% away | OI: {put_wall_oi:,.0f}</div>
     </div>
     """, unsafe_allow_html=True)
 
 with c3:
     st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid #00b4d8;">
-        <div class="status-title">Put-Call Ratio (PCR)</div>
-        <div class="status-value" style="color: #00b4d8;">{pcr:.2f}</div>
-        <div class="status-desc">{"🟢 Bullish (>1.0)" if pcr > 1.0 else "🔴 Bearish (<1.0)"} Sentiment</div>
+    <div class="status-card" style="border-top: 5px solid #ffb703;">
+        <div class="status-title">Spot Price</div>
+        <div class="status-value" style="color: #ffb703; font-size:1.6rem;">₹{spot_price:,.2f}</div>
+        <div class="status-desc">Max Pain Strike: ₹{int(max_pain_strike):,}</div>
     </div>
     """, unsafe_allow_html=True)
 
+# Get ATM IV for premium cost representation
+atm_iv_val = latest_oc[latest_oc["strike"] == atm_strike]["iv"].mean() if not latest_oc.empty else None
+iv_status = "Neutral"
+iv_color = "#00b4d8"
+if atm_iv_val:
+    if atm_iv_val < 12.0:
+        iv_status = "Cheap Volatility"
+        iv_color = "#00d084"
+    elif atm_iv_val > 17.0:
+        iv_status = "Expensive Premium"
+        iv_color = "#ff4d6d"
+
 with c4:
     st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid #9b5de5;">
-        <div class="status-title">Max Pain Strike</div>
-        <div class="status-value" style="color: #9b5de5;">₹{int(max_pain_strike):,}</div>
-        <div class="status-desc">Expiry-day magnet target</div>
+    <div class="status-card" style="border-top: 5px solid {iv_color};">
+        <div class="status-title">PCR & Premium Cost</div>
+        <div class="status-value" style="color: {iv_color}; font-size:1.6rem;">{pcr:.2f}</div>
+        <div class="status-desc">{iv_status} ({f"{atm_iv_val:.1f}%" if atm_iv_val else "N/A"} IV)</div>
     </div>
     """, unsafe_allow_html=True)
 

@@ -119,6 +119,17 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WhatsappConfig:
+    """WhatsApp notification configuration (Meta Cloud API)."""
+
+    phone_number_id: str = ""
+    access_token: str = ""
+    to_number: str = ""
+    enabled: bool = False
+
+
+
+@dataclass(frozen=True, slots=True)
 class LlmConfig:
     """LLM configuration for the agentic brain."""
 
@@ -148,6 +159,7 @@ class Settings:
 
     # Notification settings
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    whatsapp: WhatsappConfig = field(default_factory=WhatsappConfig)
     st_confirmed_telegram: TelegramConfig = field(default_factory=TelegramConfig)
     top_gainer_telegram: TelegramConfig = field(default_factory=TelegramConfig)
     top_sectors_telegram: TelegramConfig = field(default_factory=TelegramConfig)
@@ -277,6 +289,13 @@ class Settings:
             ),
         )
 
+        whatsapp_config = WhatsappConfig(
+            phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""),
+            access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", ""),
+            to_number=os.getenv("WHATSAPP_TO_NUMBER", ""),
+            enabled=_parse_bool(os.getenv("WHATSAPP_ENABLED"), False),
+        )
+
         # Parse LLM settings
         # Preference: Gemini 1.5 Pro (The requested "Brain"), but respect LLM_PROVIDER if explicitly set
         llm_provider = os.getenv("LLM_PROVIDER")
@@ -302,6 +321,7 @@ class Settings:
             dhan=dhan_config,
             llm=llm_config,
             telegram=telegram_config,
+            whatsapp=whatsapp_config,
             st_confirmed_telegram=st_telegram_config,
             top_gainer_telegram=top_gainer_telegram_config,
             top_sectors_telegram=top_sectors_telegram_config,

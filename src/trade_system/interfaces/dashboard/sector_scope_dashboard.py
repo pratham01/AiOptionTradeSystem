@@ -381,6 +381,34 @@ else:
         latest_row = grp_sorted.iloc[-1]
         close_last = float(latest_row['close'])
         
+        # --- Volume Surge Computation ---
+        # Compute today's volume and 5-day average daily volume
+        volume_today = 0
+        avg_volume_5d = 0
+        vol_surge = 0.0
+        
+        today_candles = grp_sorted[grp_sorted['timestamp'].dt.date == target_date]
+        prev_candles_all = grp_sorted[grp_sorted['timestamp'].dt.date < target_date]
+        
+        # Today's volume: sum of intraday candle volumes (or live quote)
+        if is_today and quotes and symbol in quotes:
+            volume_today = quotes[symbol].volume or 0
+        elif not today_candles.empty:
+            volume_today = int(today_candles['volume'].sum())
+        
+        # Historical daily volumes for last 5 trading days
+        if not prev_candles_all.empty:
+            prev_candles_all = prev_candles_all.copy()
+            prev_candles_all['trade_date'] = prev_candles_all['timestamp'].dt.date
+            daily_vols = prev_candles_all.groupby('trade_date')['volume'].sum()
+            # Take last 5 trading days
+            last_5_days = daily_vols.sort_index().tail(5)
+            if not last_5_days.empty:
+                avg_volume_5d = int(last_5_days.mean())
+        
+        if avg_volume_5d > 0 and volume_today > 0:
+            vol_surge = round(volume_today / avg_volume_5d, 2)
+        
         # Override with live quote LTP and compute pChange if applicable
         pchange = None
         if is_today and quotes and symbol in quotes:
@@ -392,7 +420,6 @@ else:
                 close_prev = quote.previous_close
             else:
                 # Intraday return lookbacks: compare today's live LTP with today's database candles
-                today_candles = grp_sorted[grp_sorted['timestamp'].dt.date == target_date]
                 if not today_candles.empty and len(today_candles) > 1:
                     if len(today_candles) > step:
                         ref_idx = -step
@@ -430,7 +457,10 @@ else:
                 "sector": sector,
                 "close_last": close_last,
                 "close_prev": close_prev,
-                "pChange": pchange
+                "pChange": pchange,
+                "volume_today": volume_today,
+                "avg_volume_5d": avg_volume_5d,
+                "vol_surge": vol_surge
             })
             
     if rows:
@@ -451,7 +481,10 @@ else:
                             "sector": sector,
                             "close_last": ltp,
                             "close_prev": prev_close,
-                            "pChange": pchange
+                            "pChange": pchange,
+                            "volume_today": quote.volume or 0,
+                            "avg_volume_5d": 0,
+                            "vol_surge": 0.0
                         })
             if live_symbols_to_add:
                 merged_closes = pd.concat([merged_closes, pd.DataFrame(live_symbols_to_add)], ignore_index=True)
@@ -463,7 +496,7 @@ else:
                 if today_candle_count < 2:
                     st.sidebar.warning(f"⚠️ No intraday candles in DB yet. Showing **daily change** as fallback. Start the live collector for {selected_lookback} precision.")
     else:
-        merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange"])
+        merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange", "volume_today", "avg_volume_5d", "vol_surge"])
     
     # Sector performance
     if not merged_closes.empty:
@@ -483,21 +516,42 @@ else:
     gainers_data = []
     for idx, row in top_gainers.iterrows():
         sym_clean = row['symbol'].replace("NSE:", "").replace("-EQ", "")
+        vs = row.get('vol_surge', 0)
+        # Conviction emoji: 🟢 strong (≥1.5x), 🟡 normal (1.0–1.5x), 🔴 weak (<1.0x), ⚪ no data
+        if vs >= 1.5:
+            vs_label = f"🟢 {vs:.1f}x"
+        elif vs >= 1.0:
+            vs_label = f"🟡 {vs:.1f}x"
+        elif vs > 0:
+            vs_label = f"🔴 {vs:.1f}x"
+        else:
+            vs_label = "⚪ N/A"
         gainers_data.append({
             "Symbol": sym_clean,
             "Sector": row['sector'],
             "LTP": row['close_last'],
-            "Change": row['pChange']
+            "Change": row['pChange'],
+            "Vol Surge": vs_label
         })
         
     losers_data = []
     for idx, row in top_losers.iterrows():
         sym_clean = row['symbol'].replace("NSE:", "").replace("-EQ", "")
+        vs = row.get('vol_surge', 0)
+        if vs >= 1.5:
+            vs_label = f"🟢 {vs:.1f}x"
+        elif vs >= 1.0:
+            vs_label = f"🟡 {vs:.1f}x"
+        elif vs > 0:
+            vs_label = f"🔴 {vs:.1f}x"
+        else:
+            vs_label = "⚪ N/A"
         losers_data.append({
             "Symbol": sym_clean,
             "Sector": row['sector'],
             "LTP": row['close_last'],
-            "Change": row['pChange']
+            "Change": row['pChange'],
+            "Vol Surge": vs_label
         })
 
     # Max absolute change for bar widths
@@ -681,8 +735,20 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange']].copy()
-                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %']
+                # Build vol surge labels for drill-down
+                def _vol_surge_label(vs):
+                    if vs >= 1.5:
+                        return f"🟢 {vs:.1f}x"
+                    elif vs >= 1.0:
+                        return f"🟡 {vs:.1f}x"
+                    elif vs > 0:
+                        return f"🔴 {vs:.1f}x"
+                    return "⚪ N/A"
+                
+                sector_stocks_df['Vol Surge'] = sector_stocks_df['vol_surge'].apply(_vol_surge_label)
+                
+                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange', 'Vol Surge']].copy()
+                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge']
                 st.dataframe(
                     display_df.style.format({
                         "LTP (₹)": "₹{:.2f}",

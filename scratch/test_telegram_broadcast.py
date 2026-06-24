@@ -35,7 +35,7 @@ async def run_broadcast():
     
     with patch("trade_system.application.agent.nifty500_top_stocks_agent.datetime") as mock_dt:
         mock_dt.now.return_value = mock_weekday
-        analysis = await agent.get_top_stocks_analysis()
+        analysis = await agent.get_top_stocks_analysis(send_telegram=False)
         
     print("\n--- AGENT ANALYSIS START ---")
     print(analysis)

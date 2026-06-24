@@ -126,11 +126,23 @@ def create_fyers_broker() -> FyersBroker:
     return broker
 
 
+def _fmt_vol(vol: int) -> str:
+    """Format volume in Indian notation: Cr / L / K."""
+    if vol >= 1_00_00_000:
+        return f"{vol / 1_00_00_000:.1f}Cr"
+    elif vol >= 1_00_000:
+        return f"{vol / 1_00_000:.1f}L"
+    elif vol >= 1_000:
+        return f"{vol / 1_000:.0f}K"
+    return str(vol)
+
+
 def format_top_gainers_table(rows: list[GainerRow], title_prefix: str = "Top") -> str:
     lines = []
     lines.append(f"{title_prefix} {len(rows)} stocks @ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("#  SYMBOL               PRICE      CHANGE%      VOLUME")
     for i, row in enumerate(rows, start=1):
         clean = row.symbol.replace("NSE:", "").replace("-EQ", "")
-        lines.append(f"{i:>2} {clean:<20} {row.close:>8.2f} {row.change_pct:>10.2f}% {row.volume:>12}")
+        vol_str = _fmt_vol(row.volume)
+        lines.append(f"{i:>2} {clean:<20} {row.close:>8.2f} {row.change_pct:>10.2f}% {vol_str:>10}")
     return "\n".join(lines)

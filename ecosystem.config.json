@@ -31,6 +31,22 @@
       "error_file": "logs/sync_15m_error.log",
       "out_file": "logs/sync_15m_out.log",
       "merge_logs": true
+    },
+    {
+      "name": "st-touch-scanner",
+      "script": "scripts/run_live_st_scanner.py",
+      "interpreter": "python3",
+      "cwd": "/Users/pratham/aitrade/trade_system_v2",
+      "env": {
+        "PYTHONPATH": "src"
+      },
+      "autorestart": true,
+      "watch": false,
+      "max_memory_restart": "1G",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss",
+      "error_file": "logs/st_scanner.log",
+      "out_file": "logs/st_scanner.log",
+      "merge_logs": true
     }
   ]
 }

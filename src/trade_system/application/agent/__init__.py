@@ -7,6 +7,7 @@ from trade_system.application.agent.orchestrator import TradeOrchestrator
 from trade_system.application.agent.market_context_agent import MarketContextAgent
 from trade_system.application.agent.candidate_screener_agent import CandidateScreenerAgent
 from trade_system.application.agent.setup_validator_agent import SetupValidatorAgent
+from trade_system.application.agent.nifty_volatility_analyzer_agent import NiftyVolatilityAnalyzerAgent
 
 __all__ = [
     "DecisionEngine",
@@ -19,4 +20,5 @@ __all__ = [
     "MarketContextAgent",
     "CandidateScreenerAgent",
     "SetupValidatorAgent",
+    "NiftyVolatilityAnalyzerAgent",
 ]

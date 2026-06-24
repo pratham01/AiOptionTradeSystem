@@ -39,12 +39,13 @@ class ContinuousStScanner:
             self.settings.telegram.chat_id
         )
         self.last_alert_sent: dict[str, datetime] = {}
-        self.scan_interval_seconds = 15 * 60 # 15 minutes
+        self.scan_interval_seconds = 3 * 60 # 3 minutes (aligned with db sync)
         self.is_running = True
 
     def _is_market_hours(self) -> bool:
-        """Check if current time is within Indian market hours (09:15 - 15:30)."""
-        now = datetime.now()
+        """Check if current time is within Indian market hours (09:15 - 15:30 IST)."""
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         if now.weekday() >= 5: # Weekend
             return False
         
@@ -53,7 +54,7 @@ class ContinuousStScanner:
         end_time = dt_time(15, 30)
         return start_time <= current_time <= end_time
 
-    async def run(self):
+    def run(self):
         LOGGER.info("🚀 Starting Continuous Supertrend Touch Scanner...")
         
         while self.is_running:
@@ -63,13 +64,13 @@ class ContinuousStScanner:
                     # If after market, wait until next day
                     # For simplicity, we just sleep and check periodically
                     LOGGER.info("Market is closed. Standing by...")
-                    await asyncio.sleep(300) # Check every 5 mins
+                    time.sleep(300) # Check every 5 mins
                     continue
 
                 LOGGER.info("Starting new 15-minute scan cycle...")
                 
                 # 1. Ensure fresh token
-                token = self.auth_service.read_cached_token()
+                token = self.auth_service.get_valid_token()
                 broker = FyersBroker(
                     client_id=self.settings.fyers.client_id,
                     access_token=token,
@@ -79,15 +80,15 @@ class ContinuousStScanner:
                 
                 if not broker.authenticate():
                     LOGGER.error("Failed to authenticate broker. Retrying in 60s...")
-                    await asyncio.sleep(60)
+                    time.sleep(60)
                     continue
 
                 # 2. Run Scan
                 agent = SupertrendTouchAgent(broker=broker)
-                universe = get_fo_universe()
+                universe = self.settings.index_symbols
                 
-                # Scan 15m resolution
-                touches = await agent.scan_for_touches(universe, resolution="15")
+                # Scan 15m resolution using database cache (Only applicable to indices)
+                touches = asyncio.run(agent.scan_for_touches(universe, resolution="15", use_cache=True))
                 
                 # 3. Filter and Alert
                 if touches:
@@ -104,12 +105,12 @@ class ContinuousStScanner:
                     if filtered_touches:
                         self._send_report(filtered_touches)
 
-                LOGGER.info(f"Scan cycle complete. Next scan in 15 minutes.")
-                await asyncio.sleep(self.scan_interval_seconds)
+                LOGGER.info(f"Scan cycle complete. Next scan in {self.scan_interval_seconds // 60} minutes.")
+                time.sleep(self.scan_interval_seconds)
 
             except Exception as e:
                 LOGGER.exception(f"Continuous scanner encountered an error: {e}")
-                await asyncio.sleep(60) # Wait before retry
+                time.sleep(60) # Wait before retry
 
     def _send_report(self, suggestions):
         today_str = date.today().strftime("%d %b %Y")
@@ -134,4 +135,4 @@ class ContinuousStScanner:
 
 if __name__ == "__main__":
     scanner = ContinuousStScanner()
-    asyncio.run(scanner.run())
+    scanner.run()

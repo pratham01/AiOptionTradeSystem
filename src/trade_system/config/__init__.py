@@ -13,7 +13,8 @@ from .settings import (
     BrokerConfig,
     FyersConfig,
     DhanConfig,
-    TelegramConfig
+    TelegramConfig,
+    WhatsappConfig
 )
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -89,5 +90,6 @@ __all__ = [
     "BrokerConfig",
     "FyersConfig",
     "DhanConfig",
-    "TelegramConfig"
+    "TelegramConfig",
+    "WhatsappConfig"
 ]

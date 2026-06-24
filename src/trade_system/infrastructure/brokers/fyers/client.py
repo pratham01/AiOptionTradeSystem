@@ -330,6 +330,10 @@ class FyersBrokerV2(DataBroker):
 
             response = self.fyers.history(data=payload)
 
+            if response.get("s") == "no_data":
+                LOGGER.info(f"No historical data found for {symbol} from {start_date} to {end_date} (e.g. weekend/holiday).")
+                return []
+
             if response.get("s") != "ok":
                 self._check_auth_failure(response)
                 err = response.get("errmsg") or response.get("message") or "Unknown Fyers API error"
@@ -394,15 +398,26 @@ class FyersBrokerV2(DataBroker):
     @staticmethod
     def _map_timeframe(timeframe: str) -> str:
         """Map generic timeframe to Fyers format."""
+        t_upper = str(timeframe).upper()
         mapping = {
             "DAY": "1D",
+            "1D": "1D",
             "1H": "60",
+            "60": "60",
             "30MIN": "30",
+            "30": "30",
             "15MIN": "15",
+            "15": "15",
             "5MIN": "5",
+            "5": "5",
             "1MIN": "1",
+            "1": "1",
         }
-        return mapping.get(timeframe.upper(), "1D")
+        if t_upper in mapping:
+            return mapping[t_upper]
+        if t_upper.isdigit():
+            return t_upper
+        return "1D"
 
     def __repr__(self) -> str:
         return f"FyersBrokerV2(client_id={self.client_id}, authenticated={self._authenticated})"

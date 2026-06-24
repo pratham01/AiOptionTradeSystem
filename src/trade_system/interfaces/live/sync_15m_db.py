@@ -16,7 +16,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 def fetch_live_loop():
     settings = Settings.load()
     engine = get_engine()
-    symbols = get_fo_universe()
+    # Sync both F&O universe and indices
+    symbols = get_fo_universe() + settings.index_symbols
     
     logging.info(f"Starting continuous live 15m fetcher for {len(symbols)} F&O symbols...")
 
@@ -37,7 +38,8 @@ def fetch_live_loop():
             user_id=settings.fyers.user_id
         )
 
-        now = datetime.now()
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
         # Only run during market hours (09:15 to 15:30)
         if now.hour < 9 or (now.hour == 9 and now.minute < 15) or now.hour >= 16:
             logging.info("Outside market hours. Sleeping for 5 minutes...")

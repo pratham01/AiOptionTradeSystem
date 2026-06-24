@@ -193,8 +193,6 @@ class FoStockSuggesterAgent:
             if not is_breakout_bypass and not is_watchlist and not is_pre_breakout and leading_sectors and cand.sector not in leading_sectors:
                 continue
             
-            if len(suggestions) >= 5: break
-            
             # Fetch local historical bars for precise point-in-time ATR calculation
             target_time = market_context.timestamp if hasattr(market_context, "timestamp") else datetime.now()
             local_bars = fetch_local_15m_bars(cand.symbol, target_time)
@@ -213,5 +211,9 @@ class FoStockSuggesterAgent:
                         sugg.tags.append("pre_breakout_accumulation")
                 suggestions.append(sugg)
 
-        return suggestions
+        # Sort suggestions by confidence descending (highest conviction first)
+        suggestions.sort(key=lambda s: s.confidence, reverse=True)
+
+        # Return only the top 3 options trades to downsize suggestions list
+        return suggestions[:3]
 

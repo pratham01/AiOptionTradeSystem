@@ -228,18 +228,42 @@ class LiveAlertAgent:
                 if isinstance(obj, dict): return obj.get(key)
                 return getattr(obj, key, None)
 
-            curr_pcr = _get(analysis, 'pcr')
-            prev_pcr = _get(past_15, 'pcr')
-            if curr_pcr is not None and prev_pcr is not None:
-                pcr_delta = curr_pcr - prev_pcr
-                if abs(pcr_delta) >= 0.08:
-                    direction = "Bullish" if pcr_delta > 0 else "Bearish"
-                    alerts.append(f"• PCR: {direction} {pcr_delta:+.2f} (Now: {curr_pcr:.2f})")
+            # PCR extraction (check nested metrics dict for dict input first, fallback to attribute)
+            metrics = _get(analysis, 'metrics')
+            past_metrics = _get(past_15, 'metrics')
+            curr_pcr = _get(metrics, 'pcr_oi') if metrics else _get(analysis, 'pcr')
+            prev_pcr = _get(past_metrics, 'pcr_oi') if past_metrics else _get(past_15, 'pcr')
+
+            if curr_pcr is not None:
+                # 1. PCR 15-min shift alerts
+                if prev_pcr is not None:
+                    pcr_delta = curr_pcr - prev_pcr
+                    if abs(pcr_delta) >= 0.08:
+                        direction = "Bullish" if pcr_delta > 0 else "Bearish"
+                        alerts.append(f"• PCR Shift: {direction} {pcr_delta:+.2f} (Now: {curr_pcr:.2f})")
+
+                # 2. Absolute Extreme PCR Alerts (Contrarian Sentiment Playbook)
+                if curr_pcr >= 1.3:
+                    extreme_msg = (
+                        f"🔥 <b>{short_sym} Extreme PCR Alert</b>\n"
+                        f"PCR: <b>{curr_pcr:.2f}</b> (Extremely Bullish Sentiment / High Put Writing)\n"
+                        f"<i>Sentiment: Favorable for ATM CALL buying / trend persistence.</i>"
+                    )
+                    self._debounce_send(symbol, "EXTREME_PCR_BULL", extreme_msg, custom_debounce=3600)
+                elif curr_pcr <= 0.7:
+                    extreme_msg = (
+                        f"🩸 <b>{short_sym} Extreme PCR Alert</b>\n"
+                        f"PCR: <b>{curr_pcr:.2f}</b> (Extremely Bearish Sentiment / High Call Writing)\n"
+                        f"<i>Sentiment: Favorable for ATM PUT buying / trend persistence.</i>"
+                    )
+                    self._debounce_send(symbol, "EXTREME_PCR_BEAR", extreme_msg, custom_debounce=3600)
 
             curr_mp = _get(analysis, 'max_pain')
             prev_mp = _get(past_15, 'max_pain')
-            if curr_mp and prev_mp and curr_mp != prev_mp:
-                alerts.append(f"• Max Pain Shift: {curr_mp - prev_mp:+.0f} pts")
+            curr_mp_val = _get(curr_mp, 'max_pain_strike') if isinstance(curr_mp, dict) else curr_mp
+            prev_mp_val = _get(prev_mp, 'max_pain_strike') if isinstance(prev_mp, dict) else prev_mp
+            if curr_mp_val and prev_mp_val and curr_mp_val != prev_mp_val:
+                alerts.append(f"• Max Pain Shift: {curr_mp_val - prev_mp_val:+.0f} pts")
 
             # Speculative Heat
             try:

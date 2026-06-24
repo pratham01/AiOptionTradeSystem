@@ -31,12 +31,13 @@ async def run_st_touch_scan():
     notifier = TelegramNotifier(settings.telegram.bot_token, settings.telegram.chat_id)
     
     universe = get_fo_universe()
-    logger.info(f"🚀 Starting Multi-Timeframe ST-Touch Scan for {len(universe)} stocks...")
+    indices = settings.index_symbols
+    logger.info("🚀 Starting Multi-Timeframe ST-Touch Scan...")
     
-    # 1. Scan 15-Minute touches
-    touches_15m = await agent.scan_for_touches(universe, resolution="15")
+    # 1. Scan 15-Minute touches (Only applicable to indices)
+    touches_15m = await agent.scan_for_touches(indices, resolution="15")
     
-    # 2. Scan Daily touches
+    # 2. Scan Daily touches (Applicable to F&O stocks)
     touches_daily = await agent.scan_for_touches(universe, resolution="D")
     
     # 3. Report Results

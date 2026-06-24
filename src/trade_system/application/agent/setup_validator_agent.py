@@ -122,6 +122,100 @@ class SetupValidatorAgent:
             except Exception as e:
                 LOGGER.warning(f"Failed to check directive alignment: {e}")
 
+        # --- General Agentic AI Critique & Validation (suggestion then validation happens everytime) ---
+        ai_critique = ""
+        if self.llm.configured():
+            critique_prompt = (
+                f"You are a professional option trading specialist evaluating a trade proposal for an option buyer.\n\n"
+                f"Candidate Trade:\n"
+                f"- Symbol: {candidate.symbol}\n"
+                f"- Direction: {candidate.direction} (Buy Call if CALL, Buy Put if PUT)\n"
+                f"- Entry Zone: {entry_low:.2f} - {entry_high:.2f}\n"
+                f"- Target: {target:.2f} (Reward: {reward:.2f})\n"
+                f"- Stop Loss: {sl:.2f} (Risk: {risk:.2f})\n"
+                f"- Risk/Reward Ratio: {rr:.2f}\n"
+                f"- Volume Surge Ratio: {candidate.volume_surge:.2f}x\n"
+                f"- RSI Daily: {candidate.rsi_daily if candidate.rsi_daily else 'N/A'}\n"
+                f"- Sector: {candidate.sector}\n\n"
+                f"Provide a JSON response containing:\n"
+                f"1. 'ai_score': A float between 0.0 and 1.0 representing your conviction in this trade setup based on volatility, momentum, and risk/reward.\n"
+                f"2. 'critique': A 2-sentence explanation summarizing the primary setup strength and the main risk (e.g., theta decay, resistance levels).\n\n"
+                f"Respond ONLY with a valid JSON response. Do not include markdown formatting or backticks. Example: {{\"ai_score\": 0.85, \"critique\": \"This is a good setup because...\"}}"
+            )
+            try:
+                critique_str = await self.llm.complete(critique_prompt)
+                critique_str_clean = critique_str.strip().replace("```json", "").replace("```", "").strip()
+                critique_data = json.loads(critique_str_clean)
+                ai_score = float(critique_data.get("ai_score", 0.5))
+                ai_critique = critique_data.get("critique", "")
+                
+                # Blend rules-based and AI-based confidence
+                old_conf = confidence
+                confidence = round(0.4 * confidence + 0.6 * ai_score, 3)
+                LOGGER.info(f"SetupValidatorAgent: LLM Agentic validation for {candidate.symbol}. Rule Conf: {old_conf:.2f} -> AI Conf: {confidence:.2f} (AI Score: {ai_score:.2f})")
+            except Exception as e:
+                LOGGER.warning(f"Failed to perform LLM agentic validation: {e}")
+
+
+        # --- Institutional Movement Alignment Filter ---
+        is_inst_buildup = False
+        inst_score = 0.5
+        reason = ""
+        try:
+            oc_df = await self._fetch_latest_option_chain(candidate.symbol)
+            if not oc_df.empty:
+                total_pe_oi = oc_df[oc_df["option_type"] == "PE"]["oi"].sum()
+                total_ce_oi = oc_df[oc_df["option_type"] == "CE"]["oi"].sum()
+                pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1.0
+                
+                spot = candidate.entry_price
+                step = 50 if "NIFTY" in candidate.symbol.upper() else 10
+                strikes = oc_df["strike"].unique()
+                if len(strikes) > 1:
+                    sorted_strikes = sorted(strikes)
+                    avg_step = sum(sorted_strikes[j] - sorted_strikes[j-1] for j in range(1, len(sorted_strikes))) / (len(sorted_strikes) - 1)
+                    step = avg_step if avg_step > 0 else step
+                    
+                atm_strike = round(spot / step) * step
+                near_oc = oc_df[(oc_df["strike"] >= atm_strike - 2 * step) & (oc_df["strike"] <= atm_strike + 2 * step)]
+                
+                near_pe_oi = near_oc[near_oc["option_type"] == "PE"]["oi"].sum()
+                near_ce_oi = near_oc[near_oc["option_type"] == "CE"]["oi"].sum()
+                
+                near_pe_change = near_oc[near_oc["option_type"] == "PE"]["oi_change"].sum()
+                near_ce_change = near_oc[near_oc["option_type"] == "CE"]["oi_change"].sum()
+                
+                if candidate.direction == "CALL":
+                    is_put_writing = near_pe_oi > near_ce_oi * 1.1 or near_pe_change > near_ce_change * 1.2
+                    is_ce_unwinding = near_ce_change < 0
+                    
+                    if is_put_writing or is_ce_unwinding:
+                        inst_score = 0.8
+                        reason = f"Institutional Put writing (PE near ATM: {near_pe_oi:,.0f} vs CE: {near_ce_oi:,.0f}) and/or CE unwinding."
+                    else:
+                        inst_score = 0.3
+                        reason = "Weak institutional backing. Heavy Call resistance near ATM."
+                else:
+                    is_call_writing = near_ce_oi > near_pe_oi * 1.1 or near_ce_change > near_pe_change * 1.2
+                    is_pe_unwinding = near_pe_change < 0
+                    
+                    if is_call_writing or is_pe_unwinding:
+                        inst_score = 0.8
+                        reason = f"Institutional Call writing (CE near ATM: {near_ce_oi:,.0f} vs PE: {near_pe_oi:,.0f}) and/or PE unwinding."
+                    else:
+                        inst_score = 0.3
+                        reason = "Weak institutional backing. Heavy Put support near ATM."
+                        
+                if inst_score >= 0.7:
+                    confidence = min(1.0, confidence + 0.15)
+                    is_inst_buildup = True
+                    LOGGER.info(f"SetupValidatorAgent: Boosted confidence for {candidate.symbol} due to institutional alignment: {reason}")
+                else:
+                    confidence *= 0.5
+                    LOGGER.info(f"SetupValidatorAgent: Penalized confidence for {candidate.symbol} due to weak institutional alignment: {reason}")
+        except Exception as exc:
+            LOGGER.warning(f"SetupValidatorAgent: Institutional check failed for {candidate.symbol}: {exc}")
+
         if confidence < self.CONFIDENCE_THRESHOLD:
             return None
 
@@ -143,13 +237,17 @@ class SetupValidatorAgent:
 
         narrative = self._build_narrative(candidate, market_context, rr, confidence)
         if is_unified: narrative = "🌟 **UNIFIED SWARM SETUP:** " + narrative
+        if is_inst_buildup: narrative = "🛡️ **INSTITUTIONAL ALIGNED:** " + narrative
 
-        if self.llm.configured():
+        if ai_critique:
+            narrative = f"🤖 **AI CRITIQUE:** {ai_critique}\n\n" + narrative
+        elif self.llm.configured():
             try: narrative = await self._llm_narrative(candidate, market_context, rr, confidence, narrative, user_directive=user_directive)
             except: pass
 
         tags = self._build_tags(candidate, market_context, confidence)
         if is_unified: tags.append("unified_swarm_setup")
+        if is_inst_buildup: tags.append("institutional_buildup")
 
         suggestion = TradeSuggestion(
             id=str(uuid.uuid4()),
@@ -255,3 +353,29 @@ class SetupValidatorAgent:
         tags = [candidate.horizon.value.lower()]
         if confidence >= 0.75: tags.append("high_confidence")
         return tags
+
+    async def _fetch_latest_option_chain(self, symbol: str) -> pd.DataFrame:
+        try:
+            from trade_system.infrastructure.database.connection import get_engine
+            from sqlalchemy import text
+            engine = get_engine()
+            with engine.connect() as conn:
+                ts_query = text("""
+                    SELECT MAX(timestamp) as max_ts
+                    FROM option_chain_data
+                    WHERE underlying_symbol = :symbol
+                """)
+                ts_res = conn.execute(ts_query, {"symbol": symbol}).first()
+                if not ts_res or not ts_res[0]:
+                    return pd.DataFrame()
+                
+                data_query = text("""
+                    SELECT strike, option_type, oi, oi_change, ltp, volume
+                    FROM option_chain_data
+                    WHERE underlying_symbol = :symbol
+                      AND timestamp = :ts
+                """)
+                return pd.read_sql(data_query, conn, params={"symbol": symbol, "ts": ts_res[0]})
+        except Exception as e:
+            LOGGER.debug(f"Failed to fetch option chain for {symbol}: {e}")
+            return pd.DataFrame()
