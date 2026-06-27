@@ -1,17 +1,18 @@
 """
-IntradayEdgeScorer — Multi-layer confluence scoring engine for intraday FO trading.
+IntradayEdgeScorer — Multi-layer confluence scoring engine for FO trading.
+Supports three horizons:
+  - INTRADAY: 15-minute base chart, Daily trend alignment.
+  - WEEKLY: Daily base chart (swing), Weekly trend alignment.
+  - MONTHLY: Weekly base chart (positional), Monthly trend alignment.
 
 Combines 7 independent signal layers into a single EdgeScore (0–100) per stock:
-  1. Sector Momentum   — Is the stock's sector leading today?
+  1. Sector Momentum   — Is the stock's sector leading in the horizon?
   2. Relative Strength  — Is the stock outperforming its sector peers?
   3. VWAP Location      — Is price at a favorable VWAP zone?
-  4. Volume Confirmation — Volume surge + positive CVD (buying pressure)?
+  4. Volume Confirmation — Volume surge + buying/selling pressure (CVD)?
   5. Momentum Timing    — Is the move early (catchable) or exhausted?
-  6. Supertrend Align   — Do 15-minute and daily supertrend agree?
+  6. Supertrend Align   — Do base and higher timeframe supertrends agree?
   7. Compression Release — Was the stock coiled and now releasing energy?
-
-Each layer produces a sub-score (0.0–1.0) and a direction signal (CALL / PUT / NEUTRAL).
-The composite EdgeScore applies a direction-alignment multiplier when 5+ layers agree.
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ from trade_system.application.indicators.volume_delta import VolumeDeltaIndicato
 from trade_system.application.indicators.compression import CompressionIndicator
 
 LOGGER = logging.getLogger(__name__)
-
 
 # ── Layer Weights ──────────────────────────────────────────────────────────────
 
@@ -95,21 +95,45 @@ class EdgeScore:
 class IntradayEdgeScorer:
     """
     Scans the entire FO universe and produces an EdgeScore for each stock.
-
-    Usage:
-        scorer = IntradayEdgeScorer()
-        results = scorer.scan(target_date=date.today())
-        for edge in sorted(results, key=lambda e: e.final_score, reverse=True)[:10]:
-            print(f"{edge.symbol}: {edge.final_score:.0f} {edge.direction}")
+    Supports INTRADAY, WEEKLY, and MONTHLY horizons.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, horizon: str = "INTRADAY") -> None:
         self.engine = get_engine()
         self.sector_map = get_sector_mapping()
+        self.horizon = horizon.upper()  # "INTRADAY", "WEEKLY", "MONTHLY"
         self._supertrend = SupertrendIndicator(period=7, multiplier=3)
         self._vwap = VWAPIndicator()
         self._volume_delta = VolumeDeltaIndicator()
         self._compression = CompressionIndicator(atr_period=14, lookback=4)
+
+    # ── Resampling Helpers ─────────────────────────────────────────────────────
+
+    def _resample_candles(self, df_daily: pd.DataFrame, rule: str) -> pd.DataFrame:
+        """Resample daily candles to weekly ('W') or monthly ('ME') candles."""
+        if df_daily.empty:
+            return df_daily
+        
+        df = df_daily.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.set_index("timestamp", inplace=True)
+        
+        resampled_groups = []
+        for symbol, grp in df.groupby("symbol"):
+            res = grp.resample(rule).agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+                "symbol": "first"
+            }).dropna()
+            res.reset_index(inplace=True)
+            resampled_groups.append(res)
+            
+        if not resampled_groups:
+            return pd.DataFrame()
+        return pd.concat(resampled_groups, ignore_index=True)
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -119,93 +143,114 @@ class IntradayEdgeScorer:
         sector_perf: pd.DataFrame | None = None,
         stock_perf: pd.DataFrame | None = None,
     ) -> List[EdgeScore]:
-        """
-        Run the full edge scan on the FO universe.
-
-        Args:
-            target_date: The trading day to analyze. Defaults to latest in DB.
-            sector_perf: Pre-computed sector performance DataFrame
-                         with columns ['sector', 'pChange'].
-            stock_perf:  Pre-computed stock performance DataFrame
-                         with columns ['symbol', 'sector', 'close_last',
-                         'close_prev', 'pChange', 'vol_surge'].
-
-        Returns:
-            List of EdgeScore objects, one per stock.
-        """
-        # 1. Fetch 15-minute candle data (10-day lookback)
-        df_15m = self._fetch_15m_data(target_date)
-        if df_15m.empty:
-            LOGGER.warning("No 15m data available for edge scoring.")
-            return []
-
-        # Resolve target date from data
-        if target_date is None:
-            non_idx = df_15m[~df_15m["symbol"].str.contains("INDEX")]
-            if non_idx.empty:
+        """Run the full edge scan based on the selected horizon."""
+        
+        # ── 1. INTRADAY HORIZON PATHWAY ──
+        if self.horizon == "INTRADAY":
+            df_15m = self._fetch_15m_data(target_date)
+            if df_15m.empty:
                 return []
-            target_date = non_idx["timestamp"].max().date()
+            
+            if target_date is None:
+                non_idx = df_15m[~df_15m["symbol"].str.contains("INDEX")]
+                if non_idx.empty:
+                    return []
+                target_date = non_idx["timestamp"].max().date()
+                
+            df_daily = self._fetch_daily_data(target_date, lookback_days=60)
+            
+            if sector_perf is None or stock_perf is None:
+                sector_perf, stock_perf = self._compute_performance(df_15m, target_date)
+                
+            if stock_perf.empty:
+                return []
+                
+            sector_ranks = self._rank_sectors(sector_perf)
+            symbol_15m_groups = {sym: grp.sort_values("timestamp") for sym, grp in df_15m.groupby("symbol") if "INDEX" not in sym}
+            symbol_daily_groups = {sym: grp.sort_values("timestamp") for sym, grp in df_daily.groupby("symbol")} if not df_daily.empty else {}
+            
+            results: List[EdgeScore] = []
+            for _, row in stock_perf.iterrows():
+                symbol = row["symbol"]
+                sector = row.get("sector", self.sector_map.get(symbol, "UNKNOWN"))
+                if sector == "UNKNOWN": continue
+                
+                ltp = float(row.get("close_last", 0))
+                change_pct = float(row.get("pChange", 0))
+                vol_surge = float(row.get("vol_surge", 0))
+                
+                df_sym_15m = symbol_15m_groups.get(symbol, pd.DataFrame())
+                df_sym_daily = symbol_daily_groups.get(symbol, pd.DataFrame())
+                
+                edge = self._score_stock(
+                    symbol=symbol, sector=sector, ltp=ltp, change_pct=change_pct, vol_surge=vol_surge,
+                    sector_ranks=sector_ranks, sector_perf=sector_perf, stock_perf=stock_perf,
+                    df_base=df_sym_15m, df_htf=df_sym_daily, target_date=target_date
+                )
+                results.append(edge)
+                
+            results.sort(key=lambda e: e.final_score, reverse=True)
+            return results
 
-        # 2. Fetch daily candle data (60-day lookback for daily supertrend)
-        df_daily = self._fetch_daily_data(target_date, lookback_days=60)
-
-        # 3. Compute sector performance if not provided
-        if sector_perf is None or stock_perf is None:
-            sector_perf, stock_perf = self._compute_performance(df_15m, target_date)
-
-        if stock_perf.empty:
-            LOGGER.warning("No stock performance data for edge scoring.")
-            return []
-
-        # 4. Pre-compute sector rankings
-        sector_ranks = self._rank_sectors(sector_perf)
-
-        # 5. Pre-compute per-symbol indicators (vectorized where possible)
-        symbol_15m_groups = {
-            sym: grp.sort_values("timestamp")
-            for sym, grp in df_15m.groupby("symbol")
-            if "INDEX" not in sym
-        }
-        symbol_daily_groups = {}
-        if not df_daily.empty:
-            symbol_daily_groups = {
-                sym: grp.sort_values("timestamp")
-                for sym, grp in df_daily.groupby("symbol")
-            }
-
-        # 6. Score each stock
-        results: List[EdgeScore] = []
-        for _, row in stock_perf.iterrows():
-            symbol = row["symbol"]
-            sector = row.get("sector", self.sector_map.get(symbol, "UNKNOWN"))
-            if sector == "UNKNOWN":
-                continue
-
-            ltp = float(row.get("close_last", 0))
-            change_pct = float(row.get("pChange", 0))
-            vol_surge = float(row.get("vol_surge", 0))
-
-            df_sym_15m = symbol_15m_groups.get(symbol, pd.DataFrame())
-            df_sym_daily = symbol_daily_groups.get(symbol, pd.DataFrame())
-
-            edge = self._score_stock(
-                symbol=symbol,
-                sector=sector,
-                ltp=ltp,
-                change_pct=change_pct,
-                vol_surge=vol_surge,
-                sector_ranks=sector_ranks,
-                sector_perf=sector_perf,
-                stock_perf=stock_perf,
-                df_15m=df_sym_15m,
-                df_daily=df_sym_daily,
-                target_date=target_date,
-            )
-            results.append(edge)
-
-        # Sort by final_score descending
-        results.sort(key=lambda e: e.final_score, reverse=True)
-        return results
+        # ── 2. WEEKLY & MONTHLY HORIZON PATHWAYS ──
+        else:
+            # Lookbacks: Weekly swing uses 365 days; Monthly positional uses 1000 days
+            lookback_days = 365 if self.horizon == "WEEKLY" else 1000
+            
+            # If target_date is not specified, resolve from DB latest date
+            if target_date is None:
+                engine = get_engine()
+                with engine.connect() as conn:
+                    max_ts = conn.execute(text("SELECT MAX(timestamp) FROM ohlcv_daily")).scalar()
+                    if max_ts:
+                        target_date = pd.to_datetime(max_ts).date()
+                    else:
+                        target_date = date.today()
+                        
+            df_daily_all = self._fetch_daily_data(target_date, lookback_days=lookback_days)
+            if df_daily_all.empty:
+                LOGGER.warning(f"No daily data found for {self.horizon} scan.")
+                return []
+                
+            # Compute base & HTF dataframes based on horizon
+            if self.horizon == "WEEKLY":
+                df_base = df_daily_all
+                df_htf = self._resample_candles(df_daily_all, "W")
+            else:  # MONTHLY
+                df_base = self._resample_candles(df_daily_all, "W")
+                df_htf = self._resample_candles(df_daily_all, "ME")
+                
+            # Sector and Stock Performance Calculations
+            sector_perf, stock_perf = self._compute_horizon_performance(df_base, target_date)
+            if stock_perf.empty:
+                return []
+                
+            sector_ranks = self._rank_sectors(sector_perf)
+            symbol_base_groups = {sym: grp.sort_values("timestamp") for sym, grp in df_base.groupby("symbol")}
+            symbol_htf_groups = {sym: grp.sort_values("timestamp") for sym, grp in df_htf.groupby("symbol")}
+            
+            results: List[EdgeScore] = []
+            for _, row in stock_perf.iterrows():
+                symbol = row["symbol"]
+                sector = row.get("sector", self.sector_map.get(symbol, "UNKNOWN"))
+                if sector == "UNKNOWN": continue
+                
+                ltp = float(row.get("close_last", 0))
+                change_pct = float(row.get("pChange", 0))
+                vol_surge = float(row.get("vol_surge", 0))
+                
+                df_sym_base = symbol_base_groups.get(symbol, pd.DataFrame())
+                df_sym_htf = symbol_htf_groups.get(symbol, pd.DataFrame())
+                
+                edge = self._score_stock(
+                    symbol=symbol, sector=sector, ltp=ltp, change_pct=change_pct, vol_surge=vol_surge,
+                    sector_ranks=sector_ranks, sector_perf=sector_perf, stock_perf=stock_perf,
+                    df_base=df_sym_base, df_htf=df_sym_htf, target_date=target_date
+                )
+                results.append(edge)
+                
+            results.sort(key=lambda e: e.final_score, reverse=True)
+            return results
 
     # ── Private: Data Fetching ─────────────────────────────────────────────────
 
@@ -239,7 +284,7 @@ class IntradayEdgeScorer:
             return pd.DataFrame()
 
     def _fetch_daily_data(self, target_date: date, lookback_days: int = 60) -> pd.DataFrame:
-        """Fetch daily candles for daily-timeframe supertrend."""
+        """Fetch daily candles from the database."""
         query = text("""
             SELECT symbol, timestamp, open, high, low, close, volume
             FROM ohlcv_daily
@@ -314,6 +359,57 @@ class IntradayEdgeScorer:
         stock_perf = merged[["symbol", "sector", "close_last", "close_prev", "pChange", "vol_surge"]]
         return sector_perf, stock_perf
 
+    def _compute_horizon_performance(
+        self, df_base: pd.DataFrame, target_date: date
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Compute sector and stock performance for Weekly and Monthly horizons."""
+        df_base = df_base.copy()
+        df_base["sector"] = df_base["symbol"].apply(lambda s: self.sector_map.get(s, "UNKNOWN"))
+        df_base["date"] = df_base["timestamp"].dt.date
+        
+        # Lookback: Weekly uses 5 days, Monthly uses 20 days
+        lookback = 5 if self.horizon == "WEEKLY" else 20
+        
+        results = []
+        for symbol, grp in df_base.groupby("symbol"):
+            grp_sorted = grp.sort_values("timestamp")
+            # Filter candles up to target date
+            grp_filtered = grp_sorted[grp_sorted["date"] <= target_date]
+            if len(grp_filtered) < lookback + 1:
+                continue
+                
+            latest = grp_filtered.iloc[-1]
+            prev = grp_filtered.iloc[-(lookback + 1)]
+            
+            pchange = ((latest["close"] - prev["close"]) / prev["close"]) * 100
+            
+            # Volume surge
+            vol_today = float(latest["volume"])
+            avg_vol_window = grp_filtered["volume"].tail(lookback * 4).mean()
+            vol_surge = vol_today / avg_vol_window if avg_vol_window > 0 else 0.0
+            
+            results.append({
+                "symbol": symbol,
+                "sector": latest["sector"],
+                "close_last": float(latest["close"]),
+                "close_prev": float(prev["close"]),
+                "pChange": pchange,
+                "vol_surge": vol_surge
+            })
+            
+        if not results:
+            return pd.DataFrame(columns=["sector", "pChange"]), pd.DataFrame()
+            
+        stock_perf = pd.DataFrame(results)
+        sector_perf = (
+            stock_perf.groupby("sector")["pChange"]
+            .mean()
+            .reset_index()
+            .query("sector != 'UNKNOWN'")
+            .sort_values("pChange", ascending=False)
+        )
+        return sector_perf, stock_perf
+
     def _rank_sectors(self, sector_perf: pd.DataFrame) -> Dict[str, int]:
         """Rank sectors 1..N (1 = top performer)."""
         sorted_sectors = sector_perf.sort_values("pChange", ascending=False)
@@ -334,8 +430,8 @@ class IntradayEdgeScorer:
         sector_ranks: Dict[str, int],
         sector_perf: pd.DataFrame,
         stock_perf: pd.DataFrame,
-        df_15m: pd.DataFrame,
-        df_daily: pd.DataFrame,
+        df_base: pd.DataFrame,
+        df_htf: pd.DataFrame,
         target_date: date,
     ) -> EdgeScore:
         """Compute the 7-layer EdgeScore for a single stock."""
@@ -352,26 +448,26 @@ class IntradayEdgeScorer:
         )
 
         # Layer 3: VWAP Location
-        layers["vwap_location"] = self._layer_vwap_location(df_15m, ltp, target_date)
+        layers["vwap_location"] = self._layer_vwap_location(df_base, ltp, target_date)
 
         # Layer 4: Volume Confirmation
         layers["volume_confirmation"] = self._layer_volume_confirmation(
-            df_15m, vol_surge, target_date
+            df_base, vol_surge, target_date
         )
 
         # Layer 5: Momentum Timing
         layers["momentum_timing"] = self._layer_momentum_timing(
-            df_15m, ltp, change_pct, target_date
+            df_base, ltp, change_pct, target_date
         )
 
         # Layer 6: Supertrend Alignment
         layers["supertrend_alignment"] = self._layer_supertrend_alignment(
-            df_15m, df_daily
+            df_base, df_htf
         )
 
         # Layer 7: Compression Release
         layers["compression_release"] = self._layer_compression_release(
-            df_15m, change_pct, target_date
+            df_base, change_pct, target_date
         )
 
         # ── Composite Score ────────────────────────────────────────────────────
@@ -411,23 +507,23 @@ class IntradayEdgeScorer:
         else:
             multiplier = 1.0
 
-        # Time decay: reduce score after 14:00 IST
-        now_time = datetime.now().time()
-        if now_time > dt_time(14, 0):
-            # Linear decay from 1.0 at 14:00 to 0.7 at 15:15
-            minutes_past_2 = (now_time.hour - 14) * 60 + now_time.minute
-            decay = max(0.7, 1.0 - (minutes_past_2 / 75) * 0.3)
-            multiplier *= decay
+        # Time decay applies ONLY to Intraday trading
+        if self.horizon == "INTRADAY":
+            now_time = datetime.now().time()
+            if now_time > dt_time(14, 0):
+                minutes_past_2 = (now_time.hour - 14) * 60 + now_time.minute
+                decay = max(0.7, 1.0 - (minutes_past_2 / 75) * 0.3)
+                multiplier *= decay
 
         final_score = min(100, raw_score * multiplier)
 
-        # Compute ATR from 15m data for entry trigger
+        # Compute ATR from base data for entry trigger
         atr = 0.0
-        if not df_15m.empty and len(df_15m) >= 14:
+        if not df_base.empty and len(df_base) >= 14:
             tr = pd.concat([
-                df_15m["high"] - df_15m["low"],
-                (df_15m["high"] - df_15m["close"].shift(1)).abs(),
-                (df_15m["low"] - df_15m["close"].shift(1)).abs(),
+                df_base["high"] - df_base["low"],
+                (df_base["high"] - df_base["close"].shift(1)).abs(),
+                (df_base["low"] - df_base["close"].shift(1)).abs(),
             ], axis=1).max(axis=1)
             atr = float(tr.rolling(14).mean().iloc[-1]) if len(tr) >= 14 else 0.0
 
@@ -453,9 +549,8 @@ class IntradayEdgeScorer:
         rank = sector_ranks.get(sector, len(sector_ranks))
         total = len(sector_ranks) or 1
 
-        # Top 3 sectors get high score, bottom 3 also score (for PUT direction)
         if rank <= 3:
-            score = 1.0 - (rank - 1) * 0.15  # 1.0, 0.85, 0.70
+            score = 1.0 - (rank - 1) * 0.15
             direction = "CALL"
             detail = f"Sector #{rank}/{total} (Leading)"
         elif rank >= total - 2:
@@ -482,7 +577,6 @@ class IntradayEdgeScorer:
         if sector_std == 0 or pd.isna(sector_std):
             sector_std = 1.0
 
-        # Z-score relative to sector
         z_score = (change_pct - sector_avg) / sector_std
 
         if z_score > 1.5:
@@ -509,51 +603,70 @@ class IntradayEdgeScorer:
         return LayerResult(name="relative_strength", score=min(1.0, score), direction=direction, detail=detail)
 
     def _layer_vwap_location(
-        self, df_15m: pd.DataFrame, ltp: float, target_date: date
+        self, df_base: pd.DataFrame, ltp: float, target_date: date
     ) -> LayerResult:
-        """Layer 3: Price location relative to VWAP — is it at a favorable zone?"""
-        if df_15m.empty or ltp <= 0:
+        """Layer 3: Price location relative to VWAP (Daily Session VWAP or Rolling Multi-day VWAP)."""
+        if df_base.empty or ltp <= 0:
             return LayerResult(name="vwap_location", score=0.0, direction="NEUTRAL", detail="No data")
 
         try:
-            vwap_df = self._vwap.calculate(df_15m)
-            today_vwap = vwap_df[vwap_df["timestamp"].dt.date == target_date]
-            if today_vwap.empty or "vwap" not in today_vwap.columns:
-                return LayerResult(name="vwap_location", score=0.0, direction="NEUTRAL", detail="No VWAP")
+            if self.horizon == "INTRADAY":
+                # Session VWAP
+                vwap_df = self._vwap.calculate(df_base)
+                today_vwap = vwap_df[vwap_df["timestamp"].dt.date == target_date]
+                if today_vwap.empty or "vwap" not in today_vwap.columns:
+                    return LayerResult(name="vwap_location", score=0.0, direction="NEUTRAL", detail="No VWAP")
+                current_vwap = float(today_vwap["vwap"].iloc[-1])
+            else:
+                # Rolling VWAP: Weekly uses 20 days, Monthly uses 252 days
+                lookback = 20 if self.horizon == "WEEKLY" else 252
+                df = df_base.copy()
+                df["tp"] = (df["high"] + df["low"] + df["close"]) / 3
+                df["tp_vol"] = df["tp"] * df["volume"]
+                df["cum_tp_vol"] = df["tp_vol"].rolling(window=lookback).sum()
+                df["cum_vol"] = df["volume"].rolling(window=lookback).sum()
+                df["vwap"] = df["cum_tp_vol"] / df["cum_vol"]
+                
+                # Filter to target_date
+                target_df = df[df["timestamp"].dt.date <= target_date]
+                if target_df.empty or pd.isna(target_df["vwap"].iloc[-1]):
+                    return LayerResult(name="vwap_location", score=0.0, direction="NEUTRAL", detail="No Rolling VWAP")
+                current_vwap = float(target_df["vwap"].iloc[-1])
 
-            current_vwap = float(today_vwap["vwap"].iloc[-1])
             if current_vwap <= 0:
                 return LayerResult(name="vwap_location", score=0.0, direction="NEUTRAL", detail="Invalid VWAP")
 
             vwap_dist_pct = ((ltp - current_vwap) / current_vwap) * 100
 
-            # Ideal CALL: price is 0.1%–0.8% above VWAP (riding momentum, not stretched)
-            # Ideal PUT: price is 0.1%–0.8% below VWAP
-            if 0.1 <= vwap_dist_pct <= 0.8:
+            # Slightly wider thresholds for Weekly/Monthly
+            threshold = 0.8 if self.horizon == "INTRADAY" else 2.5
+            extreme_threshold = 1.5 if self.horizon == "INTRADAY" else 5.0
+
+            if 0.1 <= vwap_dist_pct <= threshold:
                 score = 1.0
                 direction = "CALL"
-                detail = f"Above VWAP +{vwap_dist_pct:.2f}% (ideal pullback zone)"
+                detail = f"Above VWAP +{vwap_dist_pct:.2f}% (pullback zone)"
             elif 0.0 <= vwap_dist_pct <= 0.1:
                 score = 0.8
                 direction = "CALL"
                 detail = f"At VWAP (bounce candidate)"
-            elif 0.8 < vwap_dist_pct <= 1.5:
+            elif threshold < vwap_dist_pct <= extreme_threshold:
                 score = 0.5
                 direction = "CALL"
                 detail = f"Above VWAP +{vwap_dist_pct:.2f}% (stretched)"
-            elif vwap_dist_pct > 1.5:
+            elif vwap_dist_pct > extreme_threshold:
                 score = 0.2
                 direction = "CALL"
                 detail = f"Far above VWAP +{vwap_dist_pct:.2f}% (overextended)"
-            elif -0.8 <= vwap_dist_pct < -0.1:
+            elif -threshold <= vwap_dist_pct < -0.1:
                 score = 1.0
                 direction = "PUT"
-                detail = f"Below VWAP {vwap_dist_pct:.2f}% (ideal rejection zone)"
+                detail = f"Below VWAP {vwap_dist_pct:.2f}% (rejection zone)"
             elif -0.1 <= vwap_dist_pct < 0.0:
                 score = 0.8
                 direction = "PUT"
                 detail = f"At VWAP (rejection candidate)"
-            elif -1.5 <= vwap_dist_pct < -0.8:
+            elif -extreme_threshold <= vwap_dist_pct < -threshold:
                 score = 0.5
                 direction = "PUT"
                 detail = f"Below VWAP {vwap_dist_pct:.2f}% (stretched)"
@@ -564,17 +677,15 @@ class IntradayEdgeScorer:
 
             return LayerResult(name="vwap_location", score=score, direction=direction, detail=detail)
         except Exception as e:
-            LOGGER.debug(f"VWAP layer error for {df_15m.get('symbol', 'N/A')}: {e}")
             return LayerResult(name="vwap_location", score=0.0, direction="NEUTRAL", detail=f"Error: {e}")
 
     def _layer_volume_confirmation(
-        self, df_15m: pd.DataFrame, vol_surge: float, target_date: date
+        self, df_base: pd.DataFrame, vol_surge: float, target_date: date
     ) -> LayerResult:
-        """Layer 4: Volume surge + CVD direction confirms the move."""
-        if df_15m.empty:
+        """Layer 4: Volume surge + CVD trend confirmation."""
+        if df_base.empty:
             return LayerResult(name="volume_confirmation", score=0.0, direction="NEUTRAL", detail="No data")
 
-        # Volume surge scoring
         if vol_surge >= 2.5:
             vol_score = 1.0
         elif vol_surge >= 1.5:
@@ -584,18 +695,18 @@ class IntradayEdgeScorer:
         else:
             vol_score = 0.1
 
-        # CVD direction
         cvd_direction = "NEUTRAL"
         try:
-            vd_df = self._volume_delta.calculate(df_15m)
-            today_vd = vd_df[vd_df["timestamp"].dt.date == target_date]
-            if not today_vd.empty and "cvd" in today_vd.columns:
-                cvd_latest = float(today_vd["cvd"].iloc[-1])
-                cvd_mid = float(today_vd["cvd"].iloc[len(today_vd) // 2]) if len(today_vd) > 2 else 0
-                if cvd_latest > 0 and cvd_latest > cvd_mid:
+            vd_df = self._volume_delta.calculate(df_base)
+            target_vd = vd_df[vd_df["timestamp"].dt.date <= target_date]
+            if not target_vd.empty and "cvd" in target_vd.columns:
+                cvd_latest = float(target_vd["cvd"].iloc[-1])
+                window = min(5, len(target_vd))
+                cvd_prev = float(target_vd["cvd"].iloc[-window])
+                if cvd_latest > cvd_prev:
                     cvd_direction = "CALL"
                     vol_score = min(1.0, vol_score + 0.2)
-                elif cvd_latest < 0 and cvd_latest < cvd_mid:
+                elif cvd_latest < cvd_prev:
                     cvd_direction = "PUT"
                     vol_score = min(1.0, vol_score + 0.2)
         except Exception:
@@ -607,109 +718,114 @@ class IntradayEdgeScorer:
         return LayerResult(name="volume_confirmation", score=vol_score, direction=direction, detail=detail)
 
     def _layer_momentum_timing(
-        self, df_15m: pd.DataFrame, ltp: float, change_pct: float, target_date: date
+        self, df_base: pd.DataFrame, ltp: float, change_pct: float, target_date: date
     ) -> LayerResult:
-        """Layer 5: Is the move still early (catchable) or already exhausted?"""
-        if df_15m.empty or ltp <= 0:
+        """Layer 5: Breakout of range boundaries (Intraday ORB, Previous Week's range, or Previous Month's range)."""
+        if df_base.empty or ltp <= 0:
             return LayerResult(name="momentum_timing", score=0.0, direction="NEUTRAL", detail="No data")
 
-        today_df = df_15m[df_15m["timestamp"].dt.date == target_date]
-        if today_df.empty:
-            return LayerResult(name="momentum_timing", score=0.0, direction="NEUTRAL", detail="No today data")
+        if self.horizon == "INTRADAY":
+            today_df = df_base[df_base["timestamp"].dt.date == target_date]
+            if today_df.empty:
+                return LayerResult(name="momentum_timing", score=0.0, direction="NEUTRAL", detail="No today data")
+            day_high = float(today_df["high"].max())
+            day_low = float(today_df["low"].min())
+            day_open = float(today_df["open"].iloc[0])
+            day_range = day_high - day_low
+            if day_range <= 0:
+                return LayerResult(name="momentum_timing", score=0.3, direction="NEUTRAL", detail="Flat day")
 
-        day_high = float(today_df["high"].max())
-        day_low = float(today_df["low"].min())
-        day_open = float(today_df["open"].iloc[0])
-        day_range = day_high - day_low
+            range_position = (ltp - day_low) / day_range
+            orb_candles = today_df.head(2)
+            orb_high = float(orb_candles["high"].max())
+            orb_low = float(orb_candles["low"].min())
 
-        if day_range <= 0:
-            return LayerResult(name="momentum_timing", score=0.3, direction="NEUTRAL", detail="Flat day")
-
-        # Range position: where is current price in today's range?
-        range_position = (ltp - day_low) / day_range  # 0.0 = at low, 1.0 = at high
-
-        # ORB detection: did price break above/below the first 30-min range?
-        orb_candles = today_df.head(2)  # First 2 x 15-min = 30 minutes
-        orb_high = float(orb_candles["high"].max())
-        orb_low = float(orb_candles["low"].min())
-
-        is_orb_breakout_up = ltp > orb_high and change_pct > 0
-        is_orb_breakout_down = ltp < orb_low and change_pct < 0
-
-        if is_orb_breakout_up:
-            # Early in move if price is in first 40% of range from open
-            if range_position < 0.6:
-                score = 1.0
-                detail = f"ORB breakout UP, range pos {range_position:.0%} (early)"
+            if ltp > orb_high and change_pct > 0:
+                score = 1.0 if range_position < 0.6 else 0.5
+                direction = "CALL"
+                detail = f"ORB High breakout, range pos {range_position:.0%}"
+            elif ltp < orb_low and change_pct < 0:
+                score = 1.0 if range_position > 0.4 else 0.5
+                direction = "PUT"
+                detail = f"ORB Low breakdown, range pos {range_position:.0%}"
             else:
-                score = 0.5
-                detail = f"ORB breakout UP, range pos {range_position:.0%} (extended)"
-            direction = "CALL"
-        elif is_orb_breakout_down:
-            if range_position > 0.4:
-                score = 1.0
-                detail = f"ORB breakdown DN, range pos {range_position:.0%} (early)"
-            else:
-                score = 0.5
-                detail = f"ORB breakdown DN, range pos {range_position:.0%} (extended)"
-            direction = "PUT"
-        elif change_pct > 0 and range_position < 0.5:
-            # Positive change but price is still in lower half = pullback opportunity
-            score = 0.7
-            direction = "CALL"
-            detail = f"Bullish pullback, range pos {range_position:.0%}"
-        elif change_pct < 0 and range_position > 0.5:
-            score = 0.7
-            direction = "PUT"
-            detail = f"Bearish bounce, range pos {range_position:.0%}"
+                score = 0.3
+                direction = "NEUTRAL"
+                detail = f"Inside ORB range pos {range_position:.0%}"
+            return LayerResult(name="momentum_timing", score=score, direction=direction, detail=detail)
+
         else:
-            score = 0.3
-            direction = "NEUTRAL"
-            detail = f"Range pos {range_position:.0%}, no clear timing"
-
-        return LayerResult(name="momentum_timing", score=score, direction=direction, detail=detail)
+            base_filtered = df_base[df_base["timestamp"].dt.date <= target_date].sort_values("timestamp")
+            if len(base_filtered) < 2:
+                return LayerResult(name="momentum_timing", score=0.0, direction="NEUTRAL", detail="Insufficient history")
+                
+            prev_candle = base_filtered.iloc[-2]
+            prev_high = float(prev_candle["high"])
+            prev_low = float(prev_candle["low"])
+            
+            ref_label = "Prev Week" if self.horizon == "WEEKLY" else "Prev Month"
+            
+            if ltp > prev_high:
+                fresh_dist = (ltp - prev_high) / prev_high
+                score = 1.0 if fresh_dist <= 0.015 else 0.5
+                direction = "CALL"
+                detail = f"Breakout above {ref_label} High ₹{prev_high:.2f} (+{fresh_dist:.1%})"
+            elif ltp < prev_low:
+                fresh_dist = (prev_low - ltp) / prev_low
+                score = 1.0 if fresh_dist <= 0.015 else 0.5
+                direction = "PUT"
+                detail = f"Breakdown below {ref_label} Low ₹{prev_low:.2f} (-{fresh_dist:.1%})"
+            else:
+                range_size = prev_high - prev_low
+                range_pos = (ltp - prev_low) / range_size if range_size > 0 else 0.5
+                score = 0.5
+                direction = "CALL" if range_pos > 0.5 else "PUT"
+                detail = f"Pullback inside {ref_label} range (pos: {range_pos:.0%})"
+                
+            return LayerResult(name="momentum_timing", score=score, direction=direction, detail=detail)
 
     def _layer_supertrend_alignment(
-        self, df_15m: pd.DataFrame, df_daily: pd.DataFrame
+        self, df_base: pd.DataFrame, df_htf: pd.DataFrame
     ) -> LayerResult:
-        """Layer 6: Do 15-minute and daily supertrend agree on direction?"""
-        st_15m_dir = 0
-        st_daily_dir = 0
+        """Layer 6: Do base timeframe and higher timeframe supertrends agree?"""
+        st_base_dir = 0
+        st_htf_dir = 0
 
-        # 15-minute supertrend
-        if not df_15m.empty and len(df_15m) >= 10:
+        if not df_base.empty and len(df_base) >= 10:
             try:
-                st_df = self._supertrend.calculate(df_15m)
+                st_df = self._supertrend.calculate(df_base)
                 if "supertrend_direction" in st_df.columns:
-                    st_15m_dir = int(st_df["supertrend_direction"].iloc[-1])
+                    st_base_dir = int(st_df["supertrend_direction"].iloc[-1])
             except Exception:
                 pass
 
-        # Daily supertrend
-        if not df_daily.empty and len(df_daily) >= 10:
+        if not df_htf.empty and len(df_htf) >= 10:
             try:
-                st_daily = self._supertrend.calculate(df_daily)
-                if "supertrend_direction" in st_daily.columns:
-                    st_daily_dir = int(st_daily["supertrend_direction"].iloc[-1])
+                st_htf = self._supertrend.calculate(df_htf)
+                if "supertrend_direction" in st_htf.columns:
+                    st_htf_dir = int(st_htf["supertrend_direction"].iloc[-1])
             except Exception:
                 pass
 
-        if st_15m_dir == 1 and st_daily_dir == 1:
+        base_label = "15m" if self.horizon == "INTRADAY" else "Daily" if self.horizon == "WEEKLY" else "Weekly"
+        htf_label = "Daily" if self.horizon == "INTRADAY" else "Weekly" if self.horizon == "WEEKLY" else "Monthly"
+
+        if st_base_dir == 1 and st_htf_dir == 1:
             score = 1.0
             direction = "CALL"
-            detail = "Both 15m & Daily bullish ✅"
-        elif st_15m_dir == -1 and st_daily_dir == -1:
+            detail = f"Both {base_label} & {htf_label} bullish ✅"
+        elif st_base_dir == -1 and st_htf_dir == -1:
             score = 1.0
             direction = "PUT"
-            detail = "Both 15m & Daily bearish ✅"
-        elif st_15m_dir == 1 and st_daily_dir == -1:
+            detail = f"Both {base_label} & {htf_label} bearish ✅"
+        elif st_base_dir == 1 and st_htf_dir == -1:
             score = 0.3
             direction = "CALL"
-            detail = "15m bullish but Daily bearish ⚠️"
-        elif st_15m_dir == -1 and st_daily_dir == 1:
+            detail = f"{base_label} bullish but {htf_label} bearish ⚠️"
+        elif st_base_dir == -1 and st_htf_dir == 1:
             score = 0.3
             direction = "PUT"
-            detail = "15m bearish but Daily bullish ⚠️"
+            detail = f"{base_label} bearish but {htf_label} bullish ⚠️"
         else:
             score = 0.2
             direction = "NEUTRAL"
@@ -718,34 +834,33 @@ class IntradayEdgeScorer:
         return LayerResult(name="supertrend_alignment", score=score, direction=direction, detail=detail)
 
     def _layer_compression_release(
-        self, df_15m: pd.DataFrame, change_pct: float, target_date: date
+        self, df_base: pd.DataFrame, change_pct: float, target_date: date
     ) -> LayerResult:
-        """Layer 7: Was the stock compressed recently and is now expanding?"""
-        if df_15m.empty or len(df_15m) < 20:
+        """Layer 7: Was the stock coiled recently (TTM Squeeze/Inside candle/NR7) and is now expanding?"""
+        if df_base.empty or len(df_base) < 20:
             return LayerResult(name="compression_release", score=0.0, direction="NEUTRAL", detail="Insufficient data")
 
         try:
-            comp_df = self._compression.calculate(df_15m)
+            comp_df = self._compression.calculate(df_base)
 
-            # Check if stock was compressed in prior sessions
             prev_data = comp_df[comp_df["timestamp"].dt.date < target_date]
             today_data = comp_df[comp_df["timestamp"].dt.date == target_date]
 
             if prev_data.empty:
                 return LayerResult(name="compression_release", score=0.0, direction="NEUTRAL", detail="No prior data")
 
-            # Was compressed in last 3 sessions?
-            recent_prev = prev_data.tail(30)  # ~2 sessions of 15m data
+            window = 30
+            recent_prev = prev_data.tail(window)
+            
             was_compressed = bool(recent_prev["is_compressed"].any()) if "is_compressed" in recent_prev.columns else False
             had_nr7 = bool(recent_prev["nr7"].any()) if "nr7" in recent_prev.columns else False
 
-            # Is today expanding? (today's range > yesterday's range)
             if not today_data.empty and "current_range" in today_data.columns:
                 today_range = float(today_data["current_range"].mean())
                 prev_range = float(recent_prev["current_range"].mean()) if "current_range" in recent_prev.columns else 0
                 is_expanding = today_range > prev_range * 1.2 if prev_range > 0 else False
             else:
-                is_expanding = abs(change_pct) > 1.5  # Fallback: >1.5% move = expansion
+                is_expanding = abs(change_pct) > (1.5 if self.horizon == "INTRADAY" else 3.0)
 
             if was_compressed and is_expanding:
                 score = 1.0
@@ -767,6 +882,5 @@ class IntradayEdgeScorer:
             direction = "CALL" if change_pct > 0 else ("PUT" if change_pct < 0 else "NEUTRAL")
             return LayerResult(name="compression_release", score=score, direction=direction, detail=detail)
 
-        except Exception as e:
-            LOGGER.debug(f"Compression layer error: {e}")
+        except Exception:
             return LayerResult(name="compression_release", score=0.0, direction="NEUTRAL", detail=f"Error")

@@ -1,14 +1,12 @@
 """
 SmartEntryTrigger — Identifies optimal micro-entry levels for high-scoring EdgeScore stocks.
+Supports INTRADAY, WEEKLY, and MONTHLY horizons.
 
 Instead of entering blindly when a stock scores high, this module finds the exact
 entry price, stop-loss, and target levels using structural analysis:
-
-  1. VWAP Pullback Entry   — Price broke above VWAP, pulled back, now bouncing
-  2. ORB Breakout Entry    — Price breaks above/below 15/30-min opening range with volume
-  3. Supertrend Touch      — Price touches supertrend line and bounces
-
-Each trigger produces entry/SL/target levels based on ATR-driven risk management.
+  1. VWAP Pullback Entry   — Price bounces off the session/rolling VWAP line.
+  2. Range Breakout Entry  — Price breaks out above/below the relevant range (ORB for Intraday, Prev Week for Weekly, Prev Month for Monthly).
+  3. Supertrend Touch      — Price bounces off the Supertrend support/resistance line.
 """
 
 from __future__ import annotations
@@ -27,11 +25,11 @@ LOGGER = logging.getLogger(__name__)
 @dataclass
 class EntryTrigger:
     """A specific entry opportunity with risk-defined levels."""
-    trigger_type: str           # "VWAP_PULLBACK", "ORB_BREAKOUT", "ST_TOUCH"
+    trigger_type: str           # "VWAP_PULLBACK", "ORB_BREAKOUT", "RANGE_BREAKOUT", "ST_TOUCH"
     entry_price: float
     stop_loss: float
-    target_1: float             # 1:1 R:R
-    target_2: float             # 2:1 R:R
+    target_1: float             # Target 1
+    target_2: float             # Target 2 (extended target)
     confidence: str             # "HIGH", "MEDIUM"
     status: str                 # "TRIGGERED", "APPROACHING", "WAITING"
     detail: str = ""
@@ -40,70 +38,68 @@ class EntryTrigger:
 class SmartEntryTrigger:
     """
     Evaluates an EdgeScore stock and determines if a precise entry opportunity exists.
-
-    Usage:
-        trigger = SmartEntryTrigger()
-        entry = trigger.evaluate(
-            direction="CALL", ltp=2450.0, atr=35.0,
-            df_15m=candle_data, target_date=date.today()
-        )
-        if entry and entry.status == "TRIGGERED":
-            print(f"BUY at {entry.entry_price}, SL={entry.stop_loss}")
     """
 
-    # Risk management constants
-    SL_ATR_MULTIPLIER = 1.0      # SL = 1x ATR from entry
-    TARGET1_ATR_MULT = 1.5       # Target 1 = 1.5x ATR (1.5:1 R:R)
-    TARGET2_ATR_MULT = 3.0       # Target 2 = 3x ATR (3:1 R:R)
-    VWAP_ZONE_PCT = 0.003        # ±0.3% around VWAP = "at VWAP"
+    def __init__(self, horizon: str = "INTRADAY") -> None:
+        self.horizon = horizon.upper()
+
+        # Scale multipliers based on horizon
+        if self.horizon == "INTRADAY":
+            self.sl_multiplier = 1.0
+            self.target_1_multiplier = 1.5
+            self.target_2_multiplier = 3.0
+            self.zone_pct = 0.003
+        elif self.horizon == "WEEKLY":
+            self.sl_multiplier = 1.2
+            self.target_1_multiplier = 2.0
+            self.target_2_multiplier = 4.0
+            self.zone_pct = 0.010
+        else:  # MONTHLY
+            self.sl_multiplier = 1.5
+            self.target_1_multiplier = 2.5
+            self.target_2_multiplier = 5.0
+            self.zone_pct = 0.015
 
     def evaluate(
         self,
         direction: str,
         ltp: float,
         atr: float,
-        df_15m: pd.DataFrame,
-        target_date: date,
+        df_base: pd.DataFrame | None = None,
+        target_date: date | None = None,
         vwap: float = 0.0,
         supertrend_value: float = 0.0,
+        df_15m: pd.DataFrame | None = None,
     ) -> Optional[EntryTrigger]:
         """
-        Evaluate all entry trigger types and return the best one (if any).
-
-        Args:
-            direction: "CALL" or "PUT"
-            ltp: Last traded price
-            atr: Average True Range (14-period on 15m)
-            df_15m: 15-minute candle data for the symbol
-            target_date: The trading day
-            vwap: Current VWAP value (0 = auto-compute)
-            supertrend_value: Current supertrend level (0 = auto-compute)
-
-        Returns:
-            An EntryTrigger if a setup is found, else None.
+        Evaluate all entry triggers for the selected horizon and return the best.
         """
-        if atr <= 0 or ltp <= 0 or df_15m.empty:
+        if df_base is None:
+            df_base = df_15m
+            
+        if atr <= 0 or ltp <= 0 or df_base is None or df_base.empty:
             return None
 
         triggers = []
 
-        # Try each trigger type
-        vwap_trigger = self._check_vwap_pullback(direction, ltp, atr, df_15m, target_date, vwap)
-        if vwap_trigger:
-            triggers.append(vwap_trigger)
+        # 1. VWAP Pullback Trigger
+        vwap_trig = self._check_vwap_pullback(direction, ltp, atr, df_base, target_date, vwap)
+        if vwap_trig:
+            triggers.append(vwap_trig)
 
-        orb_trigger = self._check_orb_breakout(direction, ltp, atr, df_15m, target_date)
-        if orb_trigger:
-            triggers.append(orb_trigger)
+        # 2. Breakout Trigger (ORB or Range Breakout)
+        breakout_trig = self._check_breakout(direction, ltp, atr, df_base, target_date)
+        if breakout_trig:
+            triggers.append(breakout_trig)
 
-        st_trigger = self._check_supertrend_touch(direction, ltp, atr, df_15m, supertrend_value)
-        if st_trigger:
-            triggers.append(st_trigger)
+        # 3. Supertrend Touch Trigger
+        st_trig = self._check_supertrend_touch(direction, ltp, atr, df_base, supertrend_value)
+        if st_trig:
+            triggers.append(st_trig)
 
         if not triggers:
             return None
 
-        # Return the highest-confidence trigger (prefer TRIGGERED > APPROACHING)
         status_priority = {"TRIGGERED": 0, "APPROACHING": 1, "WAITING": 2}
         triggers.sort(key=lambda t: (status_priority.get(t.status, 3), -{"HIGH": 1, "MEDIUM": 0}.get(t.confidence, -1)))
         return triggers[0]
@@ -112,210 +108,187 @@ class SmartEntryTrigger:
 
     def _check_vwap_pullback(
         self, direction: str, ltp: float, atr: float,
-        df_15m: pd.DataFrame, target_date: date, vwap: float
+        df_base: pd.DataFrame, target_date: date, vwap: float
     ) -> Optional[EntryTrigger]:
-        """
-        VWAP Pullback: Price was above VWAP, pulled back to VWAP zone, now bouncing.
-        This is one of the highest-probability intraday entries.
-        """
+        """VWAP Pullback: Price pulls back to the session or rolling VWAP and bounces."""
         if vwap <= 0:
-            # Auto-compute VWAP
             try:
-                from trade_system.application.indicators.vwap import VWAPIndicator
-                vwap_df = VWAPIndicator().calculate(df_15m)
-                today_vwap = vwap_df[vwap_df["timestamp"].dt.date == target_date]
-                if today_vwap.empty or "vwap" not in today_vwap.columns:
-                    return None
-                vwap = float(today_vwap["vwap"].iloc[-1])
+                if self.horizon == "INTRADAY":
+                    from trade_system.application.indicators.vwap import VWAPIndicator
+                    vwap_df = VWAPIndicator().calculate(df_base)
+                    today_vwap = vwap_df[vwap_df["timestamp"].dt.date == target_date]
+                    if not today_vwap.empty and "vwap" in today_vwap.columns:
+                        vwap = float(today_vwap["vwap"].iloc[-1])
+                else:
+                    lookback = 20 if self.horizon == "WEEKLY" else 252
+                    df = df_base.copy()
+                    df["tp"] = (df["high"] + df["low"] + df["close"]) / 3
+                    df["tp_vol"] = df["tp"] * df["volume"]
+                    df["vwap"] = df["tp_vol"].rolling(lookback).sum() / df["volume"].rolling(lookback).sum()
+                    target_df = df[df["timestamp"].dt.date <= target_date]
+                    if not target_df.empty:
+                        vwap = float(target_df["vwap"].iloc[-1])
             except Exception:
                 return None
 
-        if vwap <= 0:
+        if vwap <= 0 or pd.isna(vwap):
             return None
 
         vwap_dist = (ltp - vwap) / vwap
 
         if direction == "CALL":
-            # Ideal: price is within +0.3% of VWAP (just bounced off it)
-            if abs(vwap_dist) <= self.VWAP_ZONE_PCT:
+            if abs(vwap_dist) <= self.zone_pct:
                 entry = ltp
-                sl = vwap - atr * self.SL_ATR_MULTIPLIER
-                t1 = entry + atr * self.TARGET1_ATR_MULT
-                t2 = entry + atr * self.TARGET2_ATR_MULT
+                sl = vwap - atr * self.sl_multiplier
+                t1 = entry + atr * self.target_1_multiplier
+                t2 = entry + atr * self.target_2_multiplier
                 return EntryTrigger(
-                    trigger_type="VWAP_PULLBACK",
-                    entry_price=round(entry, 2),
-                    stop_loss=round(sl, 2),
-                    target_1=round(t1, 2),
-                    target_2=round(t2, 2),
-                    confidence="HIGH",
-                    status="TRIGGERED",
-                    detail=f"Price at VWAP ₹{vwap:.0f} (pullback entry)"
+                    trigger_type="VWAP_PULLBACK", entry_price=round(entry, 2), stop_loss=round(sl, 2),
+                    target_1=round(t1, 2), target_2=round(t2, 2), confidence="HIGH", status="TRIGGERED",
+                    detail=f"Price near VWAP ₹{vwap:.1f} (pullback zone)"
                 )
-            elif 0 < vwap_dist <= 0.008:  # Within 0.8% above VWAP
-                entry = vwap  # Wait for pullback to VWAP
-                sl = vwap - atr * self.SL_ATR_MULTIPLIER
-                t1 = entry + atr * self.TARGET1_ATR_MULT
-                t2 = entry + atr * self.TARGET2_ATR_MULT
+            elif 0 < vwap_dist <= self.zone_pct * 2.5:
+                entry = vwap
+                sl = vwap - atr * self.sl_multiplier
+                t1 = entry + atr * self.target_1_multiplier
+                t2 = entry + atr * self.target_2_multiplier
                 return EntryTrigger(
-                    trigger_type="VWAP_PULLBACK",
-                    entry_price=round(entry, 2),
-                    stop_loss=round(sl, 2),
-                    target_1=round(t1, 2),
-                    target_2=round(t2, 2),
-                    confidence="MEDIUM",
-                    status="APPROACHING",
-                    detail=f"Above VWAP ₹{vwap:.0f}, waiting for pullback"
+                    trigger_type="VWAP_PULLBACK", entry_price=round(entry, 2), stop_loss=round(sl, 2),
+                    target_1=round(t1, 2), target_2=round(t2, 2), confidence="MEDIUM", status="APPROACHING",
+                    detail=f"Above VWAP ₹{vwap:.1f}, waiting for pullback"
                 )
         elif direction == "PUT":
-            if abs(vwap_dist) <= self.VWAP_ZONE_PCT:
+            if abs(vwap_dist) <= self.zone_pct:
                 entry = ltp
-                sl = vwap + atr * self.SL_ATR_MULTIPLIER
-                t1 = entry - atr * self.TARGET1_ATR_MULT
-                t2 = entry - atr * self.TARGET2_ATR_MULT
+                sl = vwap + atr * self.sl_multiplier
+                t1 = entry - atr * self.target_1_multiplier
+                t2 = entry - atr * self.target_2_multiplier
                 return EntryTrigger(
-                    trigger_type="VWAP_PULLBACK",
-                    entry_price=round(entry, 2),
-                    stop_loss=round(sl, 2),
-                    target_1=round(t1, 2),
-                    target_2=round(t2, 2),
-                    confidence="HIGH",
-                    status="TRIGGERED",
-                    detail=f"Price at VWAP ₹{vwap:.0f} (rejection entry)"
+                    trigger_type="VWAP_PULLBACK", entry_price=round(entry, 2), stop_loss=round(sl, 2),
+                    target_1=round(t1, 2), target_2=round(t2, 2), confidence="HIGH", status="TRIGGERED",
+                    detail=f"Price near VWAP ₹{vwap:.1f} (rejection zone)"
                 )
-            elif -0.008 <= vwap_dist < 0:
+            elif -self.zone_pct * 2.5 <= vwap_dist < 0:
                 entry = vwap
-                sl = vwap + atr * self.SL_ATR_MULTIPLIER
-                t1 = entry - atr * self.TARGET1_ATR_MULT
-                t2 = entry - atr * self.TARGET2_ATR_MULT
+                sl = vwap + atr * self.sl_multiplier
+                t1 = entry - atr * self.target_1_multiplier
+                t2 = entry - atr * self.target_2_multiplier
                 return EntryTrigger(
-                    trigger_type="VWAP_PULLBACK",
-                    entry_price=round(entry, 2),
-                    stop_loss=round(sl, 2),
-                    target_1=round(t1, 2),
-                    target_2=round(t2, 2),
-                    confidence="MEDIUM",
-                    status="APPROACHING",
-                    detail=f"Below VWAP ₹{vwap:.0f}, waiting for bounce to VWAP"
+                    trigger_type="VWAP_PULLBACK", entry_price=round(entry, 2), stop_loss=round(sl, 2),
+                    target_1=round(t1, 2), target_2=round(t2, 2), confidence="MEDIUM", status="APPROACHING",
+                    detail=f"Below VWAP ₹{vwap:.1f}, waiting for pullback bounce"
                 )
 
         return None
 
-    def _check_orb_breakout(
+    def _check_breakout(
         self, direction: str, ltp: float, atr: float,
-        df_15m: pd.DataFrame, target_date: date
+        df_base: pd.DataFrame, target_date: date
     ) -> Optional[EntryTrigger]:
-        """
-        ORB Breakout: Price breaks above/below the 30-minute opening range.
-        One of the most statistically reliable intraday patterns.
-        """
-        today_df = df_15m[df_15m["timestamp"].dt.date == target_date]
-        if len(today_df) < 2:
-            return None
-
-        # First 2 candles = 30-minute opening range
-        orb = today_df.head(2)
-        orb_high = float(orb["high"].max())
-        orb_low = float(orb["low"].min())
-        orb_range = orb_high - orb_low
-
-        if orb_range <= 0:
-            return None
-
-        if direction == "CALL" and ltp > orb_high:
-            # Already broken out — check if it's a fresh breakout
-            breakout_dist = (ltp - orb_high) / orb_high
-            if breakout_dist <= 0.005:  # Within 0.5% of breakout = fresh
-                status = "TRIGGERED"
-                confidence = "HIGH"
-            elif breakout_dist <= 0.015:
-                status = "TRIGGERED"
-                confidence = "MEDIUM"
-            else:
-                return None  # Too far from breakout level
-
-            entry = ltp
-            sl = orb_high - atr * 0.5  # Tight SL just below ORB high
-            t1 = entry + atr * self.TARGET1_ATR_MULT
-            t2 = entry + atr * self.TARGET2_ATR_MULT
-            return EntryTrigger(
-                trigger_type="ORB_BREAKOUT",
-                entry_price=round(entry, 2),
-                stop_loss=round(sl, 2),
-                target_1=round(t1, 2),
-                target_2=round(t2, 2),
-                confidence=confidence,
-                status=status,
-                detail=f"ORB High ₹{orb_high:.0f} broken (30m range: ₹{orb_range:.0f})"
-            )
-        elif direction == "PUT" and ltp < orb_low:
-            breakout_dist = (orb_low - ltp) / orb_low
-            if breakout_dist <= 0.005:
-                status = "TRIGGERED"
-                confidence = "HIGH"
-            elif breakout_dist <= 0.015:
-                status = "TRIGGERED"
-                confidence = "MEDIUM"
-            else:
+        """Breakout/Breakdown of range boundaries (Intraday ORB or Swing Prev High/Low)."""
+        
+        # 1. Intraday ORB Breakout
+        if self.horizon == "INTRADAY":
+            today_df = df_base[df_base["timestamp"].dt.date == target_date]
+            if len(today_df) < 2:
                 return None
-
-            entry = ltp
-            sl = orb_low + atr * 0.5
-            t1 = entry - atr * self.TARGET1_ATR_MULT
-            t2 = entry - atr * self.TARGET2_ATR_MULT
-            return EntryTrigger(
-                trigger_type="ORB_BREAKOUT",
-                entry_price=round(entry, 2),
-                stop_loss=round(sl, 2),
-                target_1=round(t1, 2),
-                target_2=round(t2, 2),
-                confidence=confidence,
-                status=status,
-                detail=f"ORB Low ₹{orb_low:.0f} broken (30m range: ₹{orb_range:.0f})"
-            )
-        elif direction == "CALL" and ltp < orb_high:
-            # Approaching ORB high but not yet broken
-            dist_to_orb = (orb_high - ltp) / orb_high
-            if dist_to_orb <= 0.005:  # Within 0.5% of ORB high
+            orb = today_df.head(2)
+            orb_high = float(orb["high"].max())
+            orb_low = float(orb["low"].min())
+            
+            if direction == "CALL" and ltp > orb_high:
+                dist = (ltp - orb_high) / orb_high
+                if dist > 0.015: return None
                 return EntryTrigger(
-                    trigger_type="ORB_BREAKOUT",
-                    entry_price=round(orb_high, 2),
-                    stop_loss=round(orb_high - atr * 0.5, 2),
-                    target_1=round(orb_high + atr * self.TARGET1_ATR_MULT, 2),
-                    target_2=round(orb_high + atr * self.TARGET2_ATR_MULT, 2),
-                    confidence="MEDIUM",
-                    status="APPROACHING",
-                    detail=f"Near ORB High ₹{orb_high:.0f} ({dist_to_orb:.1%} away)"
+                    trigger_type="ORB_BREAKOUT", entry_price=round(ltp, 2), stop_loss=round(orb_high - atr * 0.5, 2),
+                    target_1=round(ltp + atr * self.target_1_multiplier, 2), target_2=round(ltp + atr * self.target_2_multiplier, 2),
+                    confidence="HIGH" if dist <= 0.005 else "MEDIUM", status="TRIGGERED",
+                    detail=f"ORB High ₹{orb_high:.1f} broken"
                 )
-        elif direction == "PUT" and ltp > orb_low:
-            dist_to_orb = (ltp - orb_low) / orb_low
-            if dist_to_orb <= 0.005:
+            elif direction == "PUT" and ltp < orb_low:
+                dist = (orb_low - ltp) / orb_low
+                if dist > 0.015: return None
                 return EntryTrigger(
-                    trigger_type="ORB_BREAKOUT",
-                    entry_price=round(orb_low, 2),
-                    stop_loss=round(orb_low + atr * 0.5, 2),
-                    target_1=round(orb_low - atr * self.TARGET1_ATR_MULT, 2),
-                    target_2=round(orb_low - atr * self.TARGET2_ATR_MULT, 2),
-                    confidence="MEDIUM",
-                    status="APPROACHING",
-                    detail=f"Near ORB Low ₹{orb_low:.0f} ({dist_to_orb:.1%} away)"
+                    trigger_type="ORB_BREAKOUT", entry_price=round(ltp, 2), stop_loss=round(orb_low + atr * 0.5, 2),
+                    target_1=round(ltp - atr * self.target_1_multiplier, 2), target_2=round(ltp - atr * self.target_2_multiplier, 2),
+                    confidence="HIGH" if dist <= 0.005 else "MEDIUM", status="TRIGGERED",
+                    detail=f"ORB Low ₹{orb_low:.1f} broken"
                 )
+            elif direction == "CALL" and ltp < orb_high:
+                dist = (orb_high - ltp) / orb_high
+                if dist <= 0.005:
+                    return EntryTrigger(
+                        trigger_type="ORB_BREAKOUT", entry_price=round(orb_high, 2), stop_loss=round(orb_high - atr * 0.5, 2),
+                        target_1=round(orb_high + atr * self.target_1_multiplier, 2), target_2=round(orb_high + atr * self.target_2_multiplier, 2),
+                        confidence="MEDIUM", status="APPROACHING", detail=f"Approaching ORB High ₹{orb_high:.1f}"
+                    )
+            elif direction == "PUT" and ltp > orb_low:
+                dist = (ltp - orb_low) / orb_low
+                if dist <= 0.005:
+                    return EntryTrigger(
+                        trigger_type="ORB_BREAKOUT", entry_price=round(orb_low, 2), stop_loss=round(orb_low + atr * 0.5, 2),
+                        target_1=round(orb_low - atr * self.target_1_multiplier, 2), target_2=round(orb_low - atr * self.target_2_multiplier, 2),
+                        confidence="MEDIUM", status="APPROACHING", detail=f"Approaching ORB Low ₹{orb_low:.1f}"
+                    )
+            return None
 
-        return None
+        # 2. Weekly & Monthly Range Breakouts
+        else:
+            base_filtered = df_base[df_base["timestamp"].dt.date <= target_date].sort_values("timestamp")
+            if len(base_filtered) < 2:
+                return None
+                
+            prev_candle = base_filtered.iloc[-2]
+            prev_high = float(prev_candle["high"])
+            prev_low = float(prev_candle["low"])
+            
+            ref_label = "Prev Week" if self.horizon == "WEEKLY" else "Prev Month"
+            
+            if direction == "CALL" and ltp > prev_high:
+                dist = (ltp - prev_high) / prev_high
+                if dist > self.zone_pct * 3: return None
+                return EntryTrigger(
+                    trigger_type="RANGE_BREAKOUT", entry_price=round(ltp, 2), stop_loss=round(prev_high - atr * 0.5, 2),
+                    target_1=round(ltp + atr * self.target_1_multiplier, 2), target_2=round(ltp + atr * self.target_2_multiplier, 2),
+                    confidence="HIGH" if dist <= self.zone_pct else "MEDIUM", status="TRIGGERED",
+                    detail=f"Broken {ref_label} High ₹{prev_high:.1f}"
+                )
+            elif direction == "PUT" and ltp < prev_low:
+                dist = (prev_low - ltp) / prev_low
+                if dist > self.zone_pct * 3: return None
+                return EntryTrigger(
+                    trigger_type="RANGE_BREAKOUT", entry_price=round(ltp, 2), stop_loss=round(prev_low + atr * 0.5, 2),
+                    target_1=round(ltp - atr * self.target_1_multiplier, 2), target_2=round(ltp - atr * self.target_2_multiplier, 2),
+                    confidence="HIGH" if dist <= self.zone_pct else "MEDIUM", status="TRIGGERED",
+                    detail=f"Broken {ref_label} Low ₹{prev_low:.1f}"
+                )
+            elif direction == "CALL" and ltp < prev_high:
+                dist = (prev_high - ltp) / prev_high
+                if dist <= self.zone_pct:
+                    return EntryTrigger(
+                        trigger_type="RANGE_BREAKOUT", entry_price=round(prev_high, 2), stop_loss=round(prev_high - atr * 0.5, 2),
+                        target_1=round(prev_high + atr * self.target_1_multiplier, 2), target_2=round(prev_high + atr * self.target_2_multiplier, 2),
+                        confidence="MEDIUM", status="APPROACHING", detail=f"Approaching {ref_label} High ₹{prev_high:.1f}"
+                    )
+            elif direction == "PUT" and ltp > prev_low:
+                dist = (ltp - prev_low) / prev_low
+                if dist <= self.zone_pct:
+                    return EntryTrigger(
+                        trigger_type="RANGE_BREAKOUT", entry_price=round(prev_low, 2), stop_loss=round(prev_low + atr * 0.5, 2),
+                        target_1=round(prev_low - atr * self.target_1_multiplier, 2), target_2=round(prev_low - atr * self.target_2_multiplier, 2),
+                        confidence="MEDIUM", status="APPROACHING", detail=f"Approaching {ref_label} Low ₹{prev_low:.1f}"
+                    )
+            return None
 
     def _check_supertrend_touch(
         self, direction: str, ltp: float, atr: float,
-        df_15m: pd.DataFrame, supertrend_value: float
+        df_base: pd.DataFrame, supertrend_value: float
     ) -> Optional[EntryTrigger]:
-        """
-        Supertrend Touch: Price touches the supertrend line and bounces.
-        Trend-following entry at the trend support/resistance.
-        """
+        """Supertrend Touch: Price touches the Supertrend line and bounces."""
         if supertrend_value <= 0:
-            # Auto-compute supertrend
             try:
                 from trade_system.application.indicators.supertrend import SupertrendIndicator
-                st_df = SupertrendIndicator(period=7, multiplier=3).calculate(df_15m)
+                st_df = SupertrendIndicator(period=7, multiplier=3).calculate(df_base)
                 if "supertrend" not in st_df.columns or "supertrend_direction" not in st_df.columns:
                     return None
                 supertrend_value = float(st_df["supertrend"].iloc[-1])
@@ -330,36 +303,25 @@ class SmartEntryTrigger:
 
         st_dist_pct = abs(ltp - supertrend_value) / supertrend_value
 
-        if direction == "CALL" and st_dir == 1 and st_dist_pct <= 0.005:
-            # Price is touching bullish supertrend from above = bounce entry
+        if direction == "CALL" and st_dir == 1 and st_dist_pct <= self.zone_pct * 1.5:
             entry = ltp
-            sl = supertrend_value - atr * 0.3  # Tight SL below supertrend
-            t1 = entry + atr * self.TARGET1_ATR_MULT
-            t2 = entry + atr * self.TARGET2_ATR_MULT
+            sl = supertrend_value - atr * 0.3
+            t1 = entry + atr * self.target_1_multiplier
+            t2 = entry + atr * self.target_2_multiplier
             return EntryTrigger(
-                trigger_type="ST_TOUCH",
-                entry_price=round(entry, 2),
-                stop_loss=round(sl, 2),
-                target_1=round(t1, 2),
-                target_2=round(t2, 2),
-                confidence="HIGH",
-                status="TRIGGERED",
-                detail=f"Touching bullish ST ₹{supertrend_value:.0f}"
+                trigger_type="ST_TOUCH", entry_price=round(entry, 2), stop_loss=round(sl, 2),
+                target_1=round(t1, 2), target_2=round(t2, 2), confidence="HIGH", status="TRIGGERED",
+                detail=f"Touching Supertrend line ₹{supertrend_value:.1f}"
             )
-        elif direction == "PUT" and st_dir == -1 and st_dist_pct <= 0.005:
+        elif direction == "PUT" and st_dir == -1 and st_dist_pct <= self.zone_pct * 1.5:
             entry = ltp
             sl = supertrend_value + atr * 0.3
-            t1 = entry - atr * self.TARGET1_ATR_MULT
-            t2 = entry - atr * self.TARGET2_ATR_MULT
+            t1 = entry - atr * self.target_1_multiplier
+            t2 = entry - atr * self.target_2_multiplier
             return EntryTrigger(
-                trigger_type="ST_TOUCH",
-                entry_price=round(entry, 2),
-                stop_loss=round(sl, 2),
-                target_1=round(t1, 2),
-                target_2=round(t2, 2),
-                confidence="HIGH",
-                status="TRIGGERED",
-                detail=f"Touching bearish ST ₹{supertrend_value:.0f}"
+                trigger_type="ST_TOUCH", entry_price=round(entry, 2), stop_loss=round(sl, 2),
+                target_1=round(t1, 2), target_2=round(t2, 2), confidence="HIGH", status="TRIGGERED",
+                detail=f"Touching Supertrend line ₹{supertrend_value:.1f}"
             )
 
         return None

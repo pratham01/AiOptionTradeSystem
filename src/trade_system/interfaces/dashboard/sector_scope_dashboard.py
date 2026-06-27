@@ -1168,8 +1168,8 @@ else:
 
     # ---- TAB 6: Intraday Edge Finder ----
     with tab_edge:
-        st.subheader("⚡ Multi-Layer Intraday Edge Finder")
-        st.caption("Confluence-based scoring system analyzing 7 layers (Sector, Relative Strength, VWAP, Volume/CVD, Timing, Supertrend, and Compression) to find high-probability intraday setups.")
+        st.subheader("⚡ Multi-Layer Edge Finder")
+        st.caption("Confluence-based scoring system analyzing 7 layers (Sector, Relative Strength, VWAP, Volume/CVD, Timing, Supertrend, and Compression) to find high-probability setups.")
         
         def get_approx_strike(ltp):
             if ltp <= 0:
@@ -1190,6 +1190,21 @@ else:
                 step = 1.0
             return round(ltp / step) * step
 
+        # Horizon Selector
+        selected_horizon = st.radio(
+            "⏳ Trade Horizon",
+            options=["⚡ Intraday", "📅 Weekly Swing", "🏛️ Monthly Positional"],
+            horizontal=True,
+            key="edge_horizon_selector"
+        )
+        
+        horizon_map = {
+            "⚡ Intraday": "INTRADAY",
+            "📅 Weekly Swing": "WEEKLY",
+            "🏛️ Monthly Positional": "MONTHLY"
+        }
+        horizon_code = horizon_map[selected_horizon]
+
         # 1. UI Controls
         control_col1, control_col2, control_col3 = st.columns([1, 1, 1])
         with control_col1:
@@ -1200,17 +1215,30 @@ else:
             show_triggered_only = st.checkbox("Show Triggered Entries Only", value=False, key="edge_triggered_only_cb")
 
         # 2. Scanning and Scoring
-        with st.spinner("Analyzing 7 confluence layers and scanning F&O universe..."):
+        with st.spinner(f"Analyzing 7 confluence layers for {selected_horizon} setups..."):
             try:
-                scorer = IntradayEdgeScorer()
-                edges = scorer.scan(
-                    target_date=target_date,
-                    sector_perf=sector_perf,
-                    stock_perf=merged_closes
-                )
+                scorer = IntradayEdgeScorer(horizon=horizon_code)
+                if horizon_code == "INTRADAY":
+                    edges = scorer.scan(
+                        target_date=target_date,
+                        sector_perf=sector_perf,
+                        stock_perf=merged_closes
+                    )
+                    df_base_trig = df_filtered
+                else:
+                    edges = scorer.scan(
+                        target_date=target_date
+                    )
+                    # Fetch base candles for triggers
+                    lookback_days = 365 if horizon_code == "WEEKLY" else 1000
+                    df_daily_all = scorer._fetch_daily_data(target_date, lookback_days=lookback_days)
+                    if horizon_code == "WEEKLY":
+                        df_base_trig = df_daily_all
+                    else:
+                        df_base_trig = scorer._resample_candles(df_daily_all, "W")
                 
                 # Apply entry triggers to the candidates
-                trigger_eval = SmartEntryTrigger()
+                trigger_eval = SmartEntryTrigger(horizon=horizon_code)
                 enriched_edges = []
                 for edge in edges:
                     # Filter by score
@@ -1222,14 +1250,14 @@ else:
                     if direction_filter == "PUT only" and edge.direction != "PUT":
                         continue
                         
-                    # Find matching 15m candles
-                    sym_df = df_filtered[df_filtered["symbol"] == edge.symbol]
+                    # Find matching base candles
+                    sym_df = df_base_trig[df_base_trig["symbol"] == edge.symbol]
                     if not sym_df.empty:
                         trig = trigger_eval.evaluate(
                             direction=edge.direction,
                             ltp=edge.ltp,
                             atr=edge.atr,
-                            df_15m=sym_df,
+                            df_base=sym_df,
                             target_date=target_date
                         )
                         if trig:
@@ -1245,7 +1273,7 @@ else:
                         
                     enriched_edges.append(edge)
             except Exception as e:
-                st.error(f"Error running Intraday Edge Scorer: {e}")
+                st.error(f"Error running Edge Scorer: {e}")
                 enriched_edges = []
 
         if not enriched_edges:
@@ -1274,6 +1302,23 @@ else:
                         elif edge.entry_status == "APPROACHING":
                             status_badge = "🟡 APPROACHING"
                             
+                        # Recommendation details based on horizon
+                        if horizon_code == "INTRADAY":
+                            inst_label = "Option Strike"
+                            inst_rec = f"₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'}"
+                            rec_footer = f"ATM Option: ₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'}"
+                            title_label = "Intraday Edge Alert"
+                        elif horizon_code == "WEEKLY":
+                            inst_label = "Option Strike"
+                            inst_rec = f"₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'} (Next Month)"
+                            rec_footer = f"Option Strike: ₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'} (Next Month)"
+                            title_label = "Weekly Swing Alert"
+                        else:  # MONTHLY
+                            inst_label = "Trade Tool"
+                            inst_rec = "Equity Delivery / LEAPS"
+                            rec_footer = "Equity Delivery / LEAPS option suggested"
+                            title_label = "Monthly Positional Alert"
+
                         st.markdown(f"""
                         <div style="background:{dir_bg}; border: 1px solid {dir_border}; padding:15px; border-radius:10px; margin-bottom:15px;">
                             <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -1317,17 +1362,17 @@ else:
                                 <span style="color:#eab308; font-weight:700;">{edge.risk_reward:.2f}R</span>
                             </div>
                             <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
-                                <span style="color:#94a3b8;">Option Strike:</span>
-                                <span style="color:#38bdf8; font-weight:700;">₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'}</span>
+                                <span style="color:#94a3b8;">{inst_label}:</span>
+                                <span style="color:#38bdf8; font-weight:700;">{inst_rec}</span>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
                         
                         # Alert Button
                         msg = (
-                            f"⚡ <b>Intraday Edge Alert</b> ⚡\n\n"
+                            f"⚡ <b>{title_label}</b> ⚡\n\n"
                             f"Symbol: <b>#{clean_sym}</b> ({edge.sector})\n"
-                            f"Direction: <b>{'🟢 BUY CALL' if edge.direction == 'CALL' else '🔴 BUY PUT'}</b>\n"
+                            f"Direction: <b>{'🟢 BUY CALL / LONG' if edge.direction == 'CALL' else '🔴 BUY PUT / SHORT'}</b>\n"
                             f"Edge Score: <b>{edge.final_score:.0f}/100</b>\n"
                             f"LTP: ₹{edge.ltp:,.2f} ({edge.change_pct:+.2f}%)\n"
                             f"Status: <b>{edge.entry_status}</b>\n\n"
@@ -1337,7 +1382,7 @@ else:
                             f"• Target 1: ₹{edge.target_1:,.2f}\n"
                             f"• Target 2: ₹{edge.target_2:,.2f}\n"
                             f"• Risk-Reward: <b>{edge.risk_reward:.2f}R</b>\n\n"
-                            f"💡 <i>ATM Option: ₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'}</i>"
+                            f"💡 <i>{rec_footer}</i>"
                         )
                         
                         if st.button(f"📢 Alert {clean_sym}", key=f"alert_btn_{edge.symbol}"):

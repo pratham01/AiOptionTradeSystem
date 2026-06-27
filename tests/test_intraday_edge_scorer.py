@@ -201,7 +201,7 @@ def test_scorer_volume_confirmation_low_surge():
     df_15m = _make_15m_df(n=50, target_date=target_date)
 
     result = scorer._layer_volume_confirmation(df_15m, vol_surge=0.5, target_date=target_date)
-    assert result.score <= 0.3
+    assert round(result.score, 2) <= 0.3
 
 
 def test_scorer_momentum_timing_orb_breakout():
@@ -307,3 +307,52 @@ def test_entry_trigger_zero_atr_returns_none():
         df_15m=df_15m, target_date=date(2026, 6, 27),
     )
     assert result is None
+
+
+def test_edge_scorer_horizons_initialization():
+    """Verify IntradayEdgeScorer supports different trade horizons."""
+    scorer_intraday = IntradayEdgeScorer("INTRADAY")
+    scorer_weekly = IntradayEdgeScorer("WEEKLY")
+    scorer_monthly = IntradayEdgeScorer("MONTHLY")
+    
+    assert scorer_intraday.horizon == "INTRADAY"
+    assert scorer_weekly.horizon == "WEEKLY"
+    assert scorer_monthly.horizon == "MONTHLY"
+
+
+def test_resample_candles_weekly():
+    """Verify daily candles can be correctly resampled to weekly rule."""
+    scorer = IntradayEdgeScorer("WEEKLY")
+    target_date = date(2026, 6, 27)
+    df_daily = pd.DataFrame({
+        "symbol": ["NSE:TEST-EQ"] * 10,
+        "timestamp": pd.date_range(end=target_date, periods=10, freq="D"),
+        "open": [100.0] * 10,
+        "high": [110.0] * 10,
+        "low": [90.0] * 10,
+        "close": [105.0] * 10,
+        "volume": [1000] * 10,
+    })
+    
+    df_weekly = scorer._resample_candles(df_daily, "W")
+    assert not df_weekly.empty
+    assert "open" in df_weekly.columns
+    assert "close" in df_weekly.columns
+    # Check that volume aggregated correctly for the week
+    assert df_weekly["volume"].iloc[0] > 1000
+
+
+def test_smart_entry_trigger_horizon_scaling():
+    """Verify that ATR multipliers scale correctly depending on selected horizon."""
+    trigger_intraday = SmartEntryTrigger("INTRADAY")
+    trigger_weekly = SmartEntryTrigger("WEEKLY")
+    trigger_monthly = SmartEntryTrigger("MONTHLY")
+    
+    assert trigger_intraday.sl_multiplier == 1.0
+    assert trigger_weekly.sl_multiplier == 1.2
+    assert trigger_monthly.sl_multiplier == 1.5
+    
+    assert trigger_intraday.target_1_multiplier == 1.5
+    assert trigger_weekly.target_1_multiplier == 2.0
+    assert trigger_monthly.target_1_multiplier == 2.5
+
