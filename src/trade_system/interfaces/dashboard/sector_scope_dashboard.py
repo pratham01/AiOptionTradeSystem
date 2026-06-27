@@ -11,6 +11,12 @@ from trade_system.infrastructure.database.connection import get_engine
 from sqlalchemy import text
 from trade_system.infrastructure.data.fo_universe import get_sector_mapping, get_stocks_by_sector
 from trade_system.application.analysis.breakout_screener import BreakoutScreener
+import importlib
+import trade_system.application.analysis.intraday_edge_scorer
+import trade_system.application.analysis.smart_entry_trigger
+importlib.reload(trade_system.application.analysis.intraday_edge_scorer)
+importlib.reload(trade_system.application.analysis.smart_entry_trigger)
+
 from trade_system.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
 from trade_system.application.analysis.smart_entry_trigger import SmartEntryTrigger
 from trade_system.infrastructure.notifications.telegram import TelegramNotifier
