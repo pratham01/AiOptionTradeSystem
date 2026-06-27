@@ -196,6 +196,13 @@ selected_date = st.sidebar.selectbox("Select Analysis Date", available_dates, in
 # Load snapshots and price data
 snapshots = load_db_snapshots(db_symbol, selected_date)
 price_df = load_db_price_data(db_symbol, selected_date)
+if not price_df.empty:
+    # Pre-calculate VWAP columns
+    price_df["typical_price"] = (price_df["high"] + price_df["low"] + price_df["close"]) / 3
+    price_df["tp_vol"] = price_df["typical_price"] * price_df["volume"]
+    price_df["cum_vol"] = price_df["volume"].cumsum()
+    price_df["cum_tp_vol"] = price_df["tp_vol"].cumsum()
+    price_df["vwap"] = price_df["cum_tp_vol"] / price_df["cum_vol"].replace(0, 1)
 
 if not snapshots:
     st.warning(f"No snapshots loaded for {selected_symbol_label} on {selected_date}.")
@@ -280,12 +287,6 @@ buyer_color = "#8b949e"
 if dist_to_call_wall > 0 and dist_to_call_wall <= 0.6:
     is_vwap_above = True
     if not price_df.empty:
-        # Calculate VWAP
-        price_df["typical_price"] = (price_df["high"] + price_df["low"] + price_df["close"]) / 3
-        price_df["tp_vol"] = price_df["typical_price"] * price_df["volume"]
-        price_df["cum_vol"] = price_df["volume"].cumsum()
-        price_df["cum_tp_vol"] = price_df["tp_vol"].cumsum()
-        price_df["vwap"] = price_df["cum_tp_vol"] / price_df["cum_vol"].replace(0, 1)
         is_vwap_above = spot_price > price_df["vwap"].iloc[-1]
     
     if is_vwap_above:
@@ -411,13 +412,6 @@ with tab_chart:
             close=price_df['close'],
             name="Price"
         ), secondary_y=False)
-        
-        # Calculate VWAP
-        price_df["typical_price"] = (price_df["high"] + price_df["low"] + price_df["close"]) / 3
-        price_df["tp_vol"] = price_df["typical_price"] * price_df["volume"]
-        price_df["cum_vol"] = price_df["volume"].cumsum()
-        price_df["cum_tp_vol"] = price_df["tp_vol"].cumsum()
-        price_df["vwap"] = price_df["cum_tp_vol"] / price_df["cum_vol"].replace(0, 1)
         
         # Add VWAP Line on primary y-axis
         fig.add_trace(go.Scatter(
