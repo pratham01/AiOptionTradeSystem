@@ -73,4 +73,5 @@ exclude = ["venv", ".venv", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+norecursedirs = ["tests/scratch", "tests/scripts", "tests/backtests", "tests/checks"]
 
