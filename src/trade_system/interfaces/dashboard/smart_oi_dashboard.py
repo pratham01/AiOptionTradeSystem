@@ -16,75 +16,18 @@ from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 LOGGER = logging.getLogger(__name__)
 
 # Options signal color mapping
-signal_styles = {
+SIGNAL_STYLES = {
     "long buildup": {"color": "#00d084", "desc": "Put Writing Accumulation (Bullish Positioning)"},
     "short buildup": {"color": "#ff4d6d", "desc": "Call Writing (Bearish Positioning)"},
     "unwind": {"color": "#9b5de5", "desc": "Position Exiting (Unwinding)"},
     "neutral": {"color": "#00b4d8", "desc": "No Clear Institutional Commitment"}
 }
 
-# --- STYLING & CUSTOM CSS ---
-st.markdown("""
-<style>
-    .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; }
-    div[data-testid="stVerticalBlock"] > div { margin-top: -0.5rem !important; }
-    
-    /* Smart Cards */
-    .status-card {
-        background: #1e2130;
-        padding: 20px;
-        border-radius: 12px;
-        border: 1px solid #30363d;
-        text-align: center;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        margin-bottom: 15px;
-    }
-    .status-title {
-        font-size: 0.9rem;
-        color: #8b949e;
-        margin-bottom: 5px;
-        text-transform: uppercase;
-        font-weight: 600;
-    }
-    .status-value {
-        font-size: 2rem;
-        font-weight: bold;
-        margin-bottom: 5px;
-    }
-    .status-desc {
-        font-size: 0.8rem;
-        color: #8b949e;
-    }
-    
-    /* Transition Timeline */
-    .timeline-item {
-        background: #161b22;
-        padding: 10px 15px;
-        border-radius: 8px;
-        border-left: 4px solid #30363d;
-        margin-bottom: 8px;
-        font-size: 0.85rem;
-    }
-    .timeline-time {
-        color: #8b949e;
-        font-size: 0.75rem;
-        font-weight: bold;
-    }
-    .timeline-signal {
-        font-weight: bold;
-        margin-left: 5px;
-    }
-    .timeline-desc {
-        color: #c9d1d9;
-        margin-top: 3px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
 
 def get_broker():
     """Return the shared cached broker instance."""
     return get_cached_broker()
+
 
 @st.cache_data(ttl=300)
 def load_db_dates(symbol: str) -> list[str]:
@@ -104,6 +47,7 @@ def load_db_dates(symbol: str) -> list[str]:
     except Exception as e:
         LOGGER.error(f"Error loading dates: {e}")
         return []
+
 
 @st.cache_data(ttl=60)
 def load_db_snapshots(symbol: str, target_date: str) -> list[tuple[datetime, pd.DataFrame]]:
@@ -142,6 +86,7 @@ def load_db_snapshots(symbol: str, target_date: str) -> list[tuple[datetime, pd.
         LOGGER.error(f"Error loading snapshots: {e}")
         return []
 
+
 @st.cache_data(ttl=60)
 def load_db_price_data(symbol: str, target_date: str) -> pd.DataFrame:
     """Load 1m OHLCV price data for the selected date."""
@@ -167,235 +112,200 @@ def load_db_price_data(symbol: str, target_date: str) -> pd.DataFrame:
         LOGGER.error(f"Error loading price data: {e}")
         return pd.DataFrame()
 
-# --- MAIN PAGE SETUP ---
-st.title("📊 Nifty 50 Smart OI: Comparing With Price Action")
-st.caption("Noise-filtered Institutional derivatives positioning correlated with real-time price action")
-st.markdown("---")
 
-# Sidebar Configuration
-st.sidebar.title("⚙️ Smart OI Controls")
-st.sidebar.markdown("---")
-
-# Select symbol
-symbol_map = {
-    "NIFTY 50": "NSE:NIFTY50-INDEX",
-    "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
-    "SENSEX": "BSE:SENSEX-INDEX"
-}
-selected_symbol_label = st.sidebar.selectbox("Select Underlying", list(symbol_map.keys()), index=0)
-db_symbol = symbol_map[selected_symbol_label]
-
-# Load dates
-available_dates = load_db_dates(db_symbol)
-if not available_dates:
-    st.error(f"No option chain data found in database for {selected_symbol_label}.")
-    st.stop()
-
-selected_date = st.sidebar.selectbox("Select Analysis Date", available_dates, index=0)
-
-# Load snapshots and price data
-snapshots = load_db_snapshots(db_symbol, selected_date)
-price_df = load_db_price_data(db_symbol, selected_date)
-if not price_df.empty:
-    # Pre-calculate VWAP columns
-    price_df["typical_price"] = (price_df["high"] + price_df["low"] + price_df["close"]) / 3
-    price_df["tp_vol"] = price_df["typical_price"] * price_df["volume"]
-    price_df["cum_vol"] = price_df["volume"].cumsum()
-    price_df["cum_tp_vol"] = price_df["tp_vol"].cumsum()
-    price_df["vwap"] = price_df["cum_tp_vol"] / price_df["cum_vol"].replace(0, 1)
-
-if not snapshots:
-    st.warning(f"No snapshots loaded for {selected_symbol_label} on {selected_date}.")
-    st.stop()
-
-# Load latest and previous snapshot
-latest_ts, latest_oc = snapshots[-1]
-prev_oc = snapshots[-2][1] if len(snapshots) > 1 else None
-
-# Initialize Analyzer
-analyzer = SmartOIAnalyzer(db_symbol)
-
-# Get current spot price from price dataframe if available, otherwise estimate
-spot_price = None
-if not price_df.empty:
-    # Filter price data up to the snapshot time
-    snap_time = latest_ts
-    snap_price_df = price_df[price_df["timestamp"] <= snap_time]
-    if not snap_price_df.empty:
-        spot_price = snap_price_df.iloc[-1]["close"]
-    else:
-        spot_price = price_df.iloc[-1]["close"]
-
-# Run analysis
-analysis = analyzer.analyze_smart_oi(latest_oc, prev_oc, spot_price=spot_price)
-signal = analysis["signal"]
-signal_strikes = analysis["signal_strikes"]
-summary = analysis["summary"]
-
-# Run Confluence & Divergence detection
-confluence_data = {}
-if not price_df.empty:
-    snap_price_df = price_df[price_df["timestamp"] <= latest_ts]
-    confluence_data = analyzer.detect_confluence_divergence(signal, snap_price_df if not snap_price_df.empty else price_df)
-
-# --- 1. CURRENT SMART OI VERDICT & OPTION BUYER'S PANEL ---
-st.subheader("🚀 Option Buyer's Gamma & Short Covering Panel")
-
-# Advanced Option Buyer computations
-ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
-pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
-
-call_wall = ce_oc.loc[ce_oc["oi"].idxmax()]["strike"] if not ce_oc.empty else 0
-put_wall = pe_oc.loc[pe_oc["oi"].idxmax()]["strike"] if not pe_oc.empty else 0
-
-call_wall_oi = ce_oc.loc[ce_oc["oi"].idxmax()]["oi"] if not ce_oc.empty else 0
-put_wall_oi = pe_oc.loc[pe_oc["oi"].idxmax()]["oi"] if not pe_oc.empty else 0
-
-dist_to_call_wall = ((call_wall - spot_price) / spot_price) * 100 if spot_price else 0
-dist_to_put_wall = ((spot_price - put_wall) / spot_price) * 100 if spot_price else 0
-
-atm_strike = summary["atm_strike"]
-ce_unwinding_atm = ce_oc[(ce_oc["strike"] == atm_strike) & (ce_oc["oi_change"] < 0)]
-pe_unwinding_atm = pe_oc[(pe_oc["strike"] == atm_strike) & (pe_oc["oi_change"] < 0)]
-
-# Calculate Put Call Ratio (PCR) from raw data
-total_ce_oi = latest_oc[latest_oc["option_type"] == "CE"]["oi"].sum()
-total_pe_oi = latest_oc[latest_oc["option_type"] == "PE"]["oi"].sum()
-pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1.0
-
-# Calculate Max Pain
-strikes = latest_oc["strike"].unique()
-total_pain = []
-for s in strikes:
-    pain = 0
-    for _, row in latest_oc.iterrows():
-        stk = row["strike"]
-        oi_val = row["oi"]
-        opt_type = row["option_type"]
-        if opt_type == "CE" and stk < s:
-            pain += (s - stk) * oi_val
-        elif opt_type == "PE" and stk > s:
-            pain += (stk - s) * oi_val
-    total_pain.append(pain)
-max_pain_strike = strikes[np.argmin(total_pain)] if len(total_pain) > 0 else spot_price
-
-# Determine Option Buyer Actionable Signal
-buyer_verdict = "⚠️ NO TRADE (Rangebound Chop / High Theta Decay)"
-buyer_desc = "Spot is trapped between major option walls. Buying options now will lead to time decay. Wait for a breakout."
-buyer_color = "#8b949e"
-
-if dist_to_call_wall > 0 and dist_to_call_wall <= 0.6:
-    is_vwap_above = True
-    if not price_df.empty:
-        is_vwap_above = spot_price > price_df["vwap"].iloc[-1]
-    
-    if is_vwap_above:
-        buyer_verdict = "🚀 CALL BUYING ALIGNMENT (Near Call Wall Breakout)"
-        buyer_desc = f"Spot is only {dist_to_call_wall:.2f}% below the major Call Wall (₹{call_wall:,.0f}). A breakout above this level will trigger aggressive Call short covering."
-        buyer_color = "#00d084"
-elif dist_to_put_wall > 0 and dist_to_put_wall <= 0.6:
-    is_vwap_below = True
-    if not price_df.empty:
-        is_vwap_below = spot_price < price_df["vwap"].iloc[-1]
+def inject_custom_css():
+    """Inject custom styles and CSS for status cards and transition timeline."""
+    st.markdown("""
+    <style>
+        .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; }
+        div[data-testid="stVerticalBlock"] > div { margin-top: -0.5rem !important; }
         
-    if is_vwap_below:
-        buyer_verdict = "🔥 PUT BUYING ALIGNMENT (Near Put Wall Breakdown)"
-        buyer_desc = f"Spot is only {dist_to_put_wall:.2f}% above the major Put Wall (₹{put_wall:,.0f}). A breakdown below this level will trigger rapid Put short covering and panic selling."
+        /* Smart Cards */
+        .status-card {
+            background: #1e2130;
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid #30363d;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 15px;
+        }
+        .status-title {
+            font-size: 0.9rem;
+            color: #8b949e;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        .status-value {
+            font-size: 2rem;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .status-desc {
+            font-size: 0.8rem;
+            color: #8b949e;
+        }
+        
+        /* Transition Timeline */
+        .timeline-item {
+            background: #161b22;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border-left: 4px solid #30363d;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+        }
+        .timeline-time {
+            color: #8b949e;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+        .timeline-signal {
+            font-weight: bold;
+            margin-left: 5px;
+        }
+        .timeline-desc {
+            color: #c9d1d9;
+            margin-top: 3px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def calculate_price_vwap(price_df: pd.DataFrame) -> pd.DataFrame:
+    """Pre-calculate VWAP columns on the price dataframe."""
+    if not price_df.empty:
+        df = price_df.copy()
+        df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
+        df["tp_vol"] = df["typical_price"] * df["volume"]
+        df["cum_vol"] = df["volume"].cumsum()
+        df["cum_tp_vol"] = df["tp_vol"].cumsum()
+        df["vwap"] = df["cum_tp_vol"] / df["cum_vol"].replace(0, 1)
+        return df
+    return price_df
+
+
+def determine_option_buyer_signal(
+    price_df: pd.DataFrame,
+    spot_price: float,
+    dist_to_call_wall: float,
+    dist_to_put_wall: float,
+    call_wall: float,
+    put_wall: float,
+    ce_unwinding_atm: pd.DataFrame,
+    pe_unwinding_atm: pd.DataFrame,
+    atm_strike: float
+) -> tuple[str, str, str]:
+    """Determine the verdict, description, and color for Option Buyer Actionable Signal."""
+    buyer_verdict = "⚠️ NO TRADE (Rangebound Chop / High Theta Decay)"
+    buyer_desc = "Spot is trapped between major option walls. Buying options now will lead to time decay. Wait for a breakout."
+    buyer_color = "#8b949e"
+
+    if dist_to_call_wall > 0 and dist_to_call_wall <= 0.6:
+        is_vwap_above = True
+        if not price_df.empty:
+            is_vwap_above = spot_price > price_df["vwap"].iloc[-1]
+        
+        if is_vwap_above:
+            buyer_verdict = "🚀 CALL BUYING ALIGNMENT (Near Call Wall Breakout)"
+            buyer_desc = f"Spot is only {dist_to_call_wall:.2f}% below the major Call Wall (₹{call_wall:,.0f}). A breakout above this level will trigger aggressive Call short covering."
+            buyer_color = "#00d084"
+    elif dist_to_put_wall > 0 and dist_to_put_wall <= 0.6:
+        is_vwap_below = True
+        if not price_df.empty:
+            is_vwap_below = spot_price < price_df["vwap"].iloc[-1]
+            
+        if is_vwap_below:
+            buyer_verdict = "🔥 PUT BUYING ALIGNMENT (Near Put Wall Breakdown)"
+            buyer_desc = f"Spot is only {dist_to_put_wall:.2f}% above the major Put Wall (₹{put_wall:,.0f}). A breakdown below this level will trigger rapid Put short covering and panic selling."
+            buyer_color = "#ff4d6d"
+    elif not ce_unwinding_atm.empty:
+        buyer_verdict = "🟢 CALL BUYING ALIGNMENT (Intraday Short Covering)"
+        buyer_desc = f"Institutional Call writers are covering positions at the ATM strike ₹{atm_strike:,.0f} (OI Change: {ce_unwinding_atm.iloc[0]['oi_change']:,} contracts). Strong bullish tailwind."
+        buyer_color = "#00d084"
+    elif not pe_unwinding_atm.empty:
+        buyer_verdict = "🔴 PUT BUYING ALIGNMENT (Intraday Put Long Liquidation)"
+        buyer_desc = f"Put writers are unwinding/exiting support at the ATM strike ₹{atm_strike:,.0f} (OI Change: {pe_unwinding_atm.iloc[0]['oi_change']:,} contracts). Momentum shifting bearish."
         buyer_color = "#ff4d6d"
-elif not ce_unwinding_atm.empty:
-    buyer_verdict = "🟢 CALL BUYING ALIGNMENT (Intraday Short Covering)"
-    buyer_desc = f"Institutional Call writers are covering positions at the ATM strike ₹{atm_strike:,.0f} (OI Change: {ce_unwinding_atm.iloc[0]['oi_change']:,} contracts). Strong bullish tailwind."
-    buyer_color = "#00d084"
-elif not pe_unwinding_atm.empty:
-    buyer_verdict = "🔴 PUT BUYING ALIGNMENT (Intraday Put Long Liquidation)"
-    buyer_desc = f"Put writers are unwinding/exiting support at the ATM strike ₹{atm_strike:,.0f} (OI Change: {pe_unwinding_atm.iloc[0]['oi_change']:,} contracts). Momentum shifting bearish."
-    buyer_color = "#ff4d6d"
 
-# Render Option Buyer Verdict Card
-st.markdown(f"""
-<div style="background:#1e2130; padding:20px; border-radius:12px; border-left:8px solid {buyer_color}; border-top:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:20px;">
-    <div style="font-size:0.8rem; color:#8b949e; text-transform:uppercase; font-weight:600; margin-bottom:5px;">Actionable Option Buyer Verdict</div>
-    <div style="font-size:1.6rem; font-weight:bold; color:{buyer_color}; margin-bottom:8px;">{buyer_verdict}</div>
-    <div style="font-size:0.95rem; color:#c9d1d9; line-height:1.5;">{buyer_desc}</div>
-</div>
-""", unsafe_allow_html=True)
+    return buyer_verdict, buyer_desc, buyer_color
 
-# Metrics Grid
-c1, c2, c3, c4 = st.columns(4)
 
-with c1:
+def render_verdict_card(buyer_verdict: str, buyer_desc: str, buyer_color: str):
+    """Render the Actionable Option Buyer Verdict card."""
     st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid #ff4d6d;">
-        <div class="status-title">🔴 Call Wall (Resistance)</div>
-        <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">₹{call_wall:,.0f}</div>
-        <div class="status-desc">{dist_to_call_wall:.2f}% away | OI: {call_wall_oi:,.0f}</div>
+    <div style="background:#1e2130; padding:20px; border-radius:12px; border-left:8px solid {buyer_color}; border-top:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:20px;">
+        <div style="font-size:0.8rem; color:#8b949e; text-transform:uppercase; font-weight:600; margin-bottom:5px;">Actionable Option Buyer Verdict</div>
+        <div style="font-size:1.6rem; font-weight:bold; color:{buyer_color}; margin-bottom:8px;">{buyer_verdict}</div>
+        <div style="font-size:0.95rem; color:#c9d1d9; line-height:1.5;">{buyer_desc}</div>
     </div>
     """, unsafe_allow_html=True)
 
-with c2:
-    st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid #00d084;">
-        <div class="status-title">🟢 Put Wall (Support)</div>
-        <div class="status-value" style="color: #00d084; font-size:1.6rem;">₹{put_wall:,.0f}</div>
-        <div class="status-desc">{dist_to_put_wall:.2f}% away | OI: {put_wall_oi:,.0f}</div>
-    </div>
-    """, unsafe_allow_html=True)
 
-with c3:
-    st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid #ffb703;">
-        <div class="status-title">Spot Price</div>
-        <div class="status-value" style="color: #ffb703; font-size:1.6rem;">₹{spot_price:,.2f}</div>
-        <div class="status-desc">Max Pain Strike: ₹{int(max_pain_strike):,}</div>
-    </div>
-    """, unsafe_allow_html=True)
+def render_metrics_grid(
+    call_wall: float, call_wall_oi: float, dist_to_call_wall: float,
+    put_wall: float, put_wall_oi: float, dist_to_put_wall: float,
+    spot_price: float, max_pain_strike: float,
+    pcr: float, atm_iv_val: float, iv_status: str, iv_color: str
+):
+    """Render the key walls and PCR status card grid."""
+    c1, c2, c3, c4 = st.columns(4)
 
-# Get ATM IV for premium cost representation
-atm_iv_val = latest_oc[latest_oc["strike"] == atm_strike]["iv"].mean() if not latest_oc.empty else None
-iv_status = "Neutral"
-iv_color = "#00b4d8"
-if atm_iv_val:
-    if atm_iv_val < 12.0:
-        iv_status = "Cheap Volatility"
-        iv_color = "#00d084"
-    elif atm_iv_val > 17.0:
-        iv_status = "Expensive Premium"
-        iv_color = "#ff4d6d"
+    with c1:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 5px solid #ff4d6d;">
+            <div class="status-title">🔴 Call Wall (Resistance)</div>
+            <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">₹{call_wall:,.0f}</div>
+            <div class="status-desc">{dist_to_call_wall:.2f}% away | OI: {call_wall_oi:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-with c4:
-    st.markdown(f"""
-    <div class="status-card" style="border-top: 5px solid {iv_color};">
-        <div class="status-title">PCR & Premium Cost</div>
-        <div class="status-value" style="color: {iv_color}; font-size:1.6rem;">{pcr:.2f}</div>
-        <div class="status-desc">{iv_status} ({f"{atm_iv_val:.1f}%" if atm_iv_val else "N/A"} IV)</div>
-    </div>
-    """, unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 5px solid #00d084;">
+            <div class="status-title">🟢 Put Wall (Support)</div>
+            <div class="status-value" style="color: #00d084; font-size:1.6rem;">₹{put_wall:,.0f}</div>
+            <div class="status-desc">{dist_to_put_wall:.2f}% away | OI: {put_wall_oi:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-# Narrative Alert box
-if confluence_data:
-    st.write("")
-    alert_type = confluence_data["status"]
-    alert_color = "#00d084" if "BULLISH CONFLUENCE" in alert_type else ("#ff4d6d" if "BEARISH CONFLUENCE" in alert_type else ("#ffb703" if "DIVERGENCE" in alert_type else "#00b4d8"))
-    
-    st.markdown(f"""
-    <div style="background:#1e2130; padding:15px; border-radius:8px; border-left:6px solid {alert_color}; margin-bottom:20px;">
-        <h4 style="margin:0 0 5px 0; color:{alert_color};">{alert_type}</h4>
-        <p style="margin:0; color:#c9d1d9; font-size:0.95rem;">{confluence_data['narrative']}</p>
-    </div>
-    """, unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 5px solid #ffb703;">
+            <div class="status-title">Spot Price</div>
+            <div class="status-value" style="color: #ffb703; font-size:1.6rem;">₹{spot_price:,.2f}</div>
+            <div class="status-desc">Max Pain Strike: ₹{int(max_pain_strike):,}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-st.markdown("---")
+    with c4:
+        st.markdown(f"""
+        <div class="status-card" style="border-top: 5px solid {iv_color};">
+            <div class="status-title">PCR & Premium Cost</div>
+            <div class="status-value" style="color: {iv_color}; font-size:1.6rem;">{pcr:.2f}</div>
+            <div class="status-desc">{iv_status} ({f"{atm_iv_val:.1f}%" if atm_iv_val else "N/A"} IV)</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-# --- 2. TRANSITIONS & CHARTING ---
-tab_chart, tab_transitions, tab_strikes, tab_pro_trader, tab_iv_greeks = st.tabs([
-    "📈 Price Action & Smart OI Overlay",
-    "⏱️ Signal Transitions Timeline",
-    "🎯 Filtered Signal Strikes",
-    "🏦 Pro Trader Analytics",
-    "📊 IV Skew & Greeks"
-])
 
-with tab_chart:
+def render_confluence_alert(confluence_data: dict):
+    """Render the confluence narrative alert box."""
+    if confluence_data:
+        st.write("")
+        alert_type = confluence_data["status"]
+        alert_color = "#00d084" if "BULLISH CONFLUENCE" in alert_type else ("#ff4d6d" if "BEARISH CONFLUENCE" in alert_type else ("#ffb703" if "DIVERGENCE" in alert_type else "#00b4d8"))
+        
+        st.markdown(f"""
+        <div style="background:#1e2130; padding:15px; border-radius:8px; border-left:6px solid {alert_color}; margin-bottom:20px;">
+            <h4 style="margin:0 0 5px 0; color:{alert_color};">{alert_type}</h4>
+            <p style="margin:0; color:#c9d1d9; font-size:0.95rem;">{confluence_data['narrative']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: float, analyzer: SmartOIAnalyzer, selected_symbol_label: str):
+    """Render the Price Action & Smart OI candlestick overlay."""
     st.subheader("Price vs. Smart OI & technical levels")
     if not price_df.empty:
         from plotly.subplots import make_subplots
@@ -448,54 +358,42 @@ with tab_chart:
             
             # Find matching price row
             price_row = price_df[price_df["timestamp"] <= ts_item]
-            if not price_row.empty:
-                signals_ts.append({
-                    "timestamp": price_row.iloc[-1]["timestamp"],
-                    "price": price_row.iloc[-1]["close"],
-                    "net_oi_diff": net_oi_diff,
-                    "signal": res_item["signal"]
-                })
-        
-        # Plot Net PE-CE difference line on secondary y-axis if we have snapshot data
-        if signals_ts:
-            snap_df = pd.DataFrame(signals_ts).sort_values("timestamp")
+            row_idx = price_row.index[-1] if not price_row.empty else None
             
-            # Add Net PE-CE line
-            fig.add_trace(go.Scatter(
-                x=snap_df['timestamp'],
-                y=snap_df['net_oi_diff'],
-                line=dict(color="#00e6ff", width=2.5),
-                fill='tozeroy',
-                fillcolor='rgba(0, 230, 255, 0.1)',
-                name="Net PE-CE OI (Support-Resistance)"
-            ), secondary_y=True)
+            signals_ts.append({
+                "timestamp": ts_item,
+                "net_oi_diff": net_oi_diff,
+                "signal": res_item["signal"],
+                "price_idx": row_idx
+            })
             
-            # Filter transition points for markers
-            last_sig = None
-            for item in signals_ts:
-                if item["signal"] != last_sig:
-                    # Add annotation marker
-                    sig_col = signal_styles.get(item["signal"], {"color": "#00b4d8"})["color"]
-                    fig.add_annotation(
-                        x=item["timestamp"],
-                        y=item["price"],
-                        text=item["signal"].upper(),
-                        showarrow=True,
-                        arrowhead=2,
-                        arrowcolor=sig_col,
-                        arrowsize=1,
-                        arrowwidth=2,
-                        ax=0,
-                        ay=-40 if item["signal"] in ["long buildup", "neutral"] else 40,
-                        bordercolor=sig_col,
-                        borderwidth=1,
-                        borderpad=4,
-                        bgcolor="#161b22",
-                        opacity=0.9
-                    )
-                    last_sig = item["signal"]
+        sig_df = pd.DataFrame(signals_ts)
         
-        # Style layout
+        # Add Net OI Line on secondary y-axis
+        fig.add_trace(go.Scatter(
+            x=sig_df['timestamp'],
+            y=sig_df['net_oi_diff'],
+            line=dict(color="#00b4d8", width=3),
+            name="Net Writer OI (PE-CE)"
+        ), secondary_y=True)
+        
+        # Color coding signal periods on background
+        for i in range(len(sig_df)):
+            row = sig_df.iloc[i]
+            t_start = row["timestamp"]
+            t_end = sig_df.iloc[i+1]["timestamp"] if i < len(sig_df)-1 else price_df.iloc[-1]["timestamp"]
+            
+            # Pick background color based on signal
+            style = SIGNAL_STYLES.get(row["signal"], {"color": "#8b949e"})
+            bg_color = style["color"]
+            
+            # Add shaded region
+            fig.add_vrect(
+                x0=t_start, x1=t_end,
+                fillcolor=bg_color, opacity=0.04,
+                layer="below", line_width=0,
+            )
+            
         fig.update_layout(
             title=f"{selected_symbol_label} Price vs Smart OI (PE-CE Net Positioning) Overlay",
             xaxis_title="Time",
@@ -513,7 +411,9 @@ with tab_chart:
     else:
         st.info("No intraday price data available to render the candlestick chart.")
 
-with tab_transitions:
+
+def render_tab_transitions(snapshots: list, price_df: pd.DataFrame, analyzer: SmartOIAnalyzer):
+    """Render the intraday signal transitions timeline."""
     st.subheader("Intraday Signal Transitions Timeline")
     st.caption("Transitions show when institutions are adding or closing positions")
     
@@ -541,7 +441,7 @@ with tab_transitions:
     if transition_list:
         # Display timeline items
         for t in reversed(transition_list):
-            sig_col = signal_styles.get(t["signal"], {"color": "#8b949e"})["color"]
+            sig_col = SIGNAL_STYLES.get(t["signal"], {"color": "#8b949e"})["color"]
             spot_txt = f" @ Spot ₹{t['spot']:,.2f}" if t["spot"] else ""
             st.markdown(f"""
             <div class="timeline-item" style="border-left-color: {sig_col};">
@@ -554,12 +454,13 @@ with tab_transitions:
     else:
         st.info("No signal transitions detected on this day.")
 
-with tab_strikes:
+
+def render_tab_strikes(signal_strikes: list):
+    """Render the active institutional signal strikes table."""
     st.subheader("🎯 Active Institutional Signal Strikes")
     st.caption("Noise-filtered strikes where serious institutional positions are being committed.")
     
     if signal_strikes:
-        # Render a table of signal strikes
         df_strikes = pd.DataFrame(signal_strikes)
         
         # Beautify column names and formats
@@ -575,23 +476,12 @@ with tab_strikes:
             "action": "Institutional Action"
         })
         
-        # Reorder
         df_strikes = df_strikes[[
             "Strike Price", "Option Type", "Option Price (LTP)", 
             "Open Interest (OI)", "OI Change (Contracts)", "OI Change %",
             "Interval Volume", "Buildup Category", "Institutional Action"
         ]]
         
-        # Color coding buildup
-        def color_buildup(val):
-            if "Short Buildup" in val:
-                return "color: #ff4d6d; font-weight: bold;" # Sellers active
-            elif "Long Buildup" in val:
-                return "color: #00d084; font-weight: bold;" # Buyers active
-            elif "Covering" in val:
-                return "color: #ffb703;"
-            return ""
-            
         st.dataframe(
             df_strikes,
             use_container_width=True,
@@ -608,109 +498,102 @@ with tab_strikes:
     else:
         st.info("No active signal strikes passed the filters at this snapshot.")
 
-st.markdown("---")
 
-# --- 3. PCR & OPEN INTEREST WALLS ---
-st.subheader("🧱 Institutional Walls: CE vs. PE Open Interest")
-st.caption("Compare cumulative open interest walls or daily fresh positioning (buildup/unwinding) across filtered Smart OI strikes.")
+def render_institutional_walls(latest_oc: pd.DataFrame, snapshots: list, summary: dict, analyzer: SmartOIAnalyzer, signal_strikes: list):
+    """Render the cumulative open interest or fresh buildup walls chart below the tabs."""
+    st.subheader("🧱 Institutional Walls: CE vs. PE Open Interest")
+    st.caption("Compare cumulative open interest walls or daily fresh positioning (buildup/unwinding) across filtered Smart OI strikes.")
+    
+    if not latest_oc.empty:
+        col_toggle1, col_toggle2 = st.columns(2)
+        with col_toggle1:
+            view_mode = st.radio(
+                "Select Strikes Filter",
+                options=["Filtered Smart OI", "All Near-ATM Strikes"],
+                horizontal=True,
+                help="Filtered Smart OI shows only the high-conviction institutional strikes after filtering noise. All Near-ATM shows raw option chain data."
+            )
+        with col_toggle2:
+            metric_mode = st.radio(
+                "Select Metric",
+                options=["OI Change (Daily)", "Total Open Interest"],
+                horizontal=True,
+                help="OI Change shows the net contracts added (buildup) or unwound (exit) since market open. Total Open Interest shows outstanding position walls."
+            )
 
-if not latest_oc.empty:
-    # 1. UI controls for visualization mode
-    col_toggle1, col_toggle2 = st.columns(2)
-    with col_toggle1:
-        view_mode = st.radio(
-            "Select Strikes Filter",
-            options=["Filtered Smart OI", "All Near-ATM Strikes"],
-            horizontal=True,
-            help="Filtered Smart OI shows only the high-conviction institutional strikes after filtering noise. All Near-ATM shows raw option chain data."
-        )
-    with col_toggle2:
-        metric_mode = st.radio(
-            "Select Metric",
-            options=["OI Change (Daily)", "Total Open Interest"],
-            horizontal=True,
-            help="OI Change shows the net contracts added (buildup) or unwound (exit) since market open. Total Open Interest shows outstanding position walls."
-        )
+        df_to_plot = latest_oc.copy()
+        if metric_mode == "OI Change (Daily)" and snapshots:
+            first_oc = snapshots[0][1]
+            latest_aligned = df_to_plot.set_index(["strike", "option_type"])
+            first_aligned = first_oc.set_index(["strike", "option_type"])
+            latest_aligned["oi_change_daily"] = latest_aligned["oi"] - first_aligned["oi"]
+            latest_aligned["oi_change_daily"] = latest_aligned["oi_change_daily"].fillna(latest_aligned["oi"])
+            df_to_plot = latest_aligned.reset_index()
+            y_col = "oi_change_daily"
+            yaxis_title = "Change in Open Interest (Contracts)"
+            chart_title_metric = "Change in Open Interest (Buildup vs. Unwinding)"
+        else:
+            y_col = "oi"
+            yaxis_title = "Open Interest (Contracts)"
+            chart_title_metric = "Total Open Interest Concentration"
 
-    # 2. Calculate daily change in OI if selected
-    df_to_plot = latest_oc.copy()
-    if metric_mode == "OI Change (Daily)" and snapshots:
-        first_oc = snapshots[0][1]
-        latest_aligned = df_to_plot.set_index(["strike", "option_type"])
-        first_aligned = first_oc.set_index(["strike", "option_type"])
-        # Calculate daily change
-        latest_aligned["oi_change_daily"] = latest_aligned["oi"] - first_aligned["oi"]
-        latest_aligned["oi_change_daily"] = latest_aligned["oi_change_daily"].fillna(latest_aligned["oi"])
-        df_to_plot = latest_aligned.reset_index()
-        y_col = "oi_change_daily"
-        yaxis_title = "Change in Open Interest (Contracts)"
-        chart_title_metric = "Change in Open Interest (Buildup vs. Unwinding)"
-    else:
-        y_col = "oi"
-        yaxis_title = "Open Interest (Contracts)"
-        chart_title_metric = "Total Open Interest Concentration"
-
-    # 3. Filter strikes based on view mode
-    atm_strike = summary["atm_strike"]
-    if view_mode == "Filtered Smart OI" and signal_strikes:
-        sig_keys = {(s["strike"], s["option_type"]) for s in signal_strikes}
-        visual_df = df_to_plot[df_to_plot.apply(lambda row: (row["strike"], row["option_type"]) in sig_keys, axis=1)].copy()
-        if visual_df.empty:
-            st.info("No active signal strikes passed the filters at this snapshot. Showing all near-ATM strikes.")
+        atm_strike = summary["atm_strike"]
+        if view_mode == "Filtered Smart OI" and signal_strikes:
+            sig_keys = {(s["strike"], s["option_type"]) for s in signal_strikes}
+            visual_df = df_to_plot[df_to_plot.apply(lambda row: (row["strike"], row["option_type"]) in sig_keys, axis=1)].copy()
+            if visual_df.empty:
+                st.info("No active signal strikes passed the filters at this snapshot. Showing all near-ATM strikes.")
+                visual_df = df_to_plot[df_to_plot["strike"].apply(lambda s: abs(s - atm_strike) <= 5 * analyzer.strike_step)].copy()
+                chart_title_filter = "All Near-ATM Strikes"
+            else:
+                chart_title_filter = "Filtered Smart OI Strikes"
+        else:
             visual_df = df_to_plot[df_to_plot["strike"].apply(lambda s: abs(s - atm_strike) <= 5 * analyzer.strike_step)].copy()
             chart_title_filter = "All Near-ATM Strikes"
-        else:
-            chart_title_filter = "Filtered Smart OI Strikes"
+
+        visual_df = visual_df.sort_values("strike")
+
+        fig_walls = go.Figure()
+        ce_data = visual_df[visual_df["option_type"] == "CE"]
+        pe_data = visual_df[visual_df["option_type"] == "PE"]
+        
+        fig_walls.add_trace(go.Bar(
+            x=ce_data["strike"],
+            y=ce_data[y_col],
+            name="Call OI (Resistance)",
+            marker_color="#ff4d6d"
+        ))
+        
+        fig_walls.add_trace(go.Bar(
+            x=pe_data["strike"],
+            y=pe_data[y_col],
+            name="Put OI (Support)",
+            marker_color="#00d084"
+        ))
+        
+        fig_walls.update_layout(
+            title=f"{chart_title_filter} — {chart_title_metric}",
+            xaxis_title="Strike Price",
+            yaxis_title=yaxis_title,
+            barmode="group",
+            template="plotly_dark",
+            height=380,
+            margin=dict(l=20, r=20, t=40, b=20),
+            hovermode="x unified"
+        )
+        
+        st.plotly_chart(fig_walls, use_container_width=True, key="oi_walls_chart")
     else:
-        visual_df = df_to_plot[df_to_plot["strike"].apply(lambda s: abs(s - atm_strike) <= 5 * analyzer.strike_step)].copy()
-        chart_title_filter = "All Near-ATM Strikes"
+        st.info("Waiting for option chain data to render visual walls...")
 
-    # Sort
-    visual_df = visual_df.sort_values("strike")
 
-    # Create side-by-side bar chart
-    fig_walls = go.Figure()
-    
-    ce_data = visual_df[visual_df["option_type"] == "CE"]
-    pe_data = visual_df[visual_df["option_type"] == "PE"]
-    
-    fig_walls.add_trace(go.Bar(
-        x=ce_data["strike"],
-        y=ce_data[y_col],
-        name="Call OI (Resistance)",
-        marker_color="#ff4d6d"
-    ))
-    
-    fig_walls.add_trace(go.Bar(
-        x=pe_data["strike"],
-        y=pe_data[y_col],
-        name="Put OI (Support)",
-        marker_color="#00d084"
-    ))
-    
-    fig_walls.update_layout(
-        title=f"{chart_title_filter} — {chart_title_metric}",
-        xaxis_title="Strike Price",
-        yaxis_title=yaxis_title,
-        barmode="group",
-        template="plotly_dark",
-        height=380,
-        margin=dict(l=20, r=20, t=40, b=20),
-        hovermode="x unified"
-    )
-    
-    st.plotly_chart(fig_walls, use_container_width=True, key="oi_walls_chart")
-else:
-    st.info("Waiting for option chain data to render visual walls...")
-
-# ===================================================================
-# --- TAB 4: PRO TRADER ANALYTICS ---
-# ===================================================================
-with tab_pro_trader:
+def render_tab_pro_trader(
+    latest_oc: pd.DataFrame, snapshots: list, spot_price: float, analyzer: SmartOIAnalyzer, prev_oc: pd.DataFrame, summary: dict
+):
+    """Render the Pro Trader Analytics tab."""
     st.subheader("🏦 Pro Trader Option Chain Analytics")
     st.caption("Institutional-grade breakdown: who is buying, who is selling, where the walls are, and what the premium market is pricing.")
 
-    # Compute all pro analytics
     first_oc = snapshots[0][1] if snapshots else None
     pro_positioning = pro_oc_analyzer.compute_buyer_seller_positioning(
         latest_oc, first_oc, spot_price, analyzer.strike_step
@@ -731,7 +614,7 @@ with tab_pro_trader:
         latest_oc, spot_price, analyzer.strike_step
     )
 
-    # ── 4a. BUYER vs SELLER SCOREBOARD ─────────────────────────────────
+    # Scoreboard
     st.markdown("### 🥊 Buyer vs Seller Scoreboard")
     st.caption("Aggregate OI flow breakdown — who is adding positions and which side dominates.")
 
@@ -781,9 +664,8 @@ with tab_pro_trader:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 4b. ATM PREMIUM ANALYSIS ───────────────────────────────────────
+    # ATM Premium Analysis
     st.markdown("### 💰 ATM Straddle Premium & Expected Move")
-
     atm_c1, atm_c2, atm_c3, atm_c4 = st.columns(4)
     with atm_c1:
         st.markdown(f"""
@@ -830,14 +712,13 @@ with tab_pro_trader:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 4c. CE − PE OI DIFFERENCE CHART ────────────────────────────────
+    # CE - PE OI Difference Chart
     st.markdown("### 📊 CE − PE Open Interest Difference")
     st.caption("Positive = CE OI dominates (bearish wall) | Negative = PE OI dominates (bullish support)")
 
     diff_data = pro_ce_pe.get("strike_diff", [])
     if diff_data:
         diff_df = pd.DataFrame(diff_data)
-        # Color: red for positive (bearish), green for negative (bullish)
         diff_df["color"] = diff_df["oi_diff"].apply(lambda x: "#ff4d6d" if x > 0 else "#00d084")
 
         fig_diff = go.Figure()
@@ -849,7 +730,6 @@ with tab_pro_trader:
             hovertemplate="Strike: ₹%{x:,.0f}<br>CE−PE OI: %{y:,}<extra></extra>"
         ))
 
-        # ATM marker line
         fig_diff.add_vline(
             x=pro_atm["atm_strike"],
             line_dash="dash",
@@ -870,17 +750,15 @@ with tab_pro_trader:
     else:
         st.info("No strike data available for CE−PE difference chart.")
 
-    # ── 4d. OI & VOLUME CONCENTRATION ──────────────────────────────────
+    # Concentration tables
     st.markdown("### 🧱 Top OI & Volume Concentration")
-
     conc_col1, conc_col2 = st.columns(2)
     with conc_col1:
         st.markdown("#### 🔴 Call (CE) Resistance Walls")
         ce_walls = pro_oi_conc.get("ce_walls", [])
         if ce_walls:
-            ce_df = pd.DataFrame(ce_walls)
             st.dataframe(
-                ce_df,
+                pd.DataFrame(ce_walls),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -897,9 +775,8 @@ with tab_pro_trader:
         st.markdown("#### 🟢 Put (PE) Support Walls")
         pe_walls = pro_oi_conc.get("pe_walls", [])
         if pe_walls:
-            pe_df = pd.DataFrame(pe_walls)
             st.dataframe(
-                pe_df,
+                pd.DataFrame(pe_walls),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
@@ -912,7 +789,6 @@ with tab_pro_trader:
         else:
             st.info("No PE wall data.")
 
-    # Volume concentration
     st.markdown("#### ⚡ Highest Volume Strikes (Intraday Action)")
     vol_col1, vol_col2 = st.columns(2)
     with vol_col1:
@@ -946,7 +822,6 @@ with tab_pro_trader:
                 }
             )
 
-    # ── 4e. ACTIONABLE TRADE INSIGHT ───────────────────────────────────
     st.markdown("---")
     st.markdown("### 🧠 Pro Trader Actionable Insight")
     pro_narrative = pro_oc_analyzer.generate_pro_summary(
@@ -959,14 +834,11 @@ with tab_pro_trader:
     """, unsafe_allow_html=True)
 
 
-# ===================================================================
-# --- TAB 5: IV SKEW & GREEKS ---
-# ===================================================================
-with tab_iv_greeks:
+def render_tab_iv_greeks(latest_oc: pd.DataFrame, spot_price: float, analyzer: SmartOIAnalyzer, pro_atm: dict):
+    """Render the IV Skew & Greeks tab."""
     st.subheader("📊 Implied Volatility Skew & Greeks Analysis")
     st.caption("Visualize the volatility surface and risk exposures across strikes.")
 
-    # Compute IV and Greeks
     pro_iv_data = pro_oc_analyzer.compute_iv_skew(
         latest_oc, spot_price, analyzer.strike_step
     )
@@ -974,7 +846,6 @@ with tab_iv_greeks:
         latest_oc, spot_price, analyzer.strike_step
     )
 
-    # ── 5a. IV SKEW INFO CARDS ─────────────────────────────────────────
     iv_c1, iv_c2, iv_c3, iv_c4 = st.columns(4)
     with iv_c1:
         atm_iv_val = pro_iv_data.get("atm_iv")
@@ -1014,14 +885,13 @@ with tab_iv_greeks:
         </div>
         """, unsafe_allow_html=True)
 
-    # ── 5b. IV SMILE / SKEW CURVE ──────────────────────────────────────
+    # IV curve chart
     st.markdown("### 📈 IV Smile / Skew Curve")
     ce_iv_curve = pro_iv_data.get("ce_iv_curve", [])
     pe_iv_curve = pro_iv_data.get("pe_iv_curve", [])
 
     if ce_iv_curve or pe_iv_curve:
         fig_iv = go.Figure()
-
         if ce_iv_curve:
             ce_iv_df = pd.DataFrame(ce_iv_curve)
             fig_iv.add_trace(go.Scatter(
@@ -1032,7 +902,6 @@ with tab_iv_greeks:
                 line=dict(color="#ff4d6d", width=2.5),
                 marker=dict(size=5),
             ))
-
         if pe_iv_curve:
             pe_iv_df = pd.DataFrame(pe_iv_curve)
             fig_iv.add_trace(go.Scatter(
@@ -1044,7 +913,6 @@ with tab_iv_greeks:
                 marker=dict(size=5),
             ))
 
-        # ATM vertical line
         atm_s = pro_atm.get("atm_strike", spot_price)
         fig_iv.add_vline(
             x=atm_s,
@@ -1068,7 +936,7 @@ with tab_iv_greeks:
     else:
         st.info("No IV data available for the selected snapshot.")
 
-    # ── 5c. GREEKS HEATMAP TABLE ───────────────────────────────────────
+    # Greeks heatmap
     st.markdown("### 🔥 Greeks Heatmap (Near-ATM Strikes)")
     st.caption("Delta, Gamma, Theta, Vega for CE and PE side-by-side. ATM row highlighted.")
 
@@ -1102,20 +970,18 @@ with tab_iv_greeks:
                 "PE ν": st.column_config.NumberColumn("PE Vega", format="%.2f"),
             }
         )
-
         if not pro_greeks.get("has_meaningful_greeks", False):
             st.warning("⚠️ Greeks values appear uniform — the broker may not be providing granular Greeks data. Delta/Gamma/Theta/Vega accuracy depends on broker feed quality.")
     else:
         st.info("No Greeks data available for the selected snapshot.")
 
-    # ── 5d. THETA DECAY BAR CHART ─────────────────────────────────────
+    # Theta decay
     st.markdown("### ⏳ Theta Decay by Strike")
     st.caption("Negative theta = time decay eating premium. Identify max-decay zones favored by option sellers.")
 
     if heatmap_data:
         theta_df = pd.DataFrame(heatmap_data)
         theta_df = theta_df[theta_df["ce_theta"].notna() | theta_df["pe_theta"].notna()].copy()
-
         if not theta_df.empty:
             fig_theta = go.Figure()
             fig_theta.add_trace(go.Bar(
@@ -1146,15 +1012,197 @@ with tab_iv_greeks:
         st.info("No Greeks data available for theta visualization.")
 
 
-# Add help section at bottom
-st.divider()
-st.markdown("""
-### 🧠 How to read Nifty Smart OI:
-- **Smart OI shows positioning:** Putting writing accumulation (Put Short Buildup) means institutional traders are selling puts, expecting Nifty to stay above that strike. This is a **Bullish positioning** signal. Call writing accumulation (Call Short Buildup) means institutions are writing calls, creating a **Bearish resistance** wall.
-- **Price Action shows direction:** We compare this positioning with the underlying price relative to **VWAP** and recent highs/lows.
-- **Bullish Confluence:** Put writing accumulating + Price breaking above VWAP/resistance + Volume expanding. Highly reliable long entries.
-- **Bearish Confluence:** Call writing accumulating + Price breaking below VWAP/support + Volume expanding. Highly reliable short entries.
-- **Divergence Handling:**
-  - *Rising Price + Bearish Smart OI:* Indicates a false rally or short squeeze with weak institutional buying follow-through. Expect reversals.
-  - *Falling Price + Bullish Smart OI:* Indicates a false decline or bull trap. Puts are being aggressively written at lows, expecting a reversal.
-""")
+def render_footer_help():
+    """Render the explanatory notes at the bottom of the page."""
+    st.divider()
+    st.markdown("""
+    ### 🧠 How to read Nifty Smart OI:
+    - **Smart OI shows positioning:** Putting writing accumulation (Put Short Buildup) means institutional traders are selling puts, expecting Nifty to stay above that strike. This is a **Bullish positioning** signal. Call writing accumulation (Call Short Buildup) means institutions are writing calls, creating a **Bearish resistance** wall.
+    - **Price Action shows direction:** We compare this positioning with the underlying price relative to **VWAP** and recent highs/lows.
+    - **Bullish Confluence:** Put writing accumulating + Price breaking above VWAP/resistance + Volume expanding. Highly reliable long entries.
+    - **Bearish Confluence:** Call writing accumulating + Price breaking below VWAP/support + Volume expanding. Highly reliable short entries.
+    - **Divergence Handling:**
+      - *Rising Price + Bearish Smart OI:* Indicates a false rally or short squeeze with weak institutional buying follow-through. Expect reversals.
+      - *Falling Price + Bullish Smart OI:* Indicates a false decline or bull trap. Puts are being aggressively written at lows, expecting a reversal.
+    """)
+
+
+def run_dashboard():
+    """Main function to run and render the Smart OI Dashboard."""
+    # Main page titles
+    st.title("📊 Nifty 50 Smart OI: Comparing With Price Action")
+    st.caption("Noise-filtered Institutional derivatives positioning correlated with real-time price action")
+    st.markdown("---")
+
+    # Inject Custom CSS styles
+    inject_custom_css()
+
+    # Sidebar Controls
+    st.sidebar.title("⚙️ Smart OI Controls")
+    st.sidebar.markdown("---")
+
+    symbol_map = {
+        "NIFTY 50": "NSE:NIFTY50-INDEX",
+        "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+        "SENSEX": "BSE:SENSEX-INDEX"
+    }
+    selected_symbol_label = st.sidebar.selectbox("Select Underlying", list(symbol_map.keys()), index=0)
+    db_symbol = symbol_map[selected_symbol_label]
+
+    available_dates = load_db_dates(db_symbol)
+    if not available_dates:
+        st.error(f"No option chain data found in database for {selected_symbol_label}.")
+        st.stop()
+
+    selected_date = st.sidebar.selectbox("Select Analysis Date", available_dates, index=0)
+
+    # Load Snapshots & Price Data
+    snapshots = load_db_snapshots(db_symbol, selected_date)
+    price_df = load_db_price_data(db_symbol, selected_date)
+    price_df = calculate_price_vwap(price_df)
+
+    if not snapshots:
+        st.warning(f"No snapshots loaded for {selected_symbol_label} on {selected_date}.")
+        st.stop()
+
+    latest_ts, latest_oc = snapshots[-1]
+    prev_oc = snapshots[-2][1] if len(snapshots) > 1 else None
+
+    # Initialize SmartOI Analyzer
+    analyzer = SmartOIAnalyzer(db_symbol)
+
+    # Calculate current spot price
+    spot_price = None
+    if not price_df.empty:
+        snap_price_df = price_df[price_df["timestamp"] <= latest_ts]
+        if not snap_price_df.empty:
+            spot_price = snap_price_df.iloc[-1]["close"]
+        else:
+            spot_price = price_df.iloc[-1]["close"]
+
+    # Run Smart OI analysis
+    analysis = analyzer.analyze_smart_oi(latest_oc, prev_oc, spot_price=spot_price)
+    signal = analysis["signal"]
+    signal_strikes = analysis["signal_strikes"]
+    summary = analysis["summary"]
+
+    # Run Confluence & Divergence detection
+    confluence_data = {}
+    if not price_df.empty:
+        snap_price_df = price_df[price_df["timestamp"] <= latest_ts]
+        confluence_data = analyzer.detect_confluence_divergence(
+            signal, snap_price_df if not snap_price_df.empty else price_df
+        )
+
+    # --- 1. CURRENT SMART OI VERDICT & OPTION BUYER'S PANEL ---
+    st.subheader("🚀 Option Buyer's Gamma & Short Covering Panel")
+
+    ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
+    pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
+
+    call_wall = ce_oc.loc[ce_oc["oi"].idxmax()]["strike"] if not ce_oc.empty else 0
+    put_wall = pe_oc.loc[pe_oc["oi"].idxmax()]["strike"] if not pe_oc.empty else 0
+
+    call_wall_oi = ce_oc.loc[ce_oc["oi"].idxmax()]["oi"] if not ce_oc.empty else 0
+    put_wall_oi = pe_oc.loc[pe_oc["oi"].idxmax()]["oi"] if not pe_oc.empty else 0
+
+    dist_to_call_wall = ((call_wall - spot_price) / spot_price) * 100 if spot_price else 0
+    dist_to_put_wall = ((spot_price - put_wall) / spot_price) * 100 if spot_price else 0
+
+    atm_strike = summary["atm_strike"]
+    ce_unwinding_atm = ce_oc[(ce_oc["strike"] == atm_strike) & (ce_oc["oi_change"] < 0)]
+    pe_unwinding_atm = pe_oc[(pe_oc["strike"] == atm_strike) & (pe_oc["oi_change"] < 0)]
+
+    total_ce_oi = latest_oc[latest_oc["option_type"] == "CE"]["oi"].sum()
+    total_pe_oi = latest_oc[latest_oc["option_type"] == "PE"]["oi"].sum()
+    pcr = total_pe_oi / total_ce_oi if total_ce_oi > 0 else 1.0
+
+    # Calculate Max Pain
+    strikes = latest_oc["strike"].unique()
+    total_pain = []
+    for s in strikes:
+        pain = 0
+        for _, row in latest_oc.iterrows():
+            stk = row["strike"]
+            oi_val = row["oi"]
+            opt_type = row["option_type"]
+            if opt_type == "CE" and stk < s:
+                pain += (s - stk) * oi_val
+            elif opt_type == "PE" and stk > s:
+                pain += (stk - s) * oi_val
+        total_pain.append(pain)
+    max_pain_strike = strikes[np.argmin(total_pain)] if len(total_pain) > 0 else spot_price
+
+    # Determine Option Buyer Signal
+    buyer_verdict, buyer_desc, buyer_color = determine_option_buyer_signal(
+        price_df, spot_price, dist_to_call_wall, dist_to_put_wall,
+        call_wall, put_wall, ce_unwinding_atm, pe_unwinding_atm, atm_strike
+    )
+
+    # Render Verdict Panel Card
+    render_verdict_card(buyer_verdict, buyer_desc, buyer_color)
+
+    # Calculate IV Status
+    atm_iv_val = latest_oc[latest_oc["strike"] == atm_strike]["iv"].mean() if not latest_oc.empty else None
+    iv_status = "Neutral"
+    iv_color = "#00b4d8"
+    if atm_iv_val:
+        if atm_iv_val < 12.0:
+            iv_status = "Cheap Volatility"
+            iv_color = "#00d084"
+        elif atm_iv_val > 17.0:
+            iv_status = "Expensive Premium"
+            iv_color = "#ff4d6d"
+
+    # Render Metrics Grid
+    render_metrics_grid(
+        call_wall, call_wall_oi, dist_to_call_wall,
+        put_wall, put_wall_oi, dist_to_put_wall,
+        spot_price, max_pain_strike,
+        pcr, atm_iv_val, iv_status, iv_color
+    )
+
+    # Confluence Alert Box
+    render_confluence_alert(confluence_data)
+
+    st.markdown("---")
+
+    # --- 2. TRANSITIONS & CHARTING ---
+    tab_chart, tab_transitions, tab_strikes, tab_pro_trader, tab_iv_greeks = st.tabs([
+        "📈 Price Action & Smart OI Overlay",
+        "⏱️ Signal Transitions Timeline",
+        "🎯 Filtered Signal Strikes",
+        "🏦 Pro Trader Analytics",
+        "📊 IV Skew & Greeks"
+    ])
+
+    with tab_chart:
+        render_tab_chart(price_df, snapshots, max_pain_strike, analyzer, selected_symbol_label)
+
+    with tab_transitions:
+        render_tab_transitions(snapshots, price_df, analyzer)
+
+    with tab_strikes:
+        render_tab_strikes(signal_strikes)
+
+    # Render Institutional Walls (cumulative CE vs PE OI bar chart, placed outside/below tabs container)
+    render_institutional_walls(latest_oc, snapshots, summary, analyzer, signal_strikes)
+
+    with tab_pro_trader:
+        render_tab_pro_trader(latest_oc, snapshots, spot_price, analyzer, prev_oc, summary)
+
+    with tab_iv_greeks:
+        pro_atm = pro_oc_analyzer.compute_atm_premium_analysis(
+            latest_oc, spot_price, analyzer.strike_step
+        )
+        render_tab_iv_greeks(latest_oc, spot_price, analyzer, pro_atm)
+
+    # Render footer information help section
+    render_footer_help()
+
+
+if __name__ == "__main__":
+    run_dashboard()
+else:
+    # Ensure Streamlit navigation exec() context runs the dashboard
+    run_dashboard()
