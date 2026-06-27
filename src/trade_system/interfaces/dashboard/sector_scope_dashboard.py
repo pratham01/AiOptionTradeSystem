@@ -11,6 +11,10 @@ from trade_system.infrastructure.database.connection import get_engine
 from sqlalchemy import text
 from trade_system.infrastructure.data.fo_universe import get_sector_mapping, get_stocks_by_sector
 from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
+from trade_system.application.analysis.smart_entry_trigger import SmartEntryTrigger
+from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.config import Settings
 
 # --- COMPACT CSS STYLING ---
 st.markdown("""
@@ -667,12 +671,13 @@ else:
     # -------------------------------------------------------------
     # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Drill-Down
     # -------------------------------------------------------------
-    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown, tab_compression = st.tabs([
+    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown, tab_compression, tab_edge = st.tabs([
         "📊 Gainers & Losers",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
         "🔎 Sector Drill-Down",
-        "📦 Volatility Squeeze"
+        "📦 Volatility Squeeze",
+        "⚡ Intraday Edge Finder"
     ])
 
     # ---- TAB 1: Gainers & Losers ----
@@ -1160,6 +1165,264 @@ else:
                         )
                 else:
                     st.info("No stock data returned from indicator scanning.")
+
+    # ---- TAB 6: Intraday Edge Finder ----
+    with tab_edge:
+        st.subheader("⚡ Multi-Layer Intraday Edge Finder")
+        st.caption("Confluence-based scoring system analyzing 7 layers (Sector, Relative Strength, VWAP, Volume/CVD, Timing, Supertrend, and Compression) to find high-probability intraday setups.")
+        
+        def get_approx_strike(ltp):
+            if ltp <= 0:
+                return 0
+            if ltp > 10000:
+                step = 100
+            elif ltp > 5000:
+                step = 50
+            elif ltp > 2000:
+                step = 20
+            elif ltp > 1000:
+                step = 10
+            elif ltp > 500:
+                step = 5
+            elif ltp > 200:
+                step = 2.5
+            else:
+                step = 1.0
+            return round(ltp / step) * step
+
+        # 1. UI Controls
+        control_col1, control_col2, control_col3 = st.columns([1, 1, 1])
+        with control_col1:
+            min_score = st.slider("Minimum Edge Score", min_value=30, max_value=100, value=65, step=5, key="edge_min_score_slider")
+        with control_col2:
+            direction_filter = st.selectbox("Direction Filter", options=["All", "CALL only", "PUT only"], key="edge_dir_filter_sb")
+        with control_col3:
+            show_triggered_only = st.checkbox("Show Triggered Entries Only", value=False, key="edge_triggered_only_cb")
+
+        # 2. Scanning and Scoring
+        with st.spinner("Analyzing 7 confluence layers and scanning F&O universe..."):
+            try:
+                scorer = IntradayEdgeScorer()
+                edges = scorer.scan(
+                    target_date=target_date,
+                    sector_perf=sector_perf,
+                    stock_perf=merged_closes
+                )
+                
+                # Apply entry triggers to the candidates
+                trigger_eval = SmartEntryTrigger()
+                enriched_edges = []
+                for edge in edges:
+                    # Filter by score
+                    if edge.final_score < min_score:
+                        continue
+                    # Filter by direction
+                    if direction_filter == "CALL only" and edge.direction != "CALL":
+                        continue
+                    if direction_filter == "PUT only" and edge.direction != "PUT":
+                        continue
+                        
+                    # Find matching 15m candles
+                    sym_df = df_filtered[df_filtered["symbol"] == edge.symbol]
+                    if not sym_df.empty:
+                        trig = trigger_eval.evaluate(
+                            direction=edge.direction,
+                            ltp=edge.ltp,
+                            atr=edge.atr,
+                            df_15m=sym_df,
+                            target_date=target_date
+                        )
+                        if trig:
+                            edge.entry_price = trig.entry_price
+                            edge.stop_loss = trig.stop_loss
+                            edge.target_1 = trig.target_1
+                            edge.target_2 = trig.target_2
+                            edge.entry_status = trig.status
+                            
+                    # Filter by entry status if checked
+                    if show_triggered_only and edge.entry_status != "TRIGGERED":
+                        continue
+                        
+                    enriched_edges.append(edge)
+            except Exception as e:
+                st.error(f"Error running Intraday Edge Scorer: {e}")
+                enriched_edges = []
+
+        if not enriched_edges:
+            st.info("No stocks match the selected edge score and trigger filters. Try lowering the Minimum Edge Score slider.")
+        else:
+            # 3. Display High-Conviction Dashboard Cards for the Top 3
+            top_3 = sorted([e for e in enriched_edges if e.final_score >= 70], key=lambda x: x.final_score, reverse=True)[:3]
+            
+            if top_3:
+                st.markdown("### 🏆 Top High-Conviction Setups")
+                card_cols = st.columns(len(top_3))
+                for idx, col in enumerate(card_cols):
+                    edge = top_3[idx]
+                    with col:
+                        # Styling based on direction
+                        dir_color = "#22c55e" if edge.direction == "CALL" else "#ef4444"
+                        dir_bg = "rgba(34, 197, 94, 0.1)" if edge.direction == "CALL" else "rgba(239, 68, 68, 0.1)"
+                        dir_border = "rgba(34, 197, 94, 0.3)" if edge.direction == "CALL" else "rgba(239, 68, 68, 0.3)"
+                        
+                        clean_sym = edge.symbol.replace("NSE:", "").replace("-EQ", "")
+                        approx_strike = get_approx_strike(edge.ltp)
+                        
+                        status_badge = "⚪ WAITING"
+                        if edge.entry_status == "TRIGGERED":
+                            status_badge = "🟢 TRIGGERED"
+                        elif edge.entry_status == "APPROACHING":
+                            status_badge = "🟡 APPROACHING"
+                            
+                        st.markdown(f"""
+                        <div style="background:{dir_bg}; border: 1px solid {dir_border}; padding:15px; border-radius:10px; margin-bottom:15px;">
+                            <div style="display:flex; justify-content:space-between; align-items:center;">
+                                <span style="font-size:1.3rem; font-weight:700; color:#ffffff;">{clean_sym}</span>
+                                <span style="background:{dir_color}; color:#111827; font-weight:800; font-size:0.75rem; padding:2px 8px; border-radius:4px;">{edge.direction}</span>
+                            </div>
+                            <div style="color:#94a3b8; font-size:0.8rem; margin-top:2px;">Sector: {edge.sector}</div>
+                            <hr style="margin:10px 0; border-color:rgba(255,255,255,0.08);"/>
+                            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                                <span style="color:#94a3b8; font-size:0.85rem;">Edge Score:</span>
+                                <span style="color:#ffffff; font-weight:700; font-size:1.1rem;">{edge.final_score:.0f}/100</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                                <span style="color:#94a3b8; font-size:0.85rem;">LTP:</span>
+                                <span style="color:#ffffff; font-weight:700;">₹{edge.ltp:,.2f} ({edge.change_pct:+.2f}%)</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                                <span style="color:#94a3b8; font-size:0.85rem;">Entry Status:</span>
+                                <span style="color:{dir_color if edge.entry_status == 'TRIGGERED' else '#eab308' if edge.entry_status == 'APPROACHING' else '#94a3b8'}; font-weight:700;">{status_badge}</span>
+                            </div>
+                            <hr style="margin:10px 0; border-color:rgba(255,255,255,0.08);"/>
+                            <div style="font-size:0.85rem; margin-bottom:5px; color:#a78bfa; font-weight:600;">📐 Recommended Levels:</div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
+                                <span style="color:#94a3b8;">Entry:</span>
+                                <span style="color:#ffffff; font-weight:700;">₹{edge.entry_price:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
+                                <span style="color:#94a3b8;">Stop Loss:</span>
+                                <span style="color:#ef4444; font-weight:700;">₹{edge.stop_loss:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
+                                <span style="color:#94a3b8;">Target 1:</span>
+                                <span style="color:#22c55e; font-weight:700;">₹{edge.target_1:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
+                                <span style="color:#94a3b8;">Target 2:</span>
+                                <span style="color:#22c55e; font-weight:700;">₹{edge.target_2:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
+                                <span style="color:#94a3b8;">Risk-Reward:</span>
+                                <span style="color:#eab308; font-weight:700;">{edge.risk_reward:.2f}R</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
+                                <span style="color:#94a3b8;">Option Strike:</span>
+                                <span style="color:#38bdf8; font-weight:700;">₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'}</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Alert Button
+                        msg = (
+                            f"⚡ <b>Intraday Edge Alert</b> ⚡\n\n"
+                            f"Symbol: <b>#{clean_sym}</b> ({edge.sector})\n"
+                            f"Direction: <b>{'🟢 BUY CALL' if edge.direction == 'CALL' else '🔴 BUY PUT'}</b>\n"
+                            f"Edge Score: <b>{edge.final_score:.0f}/100</b>\n"
+                            f"LTP: ₹{edge.ltp:,.2f} ({edge.change_pct:+.2f}%)\n"
+                            f"Status: <b>{edge.entry_status}</b>\n\n"
+                            f"📐 <b>Levels:</b>\n"
+                            f"• Entry: ₹{edge.entry_price:,.2f}\n"
+                            f"• Stop Loss: ₹{edge.stop_loss:,.2f}\n"
+                            f"• Target 1: ₹{edge.target_1:,.2f}\n"
+                            f"• Target 2: ₹{edge.target_2:,.2f}\n"
+                            f"• Risk-Reward: <b>{edge.risk_reward:.2f}R</b>\n\n"
+                            f"💡 <i>ATM Option: ₹{approx_strike:.0f} {edge.direction == 'CALL' and 'CE' or 'PE'}</i>"
+                        )
+                        
+                        if st.button(f"📢 Alert {clean_sym}", key=f"alert_btn_{edge.symbol}"):
+                            try:
+                                settings = Settings.load()
+                                notifier = TelegramNotifier(settings.telegram.bot_token, settings.telegram.chat_id)
+                                notifier.send(msg)
+                                st.toast(f"✅ Alert for {clean_sym} sent successfully!")
+                            except Exception as alert_ex:
+                                st.error(f"Failed to send alert: {alert_ex}")
+
+            # 4. Ranked Table of all matching setups
+            st.markdown("### 📋 Full Scored Watchlist")
+            
+            table_rows = []
+            for edge in enriched_edges:
+                clean_sym = edge.symbol.replace("NSE:", "").replace("-EQ", "")
+                
+                # Extract layer score status icons
+                sec_ok = "🟢" if edge.layers["sector_momentum"].direction == edge.direction else "⚪"
+                rs_ok = "🟢" if edge.layers["relative_strength"].direction == edge.direction else "⚪"
+                vwap_ok = "🟢" if edge.layers["vwap_location"].direction == edge.direction else "⚪"
+                vol_ok = "🟢" if edge.layers["volume_confirmation"].direction == edge.direction else "⚪"
+                timing_ok = "🟢" if edge.layers["momentum_timing"].direction == edge.direction else "⚪"
+                st_ok = "🟢" if edge.layers["supertrend_alignment"].direction == edge.direction else "⚪"
+                comp_ok = "🟢" if edge.layers["compression_release"].direction == edge.direction else "⚪"
+                
+                table_rows.append({
+                    "Symbol": clean_sym,
+                    "Sector": edge.sector,
+                    "Edge Score": edge.final_score,
+                    "Dir": "🟢 CALL" if edge.direction == "CALL" else "🔴 PUT",
+                    "Status": edge.entry_status,
+                    "LTP (₹)": edge.ltp,
+                    "Chg %": edge.change_pct,
+                    "Sector Mtm": sec_ok,
+                    "Rel Strength": rs_ok,
+                    "VWAP Loc": vwap_ok,
+                    "Vol Conf": vol_ok,
+                    "Timing": timing_ok,
+                    "ST Align": st_ok,
+                    "Comp Release": comp_ok,
+                    "_symbol": edge.symbol
+                })
+                
+            if table_rows:
+                df_table = pd.DataFrame(table_rows)
+                st.dataframe(
+                    df_table.style.format({
+                        "LTP (₹)": "{:.2f}",
+                        "Chg %": "{:+.2f}%",
+                        "Edge Score": "{:.0f}/100"
+                    }).applymap(
+                        lambda v: "color: #22c55e; font-weight:700" if v == "🟢 CALL" else "color: #ef4444; font-weight:700" if v == "🔴 PUT" else "",
+                        subset=["Dir"]
+                    ).applymap(
+                        lambda v: "color: #22c55e; font-weight:700" if v == "TRIGGERED" else "color: #eab308; font-weight:700" if v == "APPROACHING" else "",
+                        subset=["Status"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="edge_finder_table"
+                )
+                
+                # Check for table selection drill down
+                selected_row = st.session_state.get("edge_finder_table", {}).get("selection", {}).get("rows", [])
+                if selected_row:
+                    row_idx = selected_row[0]
+                    if 0 <= row_idx < len(enriched_edges):
+                        selected_edge = enriched_edges[row_idx]
+                        
+                        st.markdown(f"### 🔍 Detailed Analysis: **{selected_edge.symbol.replace('NSE:', '').replace('-EQ', '')}**")
+                        
+                        # 7 Layers breakdown
+                        st.markdown("#### 🛡️ Confluence Layer Breakdown")
+                        for layer_key, result in selected_edge.layers.items():
+                            layer_label = layer_key.replace("_", " ").title()
+                            
+                            # Subscore bar
+                            st.markdown(f"**{layer_label}** — {result.detail}")
+                            bar_color = "#22c55e" if result.direction == "CALL" else "#ef4444" if result.direction == "PUT" else "#94a3b8"
+                            bar_width = int(result.score * 100)
+                            st.markdown(f'<div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:{bar_width}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
 
     # Footer
     st.caption("🧭 Sector Scope | AI Trade System V2 | Data refreshes every 60s")
