@@ -677,13 +677,14 @@ else:
     # -------------------------------------------------------------
     # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Drill-Down
     # -------------------------------------------------------------
-    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown, tab_compression, tab_edge = st.tabs([
+    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown, tab_compression, tab_edge, tab_cycle = st.tabs([
         "📊 Gainers & Losers",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
         "🔎 Sector Drill-Down",
         "📦 Volatility Squeeze",
-        "⚡ Intraday Edge Finder"
+        "⚡ Intraday Edge Finder",
+        "📅 Off-Market Cycle Analyst"
     ])
 
     # ---- TAB 1: Gainers & Losers ----
@@ -1474,6 +1475,231 @@ else:
                             bar_color = "#22c55e" if result.direction == "CALL" else "#ef4444" if result.direction == "PUT" else "#94a3b8"
                             bar_width = int(result.score * 100)
                             st.markdown(f'<div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:{bar_width}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
+
+    # ---- TAB 7: Off-Market Cycle Analyst ----
+    with tab_cycle:
+        st.markdown("### 📅 Time Cycles & Off-Market Analyst")
+        st.caption("Quantitative swing cycle phase estimation and daily pivot calculation for off-market preparation.")
+        
+        # Load F&O symbols list
+        all_symbols = ["NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX"] + list(get_sector_mapping().keys())
+        selected_cycle_symbol = st.selectbox(
+            "Select Asset for Analysis",
+            options=all_symbols,
+            key="selected_cycle_symbol"
+        )
+        
+        if selected_cycle_symbol:
+            engine = get_engine()
+            # Fetch daily candles (180 days lookback to find cycle history)
+            query_cycle = text("""
+                SELECT timestamp, open, high, low, close, volume 
+                FROM ohlcv_daily 
+                WHERE symbol = :sym AND timestamp >= date(:target_date, '-180 days') AND timestamp <= :target_date
+                ORDER BY timestamp ASC
+            """)
+            try:
+                with engine.connect() as conn:
+                    df_cycle = pd.read_sql(query_cycle, conn, params={
+                        "sym": selected_cycle_symbol,
+                        "target_date": target_date.isoformat()
+                    })
+                
+                if df_cycle.empty or len(df_cycle) < 30:
+                    st.warning("Insufficient daily historical candles in database to run cycle analysis.")
+                else:
+                    df_cycle['timestamp'] = pd.to_datetime(df_cycle['timestamp'], format='mixed')
+                    
+                    # 1. Hurst Swing Cycle Calculations
+                    df_c = df_cycle.copy().sort_values("timestamp").reset_index(drop=True)
+                    window = 10
+                    troughs = []
+                    peaks = []
+                    n = len(df_c)
+                    
+                    for idx in range(window, n - window):
+                        val = df_c.loc[idx, "close"]
+                        sub = df_c.loc[idx - window : idx + window, "close"]
+                        if val == sub.min():
+                            troughs.append((df_c.loc[idx, "timestamp"], val, idx))
+                        elif val == sub.max():
+                            peaks.append((df_c.loc[idx, "timestamp"], val, idx))
+                            
+                    if not troughs:
+                        min_idx = df_c["close"].idxmin()
+                        troughs.append((df_c.loc[min_idx, "timestamp"], df_c.loc[min_idx, "close"], min_idx))
+                        
+                    cycle_lengths = []
+                    for j in range(1, len(troughs)):
+                        diff = (troughs[j][0] - troughs[j-1][0]).days
+                        cycle_lengths.append(diff)
+                        
+                    avg_cycle = np.mean(cycle_lengths) if cycle_lengths else 20.0
+                    if pd.isna(avg_cycle) or avg_cycle <= 0:
+                        avg_cycle = 20.0
+                        
+                    last_trough_date, last_trough_val, last_trough_idx = troughs[-1]
+                    latest_row = df_c.iloc[-1]
+                    days_elapsed = (latest_row["timestamp"].date() - last_trough_date.date()).days
+                    trading_days_elapsed = max(0, int(days_elapsed * 5 / 7))
+                    
+                    t_trading = avg_cycle * 5 / 7
+                    if t_trading <= 0:
+                        t_trading = 15.0
+                    progress = trading_days_elapsed / t_trading
+                    
+                    if progress < 0.35:
+                        phase = "Fresh Impulse (Rising)"
+                        phase_icon = "📈"
+                        bias = "BULLISH (High Probability Long)"
+                        color = "#22c55e"
+                    elif 0.35 <= progress <= 0.65:
+                        phase = "Exhaustion Zone (Peaking)"
+                        phase_icon = "⚠️"
+                        bias = "NEUTRAL (Risk of Pullback, Avoid Longs)"
+                        color = "#eab308"
+                    else:
+                        phase = "Reversion Phase (Falling)"
+                        phase_icon = "📉"
+                        bias = "BEARISH (Look for Short Entries)"
+                        color = "#ef4444"
+                        
+                    # Metrics Grid
+                    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                    col_m1.metric("Est. Cycle Period", f"{avg_cycle:.1f} Calendar Days")
+                    col_m2.metric("Cycle Progress", f"{progress:.0%} ({trading_days_elapsed:.0f}/{t_trading:.0f} Trading Days)")
+                    col_m3.markdown(f"""
+                    <div style="background: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); text-align: center;">
+                        <div style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 2px;">Current Phase</div>
+                        <div style="color: {color}; font-weight: 700; font-size: 1.1rem;">{phase_icon} {phase}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    col_m4.markdown(f"""
+                    <div style="background: rgba(30, 41, 59, 0.5); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); text-align: center;">
+                        <div style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 2px;">Trading Bias</div>
+                        <div style="color: {color}; font-weight: 700; font-size: 1.1rem;">{bias}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # 2. Charts: Price History and Cycle Wave
+                    col_chart1, col_chart2 = st.columns(2)
+                    
+                    with col_chart1:
+                        st.markdown("##### 📈 Swing Peaks & Troughs")
+                        fig_price = go.Figure()
+                        fig_price.add_trace(go.Scatter(
+                            x=df_c["timestamp"], y=df_c["close"],
+                            name="Close Price", line=dict(color="#38bdf8", width=2)
+                        ))
+                        # Add Troughs
+                        tr_dates = [t[0] for t in troughs]
+                        tr_vals = [t[1] for t in troughs]
+                        fig_price.add_trace(go.Scatter(
+                            x=tr_dates, y=tr_vals,
+                            mode="markers", name="Troughs (Bottoms)",
+                            marker=dict(symbol="triangle-up", size=12, color="#22c55e")
+                        ))
+                        # Add Peaks
+                        pk_dates = [p[0] for p in peaks]
+                        pk_vals = [p[1] for p in peaks]
+                        fig_price.add_trace(go.Scatter(
+                            x=pk_dates, y=pk_vals,
+                            mode="markers", name="Peaks (Tops)",
+                            marker=dict(symbol="triangle-down", size=12, color="#ef4444")
+                        ))
+                        fig_price.update_layout(
+                            height=350, margin=dict(l=0, r=0, t=10, b=0),
+                            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig_price, use_container_width=True)
+                        
+                    with col_chart2:
+                        st.markdown("##### 🌊 Cycle Phase Wave")
+                        # Draw a sine wave representing the cycle phase progression
+                        wave_x = np.linspace(0, 1, 100)
+                        wave_y = -np.cos(2 * np.pi * wave_x)
+                        
+                        fig_wave = go.Figure()
+                        # Base Sine Wave
+                        fig_wave.add_trace(go.Scatter(
+                            x=wave_x, y=wave_y,
+                            mode="lines", name="Cycle Phase",
+                            line=dict(color="#a78bfa", width=2, dash="dash")
+                        ))
+                        # Current Position dot
+                        curr_progress = min(1.0, max(0.0, progress))
+                        curr_y = -np.cos(2 * np.pi * curr_progress)
+                        fig_wave.add_trace(go.Scatter(
+                            x=[curr_progress], y=[curr_y],
+                            mode="markers", name="Current Phase",
+                            marker=dict(size=14, color=color, symbol="circle")
+                        ))
+                        fig_wave.update_layout(
+                            height=350, margin=dict(l=0, r=0, t=10, b=0),
+                            plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                            xaxis=dict(title="Cycle Progress", tickformat=".0%"),
+                            yaxis=dict(title="Amplitude (Bullish vs Bearish)", tickvals=[-1, 0, 1], ticktext=["Trough (Buy)", "Neutral", "Peak (Sell)"]),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig_wave, use_container_width=True)
+                        
+                    # 3. Off-Market Calculations (DeMark, Camarilla, Volume)
+                    st.markdown("---")
+                    st.markdown("##### 🛡️ Off-Market Prep Levels (Next Session)")
+                    
+                    last_c = float(latest_row["close"])
+                    last_o = float(latest_row["open"])
+                    last_h = float(latest_row["high"])
+                    last_l = float(latest_row["low"])
+                    last_v = float(latest_row["volume"])
+                    
+                    # Demark Projector
+                    if last_c > last_o:
+                        demark_x = last_h + last_l + last_c + last_h
+                    elif last_c < last_o:
+                        demark_x = last_h + last_l + last_c + last_l
+                    else:
+                        demark_x = last_h + last_l + last_c + last_c
+                    proj_h = demark_x / 2 - last_l
+                    proj_l = demark_x / 2 - last_h
+                    
+                    # Camarilla
+                    rng = last_h - last_l
+                    r4 = last_c + rng * 1.1 / 2
+                    r3 = last_c + rng * 1.1 / 4
+                    s3 = last_c - rng * 1.1 / 4
+                    s4 = last_c - rng * 1.1 / 2
+                    
+                    # Volume Z-score
+                    avg_v_20 = df_c["volume"].tail(20).mean()
+                    std_v_20 = df_c["volume"].tail(20).std()
+                    vol_z = (last_v - avg_v_20) / std_v_20 if std_v_20 > 0 else 0.0
+                    vol_status = "High Institutional (Accumulation/Distribution)" if vol_z > 1.5 else "Neutral/Speculative Noise"
+                    
+                    col_p1, col_p2, col_p3 = st.columns(3)
+                    
+                    with col_p1:
+                        st.markdown("🎯 **DeMark Next-Day Range**")
+                        st.markdown(f"• **Projected High**: ₹{proj_h:,.2f}")
+                        st.markdown(f"• **Projected Low**: ₹{proj_l:,.2f}")
+                        st.markdown(f"• **Previous Close**: ₹{last_c:,.2f}")
+                        
+                    with col_p2:
+                        st.markdown("📐 **Camarilla Key Pivots**")
+                        st.markdown(f"• **Resistance R4**: ₹{r4:,.2f} *(Breakout target)*")
+                        st.markdown(f"• **Resistance R3**: ₹{r3:,.2f} *(Mean-reversion short)*")
+                        st.markdown(f"• **Support S3**: ₹{s3:,.2f} *(Mean-reversion long)*")
+                        st.markdown(f"• **Support S4**: ₹{s4:,.2f} *(Breakdown target)*")
+                        
+                    with col_p3:
+                        st.markdown("📊 **Volume Profile Prep**")
+                        st.markdown(f"• **Session Volume**: {last_v:,.0f}")
+                        st.markdown(f"• **Volume Z-Score**: `{vol_z:+.2f}`")
+                        st.markdown(f"• **Institutional Scan**: **{vol_status}**")
+                        
+            except Exception as ex_cycle:
+                st.warning(f"Error computing cycles: {ex_cycle}")
 
     # Footer
     st.caption("🧭 Sector Scope | AI Trade System V2 | Data refreshes every 60s")
