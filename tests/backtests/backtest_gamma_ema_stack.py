@@ -15,6 +15,7 @@ Rules:
 import os
 import argparse
 import logging
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from glob import glob
@@ -25,6 +26,8 @@ from trade_system.infrastructure.database.connection import get_engine
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)
+
+ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def compute_daily_gex_series(symbol: str, engine) -> pd.DataFrame:
@@ -136,47 +139,79 @@ def run_gex_backtest(df: pd.DataFrame, symbol: str, engine) -> List[dict]:
         if position is not None:
             # Evaluate Exits
             if position == "LONG":
+                risk = abs(entry_price - sl_price)
                 if curr_price >= target_price:
-                    pnl = (target_price - entry_price) / entry_price * 100 * size_mult
+                    pts = (target_price - entry_price) * size_mult
+                    r_mult = pts / risk if risk > 0 else 0.0
                     trades.append({
-                        "symbol": symbol, "type": "LONG", "pnl": pnl, 
-                        "gex": gex_regime, "exit_reason": "TARGET", "date": trade_date
+                        "symbol": symbol, "direction": "LONG", "points_captured": pts,
+                        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": entry_price, "stop_loss": sl_price, "take_profit": target_price,
+                        "exit_time": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_price": target_price, "exit_reason": "TARGET_HIT",
+                        "risk_points": risk, "r_multiple": r_mult, "gex": gex_regime
                     })
                     position = None
                 elif curr_price <= sl_price:
-                    pnl = (sl_price - entry_price) / entry_price * 100 * size_mult
+                    pts = (sl_price - entry_price) * size_mult
+                    r_mult = pts / risk if risk > 0 else 0.0
                     trades.append({
-                        "symbol": symbol, "type": "LONG", "pnl": pnl, 
-                        "gex": gex_regime, "exit_reason": "STOP_LOSS", "date": trade_date
+                        "symbol": symbol, "direction": "LONG", "points_captured": pts,
+                        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": entry_price, "stop_loss": sl_price, "take_profit": target_price,
+                        "exit_time": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_price": sl_price, "exit_reason": "SL_HIT",
+                        "risk_points": risk, "r_multiple": r_mult, "gex": gex_regime
                     })
                     position = None
                 elif is_eod:
-                    pnl = (curr_price - entry_price) / entry_price * 100 * size_mult
+                    pts = (curr_price - entry_price) * size_mult
+                    r_mult = pts / risk if risk > 0 else 0.0
                     trades.append({
-                        "symbol": symbol, "type": "LONG", "pnl": pnl, 
-                        "gex": gex_regime, "exit_reason": "EOD", "date": trade_date
+                        "symbol": symbol, "direction": "LONG", "points_captured": pts,
+                        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": entry_price, "stop_loss": sl_price, "take_profit": target_price,
+                        "exit_time": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_price": curr_price, "exit_reason": "EOD_EXIT",
+                        "risk_points": risk, "r_multiple": r_mult, "gex": gex_regime
                     })
                     position = None
             elif position == "SHORT":
+                risk = abs(sl_price - entry_price)
                 if curr_price <= target_price:
-                    pnl = (entry_price - target_price) / entry_price * 100 * size_mult
+                    pts = (entry_price - target_price) * size_mult
+                    r_mult = pts / risk if risk > 0 else 0.0
                     trades.append({
-                        "symbol": symbol, "type": "SHORT", "pnl": pnl, 
-                        "gex": gex_regime, "exit_reason": "TARGET", "date": trade_date
+                        "symbol": symbol, "direction": "SHORT", "points_captured": pts,
+                        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": entry_price, "stop_loss": sl_price, "take_profit": target_price,
+                        "exit_time": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_price": target_price, "exit_reason": "TARGET_HIT",
+                        "risk_points": risk, "r_multiple": r_mult, "gex": gex_regime
                     })
                     position = None
                 elif curr_price >= sl_price:
-                    pnl = (entry_price - sl_price) / entry_price * 100 * size_mult
+                    pts = (entry_price - sl_price) * size_mult
+                    r_mult = pts / risk if risk > 0 else 0.0
                     trades.append({
-                        "symbol": symbol, "type": "SHORT", "pnl": pnl, 
-                        "gex": gex_regime, "exit_reason": "STOP_LOSS", "date": trade_date
+                        "symbol": symbol, "direction": "SHORT", "points_captured": pts,
+                        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": entry_price, "stop_loss": sl_price, "take_profit": target_price,
+                        "exit_time": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_price": sl_price, "exit_reason": "SL_HIT",
+                        "risk_points": risk, "r_multiple": r_mult, "gex": gex_regime
                     })
                     position = None
                 elif is_eod:
-                    pnl = (entry_price - curr_price) / entry_price * 100 * size_mult
+                    pts = (entry_price - curr_price) * size_mult
+                    r_mult = pts / risk if risk > 0 else 0.0
                     trades.append({
-                        "symbol": symbol, "type": "SHORT", "pnl": pnl, 
-                        "gex": gex_regime, "exit_reason": "EOD", "date": trade_date
+                        "symbol": symbol, "direction": "SHORT", "points_captured": pts,
+                        "entry_time": entry_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_price": entry_price, "stop_loss": sl_price, "take_profit": target_price,
+                        "exit_time": row["timestamp"].strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_price": curr_price, "exit_reason": "EOD_EXIT",
+                        "risk_points": risk, "r_multiple": r_mult, "gex": gex_regime
                     })
                     position = None
         else:
@@ -258,7 +293,7 @@ def main():
     print(f"Starting GEX + EMA Stack backtest on Database (15m charts)...")
     print(f"Window: {start_date} to {end_date}")
     print("="*90)
-    print(f"{'Symbol':<20}{'Total Trades':<15}{'Win Rate':<15}{'Net PnL %':<15}{'Profit Factor':<15}")
+    print(f"{'Symbol':<20}{'Total Trades':<15}{'Win Rate':<15}{'Net PnL Pts':<15}{'Profit Factor':<15}")
     print("="*90)
     
     all_trades = []
@@ -271,38 +306,92 @@ def main():
         if trades:
             tdf = pd.DataFrame(trades)
             total = len(tdf)
-            win_rate = (tdf["pnl"] > 0).sum() / total * 100
-            pnl = tdf["pnl"].sum()
-            gross_p = tdf[tdf["pnl"] > 0]["pnl"].sum()
-            gross_l = abs(tdf[tdf["pnl"] <= 0]["pnl"].sum())
+            win_rate = (tdf["points_captured"] > 0).sum() / total * 100
+            pnl = tdf["points_captured"].sum()
+            gross_p = tdf[tdf["points_captured"] > 0]["points_captured"].sum()
+            gross_l = abs(tdf[tdf["points_captured"] <= 0]["points_captured"].sum())
             pf = gross_p / gross_l if gross_l > 0 else float("inf")
             
             win_rate_str = f"{win_rate:.2f}%"
-            pnl_str = f"{pnl:+.2f}%"
+            pnl_str = f"{pnl:+.2f}"
             pf_str = f"{pf:.2f}"
             print(f"{clean_sym:<20}{total:<15}{win_rate_str:<15}{pnl_str:<15}{pf_str:<15}")
         else:
-            print(f"{clean_sym:<20}{0:<15}{'—':<15}{'0.00%':<15}{'—':<15}")
+            print(f"{clean_sym:<20}{0:<15}{'—':<15}{'0.00':<15}{'—':<15}")
             
     print("="*90)
     if all_trades:
         df_all = pd.DataFrame(all_trades)
-        total = len(df_all)
-        win_rate = (df_all["pnl"] > 0).sum() / total * 100
-        pnl = df_all["pnl"].sum()
+        df_all["entry_time"] = pd.to_datetime(df_all["entry_time"])
+        df_all["year"] = df_all["entry_time"].dt.year
         
-        gross_p = df_all[df_all["pnl"] > 0]["pnl"].sum()
-        gross_l = abs(df_all[df_all["pnl"] <= 0]["pnl"].sum())
+        # Save Trade Files & Summary
+        report_dir = ROOT / "reports" / "gamma_ema_stack"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        
+        summary_rows = []
+        for y, group in df_all.groupby("year"):
+            total_t = len(group)
+            win_t = (group["points_captured"] > 0).sum()
+            loss_t = total_t - win_t
+            wr = win_t / total_t * 100
+            net_pts = group["points_captured"].sum()
+            avg_pts = group["points_captured"].mean()
+            
+            wins = group[group["points_captured"] > 0]["points_captured"]
+            losses = group[group["points_captured"] <= 0]["points_captured"]
+            
+            avg_win = wins.mean() if not wins.empty else 0.0
+            avg_loss = losses.mean() if not losses.empty else 0.0
+            pf = wins.sum() / abs(losses.sum()) if not losses.empty and losses.sum() != 0 else float("inf")
+            
+            target_hits = (group["exit_reason"] == "TARGET_HIT").sum()
+            sl_hits = (group["exit_reason"] == "SL_HIT").sum()
+            eod_exits = (group["exit_reason"] == "EOD_EXIT").sum()
+            
+            # Drawdown
+            group = group.sort_values("entry_time").reset_index(drop=True)
+            group["cum_pnl"] = group["points_captured"].cumsum()
+            cum_max = group["cum_pnl"].cummax()
+            dd = group["cum_pnl"] - cum_max
+            max_dd = dd.min()
+            
+            max_win = wins.max() if not wins.empty else 0.0
+            max_loss = losses.min() if not losses.empty else 0.0
+            
+            # Save trades for this year
+            trades_path = report_dir / f"gamma_ema_stack_{y}_trades.csv"
+            group.to_csv(trades_path, index=False)
+            
+            summary_rows.append({
+                "year": y, "trades": total_t, "wins": win_t, "losses": loss_t, "win_rate": wr,
+                "net_points": net_pts, "avg_points": avg_pts, "avg_win": avg_win, "avg_loss": avg_loss,
+                "profit_factor": pf, "expectancy": avg_pts, "total_r": group["r_multiple"].sum(),
+                "avg_r": group["r_multiple"].mean(), "target_hits": target_hits, "sl_hits": sl_hits,
+                "eod_exits": eod_exits, "max_drawdown_points": max_dd, "max_win": max_win, "max_loss": max_loss
+            })
+            
+        summary_df = pd.DataFrame(summary_rows)
+        summary_df.to_csv(report_dir / "gamma_ema_stack_summary.csv", index=False)
+        print(f"\n📂 Reports generated and saved in {report_dir}")
+        
+        # Combined Console Output
+        total = len(df_all)
+        win_rate = (df_all["points_captured"] > 0).sum() / total * 100
+        pnl = df_all["points_captured"].sum()
+        
+        gross_p = df_all[df_all["points_captured"] > 0]["points_captured"].sum()
+        gross_l = abs(df_all[df_all["points_captured"] <= 0]["points_captured"].sum())
         pf = gross_p / gross_l if gross_l > 0 else float("inf")
         
         win_rate_str = f"{win_rate:.2f}%"
-        pnl_str = f"{pnl:+.2f}%"
+        pnl_str = f"{pnl:+.2f}"
         pf_str = f"{pf:.2f}"
         
         print("\n📊 COMPOSITE SUMMARY:")
         print(f"• Total Trades Run : {total}")
         print(f"• Combined Win Rate: {win_rate_str}")
-        print(f"• Cumulative PnL   : {pnl_str}")
+        print(f"• Cumulative PnL   : {pnl_str} pts")
         print(f"• Profit Factor     : {pf_str}")
         
         # Breakdown by GEX label
@@ -311,12 +400,12 @@ def main():
             rdf = df_all[df_all["gex"] == regime]
             if not rdf.empty:
                 r_total = len(rdf)
-                r_win = (rdf["pnl"] > 0).sum() / r_total * 100
-                r_pnl = rdf["pnl"].sum()
-                r_gross_p = rdf[rdf["pnl"] > 0]["pnl"].sum()
-                r_gross_l = abs(rdf[rdf["pnl"] <= 0]["pnl"].sum())
+                r_win = (rdf["points_captured"] > 0).sum() / r_total * 100
+                r_pnl = rdf["points_captured"].sum()
+                r_gross_p = rdf[rdf["points_captured"] > 0]["points_captured"].sum()
+                r_gross_l = abs(rdf[rdf["points_captured"] <= 0]["points_captured"].sum())
                 r_pf = r_gross_p / r_gross_l if r_gross_l > 0 else float("inf")
-                print(f"  [{regime}]: Trades={r_total}, Win Rate={r_win:.2f}%, Net PnL={r_pnl:+.2f}%, PF={r_pf:.2f}")
+                print(f"  [{regime}]: Trades={r_total}, Win Rate={r_win:.2f}%, Net PnL={r_pnl:+.2f} pts, PF={r_pf:.2f}")
             else:
                 print(f"  [{regime}]: No trades recorded.")
     else:

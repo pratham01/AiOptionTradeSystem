@@ -61,6 +61,12 @@ SOURCES: tuple[StrategySource, ...] = (
         year_trade_template="reports/master_tournament/{strategy}/{strategy}_trades.csv",
         strategy_column="strategy",
     ),
+    StrategySource(
+        strategy="gamma_ema_stack",
+        family="GEX / Volatility",
+        summary_path="reports/gamma_ema_stack/gamma_ema_stack_summary.csv",
+        year_trade_template="reports/gamma_ema_stack/gamma_ema_stack_{year}_trades.csv",
+    ),
 )
 
 
