@@ -18,6 +18,7 @@ pages = {
         st.Page(HERE / "market_mood_dashboard.py", title="Market Mood", icon="📊"),
         st.Page(HERE / "smart_oi_dashboard.py", title="Smart OI", icon="🎯"),
         st.Page(HERE / "sector_scope_dashboard.py", title="Sector Scope", icon="🧭"),
+        st.Page(HERE / "option_edge_dashboard.py", title="Option Edge", icon="⚡"),
     ],
     "Research & Strategy": [
         st.Page(HERE / "nifty_volatility_dashboard.py", title="Nifty Volatility Lab", icon="🧭"),
@@ -26,6 +27,7 @@ pages = {
         st.Page(HERE / "strategy_dashboard.py", title="Strategy Lab", icon="🧪"),
         st.Page(HERE / "volumetric_order_flow_dashboard.py", title="Volumetric Order Flow", icon="📊"),
         st.Page(HERE / "sr_channels_dashboard.py", title="S/R Channels", icon="🏗️"),
+        st.Page(HERE / "gamma_blast_dashboard.py", title="Gamma Blast Lab", icon="⚡"),
         st.Page(HERE / "agent_arch_viz.py", title="Swarm Architecture", icon="🏛️"),
     ],
 }

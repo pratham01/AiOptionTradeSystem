@@ -67,6 +67,18 @@ SOURCES: tuple[StrategySource, ...] = (
         summary_path="reports/gamma_ema_stack/gamma_ema_stack_summary.csv",
         year_trade_template="reports/gamma_ema_stack/gamma_ema_stack_{year}_trades.csv",
     ),
+    StrategySource(
+        strategy="option_edge",
+        family="Option Buyer",
+        summary_path="reports/option_edge/option_edge_summary.csv",
+        year_trade_template="reports/option_edge/option_edge_trades.csv",
+    ),
+    StrategySource(
+        strategy="gamma_blast",
+        family="Option Buyer",
+        summary_path="reports/gamma_blast/gamma_blast_summary.csv",
+        year_trade_template="reports/gamma_blast/gamma_blast_trades.csv",
+    ),
 )
 
 

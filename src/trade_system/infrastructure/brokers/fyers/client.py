@@ -61,7 +61,7 @@ class FyersBrokerV2(DataBroker):
         if isinstance(response, dict) and response.get("s") != "ok":
             code = response.get("code")
             msg = str(response.get("errmsg") or response.get("message") or "").lower()
-            if code in [-8, -17] or "token" in msg or "auth" in msg:
+            if code in [-8, -16, -17] or "token" in msg or "auth" in msg:
                 self._authenticated = False
 
     def _apply_rate_limit(self):
@@ -99,14 +99,14 @@ class FyersBrokerV2(DataBroker):
                 return True
 
             code = profile.get("code")
-            _RATE_LIMIT_CODES = {-353, -209}
+            _RATE_LIMIT_CODES = {-353, -209, 429}
             err_msg = str(profile.get("errmsg") or profile.get("message") or "")
             if code in _RATE_LIMIT_CODES or "limit" in err_msg.lower() or "429" in err_msg:
                 self._authenticated = True
                 LOGGER.warning(f"Fyers /profile rate-limited (code {code}). Token accepted as valid.")
                 return True
 
-            if code in [-8, -17] and retry_with_totp:
+            if code in [-8, -16, -17] and retry_with_totp:
                 # Prior to triggering TOTP, check if another process wrote a valid token to fyers_token.json today
                 from pathlib import Path
                 import json
@@ -182,11 +182,11 @@ class FyersBrokerV2(DataBroker):
         code = profile.get("code")
         err_msg = str(profile.get("errmsg") or profile.get("message") or "")
         
-        if code in {-353, -209} or "limit" in err_msg.lower() or "429" in err_msg:
+        if code in {-353, -209, 429} or "limit" in err_msg.lower() or "429" in err_msg:
             LOGGER.warning(f"Fyers /profile rate-limited during verify_session (code {code}). Proceeding.")
             return
 
-        if code in [-8, -17] and self.authenticator:
+        if code in [-8, -16, -17] and self.authenticator:
             LOGGER.warning(f"FYERS session invalid (code: {code}). Refreshing token.")
             new_token = self.authenticator.generate_access_token()
             self.access_token = new_token

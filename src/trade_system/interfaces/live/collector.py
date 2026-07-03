@@ -52,6 +52,7 @@ from trade_system.infrastructure.notifications.telegram import TelegramNotifier
 from trade_system.infrastructure.database.connection import get_engine
 from trade_system.infrastructure.database.repository import save_market_data_batch, save_option_chain_batch
 from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.application.analysis.intraday_option_edge import IntradayOptionEdgePipeline
 from sqlalchemy.orm import Session
 
 from trade_system.application.indicators.volume_profile import VolumeProfileIndicator
@@ -193,6 +194,11 @@ class LiveMarketDataService:
         self.breakout_screener = BreakoutScreener()
         self.breakout_thread: threading.Thread | None = None
         self.last_breakout_alerts: dict[str, pd.Timestamp] = {}
+
+        # Intraday Option Edge pipeline
+        self.option_edge_pipeline = IntradayOptionEdgePipeline()
+        self.option_edge_thread: threading.Thread | None = None
+        self.last_option_edge_alerts: dict[str, pd.Timestamp] = {}
         self.alert_debounce_seconds: int = 300  # 5-minute cooldown on level-touch alerts
 
         # Opening Range (first 15-min candle) tracking
@@ -285,6 +291,7 @@ class LiveMarketDataService:
         threading.Thread(target=self.ws.connect, daemon=True).start()
         self._start_option_chain_thread()
         self._start_breakout_thread()
+        self._start_option_edge_thread()
 
     def stop(self) -> None:
         self._flush_all_open_minutes()
@@ -1842,6 +1849,56 @@ class LiveMarketDataService:
             send_chunked(short_alerts, "[LIVE SECTOR BREAKDOWN — SHORT]", "📉")
             
         LOGGER.info(f"Sent Live Breakout/Breakdown alerts for {len(alerts_to_send)} symbols.")
+
+    # ── Intraday Option Edge Pipeline ──────────────────────────────────────────
+
+    def _start_option_edge_thread(self) -> None:
+        if self.option_edge_thread and self.option_edge_thread.is_alive():
+            return
+
+        def _option_edge_loop():
+            LOGGER.info("Starting Intraday Option Edge pipeline loop (5m interval).")
+            while self.ws_running and not self.shutdown:
+                try:
+                    now = self._now_ist()
+                    # Only run between 9:30 and 14:00 (no new entries after 2 PM)
+                    if self._parse_clock("09:30") <= now.time() < self._parse_clock("14:00"):
+                        alerts = self.option_edge_pipeline.scan()
+                        if alerts:
+                            self._send_option_edge_alerts(alerts)
+                except Exception as e:
+                    LOGGER.error(f"Error in Option Edge pipeline loop: {e}")
+
+                time.sleep(300)  # 5 minutes
+
+        self.option_edge_thread = threading.Thread(target=_option_edge_loop, daemon=True)
+        self.option_edge_thread.start()
+
+    def _send_option_edge_alerts(self, alerts) -> None:
+        """Send Intraday Option Edge alerts via Telegram with deduplication."""
+        now = self._now_ist()
+        alerts_to_send = []
+
+        for alert in alerts:
+            sym = alert.symbol
+            # Cooldown: don't re-alert the same stock within 60 minutes
+            if sym in self.last_option_edge_alerts:
+                if (now - self.last_option_edge_alerts[sym]).total_seconds() < 3600:
+                    continue
+            alerts_to_send.append(alert)
+            self.last_option_edge_alerts[sym] = now
+
+        if not alerts_to_send or not self.notifier:
+            return
+
+        for alert in alerts_to_send:
+            try:
+                msg = alert.format_telegram()
+                self.notifier.send(msg)
+            except Exception as e:
+                LOGGER.error(f"Failed to send Option Edge alert for {alert.symbol}: {e}")
+
+        LOGGER.info(f"Sent {len(alerts_to_send)} Intraday Option Edge alerts.")
 
     def _start_option_chain_thread(self) -> None:
         if self.oc_running:

@@ -77,7 +77,7 @@ class FyersBroker(BaseBroker):
         if isinstance(response, dict) and response.get("s") != "ok":
             code = response.get("code")
             msg = str(response.get("errmsg") or response.get("message") or "").lower()
-            if code in [-8, -17] or "token" in msg or "auth" in msg:
+            if code in [-8, -16, -17] or "token" in msg or "auth" in msg:
                 self.fyers = None
 
     def _apply_rate_limit(self):
@@ -118,7 +118,7 @@ class FyersBroker(BaseBroker):
             code = profile.get("code")
 
             # Rate-limited on /profile — token is still valid (WebSocket + history work).
-            _RATE_LIMIT_CODES = {-353, -209}
+            _RATE_LIMIT_CODES = {-353, -209, 429}
             err_msg = str(profile.get("errmsg") or profile.get("message") or "")
             if code in _RATE_LIMIT_CODES or "limit" in err_msg.lower() or "429" in err_msg:
                 logger.warning(
@@ -126,7 +126,7 @@ class FyersBroker(BaseBroker):
                 )
                 return True
 
-            if code in [-8, -17] and retry_with_totp:
+            if code in [-8, -16, -17] and retry_with_totp:
                 # Prior to triggering TOTP, check if another process wrote a valid token to fyers_token.json today
                 from datetime import date
                 import json
@@ -201,11 +201,11 @@ class FyersBroker(BaseBroker):
         code = profile.get("code")
         err_msg = str(profile.get("errmsg") or profile.get("message") or "")
         # Rate-limited — token still valid.
-        if code in {-353, -209} or "limit" in err_msg.lower() or "429" in err_msg:
+        if code in {-353, -209, 429} or "limit" in err_msg.lower() or "429" in err_msg:
             logger.warning("Fyers /profile rate-limited during verify_session (code %s). Proceeding.", code)
             return
         # Token expired — refresh.
-        if code in [-8, -17]:
+        if code in [-8, -16, -17]:
             # Prior to triggering TOTP, check if another process wrote a valid token to fyers_token.json today
             from datetime import date
             import json

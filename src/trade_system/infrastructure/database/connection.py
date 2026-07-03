@@ -42,7 +42,20 @@ def get_engine(db_path: str | None = None) -> Engine:
     global _engine
     if _engine is None:
         path = db_path or str(DB_PATH)
-        _engine = create_engine(f"sqlite:///{path}", echo=False)
+        _engine = create_engine(
+            f"sqlite:///{path}",
+            connect_args={"timeout": 30},
+            echo=False
+        )
+        # Enable Write-Ahead Logging (WAL) mode for concurrency support
+        from sqlalchemy import text
+        try:
+            with _engine.connect() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL;"))
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to enable WAL mode: {e}")
+            
         Base.metadata.create_all(bind=_engine)
         run_migrations(_engine)
     return _engine
