@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.analysis import prepare_price_action_concepts
-from trade_system.application.backtesting.price_action_concepts_research import PriceActionConceptsResearch
+from trade_system.domains.analysis.application.analysis import prepare_price_action_concepts
+from trade_system.domains.analysis.application.backtesting.price_action_concepts_research import PriceActionConceptsResearch
 
 
 def test_prepare_price_action_concepts_builds_expected_columns():

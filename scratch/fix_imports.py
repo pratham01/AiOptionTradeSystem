@@ -2,17 +2,17 @@ import os
 import re
 
 MAPPING = {
-    r'trade_system\.data': r'trade_system.infrastructure.data',
-    r'trade_system\.database': r'trade_system.infrastructure.database',
-    r'trade_system\.notifications': r'trade_system.infrastructure.notifications',
-    r'trade_system\.brokers': r'trade_system.infrastructure.brokers',
-    r'trade_system\.advisory': r'trade_system.application.advisory',
-    r'trade_system\.research': r'trade_system.application.research',
-    r'trade_system\.backtesting': r'trade_system.application.backtesting',
-    r'trade_system\.analysis': r'trade_system.application.analysis',
-    r'trade_system\.agent': r'trade_system.application.agent',
-    r'trade_system\.indicators': r'trade_system.application.indicators',
-    r'trade_system\.pipeline': r'trade_system.application.pipeline',
+    r'trade_system\.data': r'trade_system.domains.market_data.infrastructure.data',
+    r'trade_system\.database': r'trade_system.domains.market_data.infrastructure.database',
+    r'trade_system\.notifications': r'trade_system.shared.notifications',
+    r'trade_system\.brokers': r'trade_system.domains.trading.infrastructure.brokers',
+    r'trade_system\.advisory': r'trade_system.domains.advisory.application.advisory',
+    r'trade_system\.research': r'trade_system.domains.analysis.application.research',
+    r'trade_system\.backtesting': r'trade_system.domains.analysis.application.backtesting',
+    r'trade_system\.analysis': r'trade_system.domains.analysis.application.analysis',
+    r'trade_system\.agent': r'trade_system.domains.advisory.application.agent',
+    r'trade_system\.indicators': r'trade_system.domains.strategy.application.indicators',
+    r'trade_system\.pipeline': r'trade_system.domains.trading.application.pipeline',
     r'trade_system\.live': r'trade_system.interfaces.live',
     r'trade_system\.dashboard': r'trade_system.interfaces.dashboard',
 }

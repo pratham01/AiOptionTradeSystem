@@ -25,8 +25,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from trade_system.application.indicators.oi_zones import OIZoneDetector, OIZone
-from trade_system.application.indicators.flux_order_blocks import FluxOrderBlockDetector
+from trade_system.domains.strategy.application.indicators.oi_zones import OIZoneDetector, OIZone
+from trade_system.domains.strategy.application.indicators.flux_order_blocks import FluxOrderBlockDetector
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s | %(message)s")
 LOGGER = logging.getLogger("oi_backtest")

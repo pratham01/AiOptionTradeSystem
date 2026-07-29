@@ -5,10 +5,10 @@ from pathlib import Path
 # Add src to python path
 sys.path.append(str(Path("src").resolve()))
 
-from trade_system.application.agent.fo_option_buyer_agent import load_latest_sector_performance
-from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
-from trade_system.config.settings import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.domains.advisory.application.agent.fo_option_buyer_agent import load_latest_sector_performance
+from trade_system.domains.advisory.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+from trade_system.shared.config.settings import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
 
 async def main():
     print("Testing FO Option Buyer Agent Sector Logic...")
@@ -29,8 +29,8 @@ async def main():
     # Just initialize the agent with broker as the first positional argument
     agent = PostMarketImproverAgent(broker, settings)
     
-    from trade_system.application.analysis.top_gainers import NSETop100GainersFetcher
-    from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE
+    from trade_system.domains.analysis.application.analysis.top_gainers import NSETop100GainersFetcher
+    from trade_system.domains.market_data.infrastructure.data.nse_universe import NSE_UNIVERSE
     
     fetcher = NSETop100GainersFetcher(broker=agent.broker)
     

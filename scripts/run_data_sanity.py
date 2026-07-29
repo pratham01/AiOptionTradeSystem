@@ -6,8 +6,8 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.application.agent.data_sanity_agent import DataSanityAgent
-from trade_system.config import Settings
+from trade_system.domains.advisory.application.agent.data_sanity_agent import DataSanityAgent
+from trade_system.shared.config import Settings
 
 logging.basicConfig(
     level=logging.INFO,

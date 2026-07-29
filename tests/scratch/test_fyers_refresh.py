@@ -5,8 +5,8 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.factory import get_broker_manager, reset_broker_manager
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager, reset_broker_manager
 
 # Reset manager
 reset_broker_manager()

@@ -1,10 +1,10 @@
 import asyncio
 import logging
 from datetime import date, timedelta
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
-from trade_system.application.analysis.fo_historical_service import FOHistoricalService
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+from trade_system.domains.analysis.application.analysis.fo_historical_service import FOHistoricalService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

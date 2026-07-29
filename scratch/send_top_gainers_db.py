@@ -7,9 +7,9 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path("src").resolve()))
 
-from trade_system.config.settings import Settings
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.shared.config.settings import Settings
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 def main():
     print("🔋 Calculating Top Gainers from Database for today...")

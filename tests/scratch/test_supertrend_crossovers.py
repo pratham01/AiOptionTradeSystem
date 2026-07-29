@@ -1,5 +1,5 @@
 import pandas as pd
-from trade_system.application.indicators import calculate_supertrend
+from trade_system.domains.strategy.application.indicators import calculate_supertrend
 from trade_system.interfaces.live.collector import resample_to_timeframe
 
 def main():

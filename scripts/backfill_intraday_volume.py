@@ -12,10 +12,10 @@ from datetime import date
 
 import pandas as pd
 
-from trade_system.infrastructure.brokers.legacy import FyersAuthService, FyersBrokerClient
-from trade_system.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy import FyersAuthService, FyersBrokerClient
+from trade_system.shared.config import Settings
 from trade_system.interfaces.live.collector import _merge_intraday_3min_bars, resample_to_timeframe
-from trade_system.utils.logging_utils import configure_logging
+from trade_system.shared.utils.logging_utils import configure_logging
 
 def backfill_day(symbol: str, trade_date: date) -> tuple[Path, Path, int]:
     settings = Settings.load()

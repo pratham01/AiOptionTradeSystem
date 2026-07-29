@@ -42,8 +42,8 @@ cd trade_system_v2
 # Configure your secrets
 nano .env
 
-# Deploy using Docker Compose
-sudo docker-compose up -d --build
+# Deploy using Docker Compose (sudo may be required depending on your user privileges)
+docker compose up -d --build
 ```
 
 This will automatically spin up three independent containers:

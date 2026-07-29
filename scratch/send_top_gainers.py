@@ -4,9 +4,9 @@ from pathlib import Path
 
 sys.path.append(str(Path("src").resolve()))
 
-from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
-from trade_system.config.settings import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient
+from trade_system.domains.advisory.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+from trade_system.shared.config.settings import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient
 
 async def main():
     print("Testing PostMarket Improver Agent Top Gainers...")
@@ -29,8 +29,8 @@ async def main():
     if lock_file.exists():
         lock_file.unlink()
         
-    from trade_system.application.analysis.top_gainers import NSETop100GainersFetcher
-    from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE
+    from trade_system.domains.analysis.application.analysis.top_gainers import NSETop100GainersFetcher
+    from trade_system.domains.market_data.infrastructure.data.nse_universe import NSE_UNIVERSE
     
     fetcher = NSETop100GainersFetcher(broker=agent.broker)
     

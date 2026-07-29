@@ -12,11 +12,11 @@ from typing import Dict, Any, List
 
 import pandas as pd
 from sqlalchemy import text
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.config import Settings
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
 
 LOGGER = logging.getLogger("graveyard_monitor")
 

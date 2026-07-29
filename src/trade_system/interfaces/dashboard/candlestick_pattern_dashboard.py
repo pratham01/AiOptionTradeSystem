@@ -6,8 +6,8 @@ from pathlib import Path
 from datetime import datetime
 import os
 
-from trade_system.application.agent.candlestick_pattern_agent import CandlestickPatternAgent
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.advisory.application.agent.candlestick_pattern_agent import CandlestickPatternAgent
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from sqlalchemy import text
 
 # --- CUSTOM CSS ---

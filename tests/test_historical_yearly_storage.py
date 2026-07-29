@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.infrastructure.data.storage import CsvDataCatalog
+from trade_system.domains.market_data.infrastructure.data.storage import CsvDataCatalog
 
 
 def test_write_historical_yearly_splits_by_year(tmp_path: Path):

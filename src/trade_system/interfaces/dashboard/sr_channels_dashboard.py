@@ -5,9 +5,9 @@ import plotly.graph_objects as go
 from sqlalchemy import text
 import logging
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
-from trade_system.application.indicators.support_resistance_channels import (
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.domains.strategy.application.indicators.support_resistance_channels import (
     SupportResistanceChannelDetector,
 )
 from trade_system.interfaces.live.helpers import resample_to_timeframe
@@ -16,7 +16,7 @@ LOGGER = logging.getLogger(__name__)
 
 def load_latest_option_chain(symbol: str) -> pd.DataFrame:
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
@@ -105,7 +105,7 @@ def validate_channels_with_data(channels, df_candles, option_chain_df):
     return validated_rows
 
 async def analyze_sr_zones_with_ai(symbol: str, cur_close: float, validation_rows: list) -> str:
-    from trade_system.application.advisory.llm import LlmAdvisorClient
+    from trade_system.domains.advisory.application.advisory.llm import LlmAdvisorClient
     llm = LlmAdvisorClient()
     if not llm.configured():
         return "LLM not configured. Please set your GOOGLE_API_KEY in the environment."

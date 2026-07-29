@@ -4,9 +4,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pandas as pd
 from datetime import date, datetime
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.data.fo_universe import get_sector_mapping
-from trade_system.core.ports.broker import MarketQuote
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_sector_mapping
+from trade_system.domains.trading.domain.ports.broker import MarketQuote
 from sqlalchemy import text
 
 # Mimic fetch_available_dates and fetch_target_date_and_data

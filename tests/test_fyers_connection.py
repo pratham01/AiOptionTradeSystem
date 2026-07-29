@@ -1,7 +1,7 @@
 import logging
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
 
 logging.basicConfig(level=logging.INFO)
 

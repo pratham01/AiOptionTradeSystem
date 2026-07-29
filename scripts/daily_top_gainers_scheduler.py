@@ -38,9 +38,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.market_data.infrastructure.data.nse_universe import NSE_UNIVERSE
 
 LOGGER = logging.getLogger(__name__)
 

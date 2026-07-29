@@ -4,10 +4,10 @@ import numpy as np
 import json
 from unittest.mock import MagicMock, patch
 from datetime import datetime, date
-from trade_system.application.agent.early_morning_agent import EarlyMorningAgent
-from trade_system.application.agent.missed_opportunity_agent import MissedOpportunityAgent
-from trade_system.core import TradeDirection
-from trade_system.infrastructure.database.models import AgentThought
+from trade_system.domains.advisory.application.agent.early_morning_agent import EarlyMorningAgent
+from trade_system.domains.advisory.application.agent.missed_opportunity_agent import MissedOpportunityAgent
+from trade_system.shared import TradeDirection
+from trade_system.domains.market_data.infrastructure.database.models import AgentThought
 
 @pytest.fixture
 def sample_today_df():
@@ -115,8 +115,8 @@ async def test_orb_filters_rejections(sample_today_df):
                 agent._opening_ranges.clear()
 
 @pytest.mark.asyncio
-@patch("trade_system.application.agent.missed_opportunity_agent.Session")
-@patch("trade_system.application.agent.missed_opportunity_agent.get_market_data")
+@patch("trade_system.domains.advisory.application.agent.missed_opportunity_agent.Session")
+@patch("trade_system.domains.advisory.application.agent.missed_opportunity_agent.get_market_data")
 async def test_true_negative_eod_simulation(mock_get_market_data, mock_session):
     broker = MagicMock()
     agent = MissedOpportunityAgent(broker=broker)
@@ -174,7 +174,7 @@ async def test_true_negative_eod_simulation(mock_get_market_data, mock_session):
 
 @pytest.mark.asyncio
 async def test_nr7_inside_bar_detectors():
-    from trade_system.application.agent.next_day_predictor_agent import NextDayPredictorAgent
+    from trade_system.domains.advisory.application.agent.next_day_predictor_agent import NextDayPredictorAgent
     # Create a dummy DataFrame with 10 rows
     dates = pd.date_range("2026-05-01", periods=10)
     df = pd.DataFrame({
@@ -227,7 +227,7 @@ async def test_early_morning_compression_bracket(sample_today_df):
     df_breakout.loc[df_breakout.index[-1], ['close', 'high', 'volume']] = [101.0, 101.5, 300]
     
     with patch.object(agent, "_load_watchlist", return_value=watchlist_mock):
-        with patch("trade_system.application.agent.early_morning_agent.get_market_data", return_value=[mock_daily_bar]):
+        with patch("trade_system.domains.advisory.application.agent.early_morning_agent.get_market_data", return_value=[mock_daily_bar]):
             with patch.object(agent, "_get_nifty_trend", return_value="BULLISH"):
                 with patch.object(agent, "_calculate_daily_atr", return_value=20.0):
                     # We expect check_orb to detect breakout of yesterday's high (100.0) with yesterday's low (95.0) as SL.

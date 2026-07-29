@@ -8,7 +8,7 @@ def aggregate_ticks_to_bars(df: pd.DataFrame, timeframe_minutes: int) -> pd.Data
     if df.empty:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "symbol"])
     frame = df.copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], format="mixed")
     symbol = frame["symbol"].iloc[0]
     grouped = (
         frame.set_index("timestamp")

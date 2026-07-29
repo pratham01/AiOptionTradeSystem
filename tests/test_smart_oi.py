@@ -12,8 +12,8 @@ if str(root_path) not in sys.path:
 
 import pandas as pd
 from datetime import datetime
-from trade_system.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.analysis.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 def run_tests():
     print("🧪 Starting SmartOIAnalyzer Verification Tests...")

@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 from datetime import date, datetime
 from pathlib import Path
 
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from sqlalchemy import text
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
@@ -152,6 +152,16 @@ def fetch_available_dates():
         return []
 
 dates = fetch_available_dates()
+
+from datetime import datetime
+today_str = date.today().strftime("%Y-%m-%d")
+is_weekday = datetime.today().weekday() < 5
+is_after_nine = datetime.now().time() >= datetime.strptime("09:00:00", "%H:%M:%S").time()
+
+if is_weekday and is_after_nine:
+    if today_str not in dates:
+        dates.insert(0, today_str)
+
 col_date, col_refresh = st.columns([3, 1])
 with col_date:
     selected = st.selectbox("📅 Trading Date", dates[:30] if dates else ["No data"], index=0)
@@ -174,17 +184,17 @@ def run_pipeline(target_date_str):
     td = date.fromisoformat(target_date_str)
 
     # Stage 1: Shortlist
-    from trade_system.application.analysis.fo_intraday_shortlist import FOIntradayShortlist
+    from trade_system.domains.analysis.application.analysis.fo_intraday_shortlist import FOIntradayShortlist
     shortlist_engine = FOIntradayShortlist()
     candidates = shortlist_engine.shortlist(td)
 
     # Stage 2: Regime
-    from trade_system.application.analysis.regime_detector import RegimeDetector
+    from trade_system.domains.analysis.application.analysis.regime_detector import RegimeDetector
     regime_engine = RegimeDetector()
     regime = regime_engine.detect(td)
 
     # Stage 3+4+5: Full pipeline
-    from trade_system.application.analysis.intraday_option_edge import IntradayOptionEdgePipeline
+    from trade_system.domains.analysis.application.analysis.intraday_option_edge import IntradayOptionEdgePipeline
     pipeline = IntradayOptionEdgePipeline(max_alerts_per_cycle=10, min_risk_reward=1.0)
     alerts = pipeline.scan(target_date=td)
 
@@ -249,14 +259,33 @@ st.markdown(f"""
 
 if candidates:
     rows = []
+    
+    is_today = (target_date == date.today())
+    live_quotes = {}
+    if is_today:
+        from trade_system.interfaces.dashboard.shared_broker import fetch_live_quotes
+        symbols_to_fetch = [c.symbol for c in candidates]
+        if alerts:
+            symbols_to_fetch.extend([a.symbol for a in alerts])
+        live_quotes = fetch_live_quotes(list(set(symbols_to_fetch)))
+
     for c in candidates:
         clean_sym = c.symbol.replace("NSE:", "").replace("-EQ", "")
         bias_emoji = {"STRONG_CALL": "🟢🟢", "CALL": "🟢", "STRONG_PUT": "🔴🔴", "PUT": "🔴", "NEUTRAL": "⚪"}.get(c.bias, "⚪")
+        
+        display_ltp = c.ltp
+        display_chg = c.change_pct
+        if is_today and c.symbol in live_quotes:
+            q = live_quotes[c.symbol]
+            display_ltp = q.last_price or q.close or q.open or c.ltp
+            if q.change_percent is not None:
+                display_chg = q.change_percent
+                
         rows.append({
             "Symbol": clean_sym,
             "Sector": c.sector,
-            "LTP": f"₹{c.ltp:,.2f}",
-            "Chg%": f"{c.change_pct:+.1f}%",
+            "LTP": f"₹{display_ltp:,.2f}",
+            "Chg%": f"{display_chg:+.1f}%",
             "Bias": f"{bias_emoji} {c.bias}",
             "ST Dir": "🟢 Bull" if c.daily_supertrend_dir == 1 else "🔴 Bear" if c.daily_supertrend_dir == -1 else "⚪",
             "Compressed": "🔥 Yes" if c.is_compressed else "",
@@ -289,6 +318,12 @@ if alerts:
         dir_class = "alert-call" if alert.direction == "CALL" else "alert-put"
         dir_icon = "📈" if alert.direction == "CALL" else "📉"
         dir_label = "CALL" if alert.direction == "CALL" else "PUT"
+        
+        # Override with live quote if available
+        display_ltp = alert.ltp
+        if 'is_today' in locals() and is_today and alert.symbol in live_quotes:
+            q = live_quotes[alert.symbol]
+            display_ltp = q.last_price or q.close or q.open or alert.ltp
 
         score_class = "score-high" if alert.edge_score >= 65 else "score-mid" if alert.edge_score >= 55 else "score-low"
 
@@ -299,8 +334,11 @@ if alerts:
                 <span class="alert-symbol {dir_class}">{dir_icon} {clean_sym} — {dir_label}</span>
                 <span class="score-badge {score_class}">{alert.edge_score:.0f}/100</span>
             </div>
-            <div style="color: #94a3b8; font-size: 0.78rem;">
-                {alert.sector} • {alert.entry_type.replace('_', ' ').title()} • {alert.direction_confidence:.0%} layers agree
+            
+            <div class="alert-details">
+                <div class="detail-item" style="color: #94a3b8; font-size: 0.78rem;">
+                    <strong>LTP:</strong> ₹{display_ltp:,.2f} &nbsp;&bull;&nbsp; {alert.sector} &nbsp;&bull;&nbsp; {alert.entry_type.replace('_', ' ').title()} &nbsp;&bull;&nbsp; {alert.direction_confidence:.0%} layers agree
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -411,4 +449,4 @@ else:
         <span class="badge">Not yet run</span>
     </div>
     """, unsafe_allow_html=True)
-    st.info("Run the backtester to see historical performance: `python -m trade_system.application.backtesting.option_edge_backtest`")
+    st.info("Run the backtester to see historical performance: `python -m trade_system.domains.analysis.application.backtesting.option_edge_backtest`")

@@ -4,7 +4,7 @@ import numpy as np
 from unittest.mock import MagicMock, patch
 from datetime import datetime, date
 
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
 
 @pytest.fixture
 def mock_breakout_screener():
@@ -71,8 +71,8 @@ def mock_daily_df():
         "volume": [5000.0] * 30
     })
 
-@patch("trade_system.application.analysis.breakout_screener.pd.read_sql")
-@patch("trade_system.application.analysis.breakout_screener.get_engine")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.pd.read_sql")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.get_engine")
 def test_gap_fill_detection(mock_engine, mock_read_sql, mock_breakout_screener, base_candles, mock_daily_df):
     # Setup mock data for Gap Fill
     base_15m = base_candles.copy()
@@ -114,8 +114,8 @@ def test_gap_fill_detection(mock_engine, mock_read_sql, mock_breakout_screener, 
     assert gap_fill_alerts[0]["direction"] == "SHORT"
     assert gap_fill_alerts[0]["gap_pct"] >= 2.0
 
-@patch("trade_system.application.analysis.breakout_screener.pd.read_sql")
-@patch("trade_system.application.analysis.breakout_screener.get_engine")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.pd.read_sql")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.get_engine")
 def test_consolidation_breakout_on_the_fly(mock_engine, mock_read_sql, mock_breakout_screener, base_candles, mock_daily_df):
     # Previous 15 candles before latest are tight consolidation around 100.0
     base_15m = base_candles.copy()
@@ -150,8 +150,8 @@ def test_consolidation_breakout_on_the_fly(mock_engine, mock_read_sql, mock_brea
     assert cons_alerts[0]["direction"] == "LONG"
     assert cons_alerts[0]["close"] == 101.5
 
-@patch("trade_system.application.analysis.breakout_screener.pd.read_sql")
-@patch("trade_system.application.analysis.breakout_screener.get_engine")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.pd.read_sql")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.get_engine")
 def test_mean_reversion_detection(mock_engine, mock_read_sql, mock_breakout_screener, base_candles, mock_daily_df):
     # Ascending close values to force RSI above 75, then spike last one
     base_15m = base_candles.copy()
@@ -176,8 +176,8 @@ def test_mean_reversion_detection(mock_engine, mock_read_sql, mock_breakout_scre
     assert mr_alerts[0]["direction"] == "SHORT"
     assert mr_alerts[0]["rsi"] >= 75
 
-@patch("trade_system.application.analysis.breakout_screener.pd.read_sql")
-@patch("trade_system.application.analysis.breakout_screener.get_engine")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.pd.read_sql")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.get_engine")
 def test_vwap_pullback_detection(mock_engine, mock_read_sql, mock_breakout_screener, base_candles, mock_daily_df):
     # Setup VWAP and daily close to verify pullback
     base_15m = base_candles.copy()

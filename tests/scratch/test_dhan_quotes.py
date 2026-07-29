@@ -5,9 +5,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import logging
 logging.basicConfig(level=logging.INFO)
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.factory import get_broker_manager
-from trade_system.infrastructure.data.fo_universe import get_sector_mapping
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_sector_mapping
 
 def test_dhan():
     print("Loading settings...")

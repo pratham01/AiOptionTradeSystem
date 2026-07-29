@@ -1,9 +1,9 @@
 import sys, os
 sys.path.insert(0, 'src')
 os.chdir(os.path.dirname(os.path.abspath(__file__)) + '/..')
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
-from trade_system.infrastructure.brokers.fyers.client import FyersBrokerV2
-from trade_system.config import Settings
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBrokerV2
+from trade_system.shared.config import Settings
 import logging
 
 logging.basicConfig(level=logging.ERROR)

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from trade_system.application.agent.orchestrator import TradeOrchestrator
+from trade_system.domains.advisory.application.agent.orchestrator import TradeOrchestrator
 
 # Setup basic logging to see agent activity
 logging.basicConfig(

@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import logging
 from pathlib import Path
-from trade_system.application.indicators.supertrend import SupertrendIndicator
-from trade_system.application.indicators.rsi_divergence import RsiDivergence
+from trade_system.domains.strategy.application.indicators.supertrend import SupertrendIndicator
+from trade_system.domains.strategy.application.indicators.rsi_divergence import RsiDivergence
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

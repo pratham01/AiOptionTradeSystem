@@ -4,11 +4,11 @@ import pandas as pd
 from datetime import datetime, timedelta, time as dt_time
 from typing import List, Dict, Any
 
-from trade_system.core.ports.broker import Broker as BaseBroker
-from trade_system.application.indicators.base import BaseIndicator
-from trade_system.infrastructure.data.manager import DataManager
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.config import Settings
+from trade_system.domains.trading.domain.ports.broker import Broker as BaseBroker
+from trade_system.domains.strategy.application.indicators.base import BaseIndicator
+from trade_system.domains.market_data.infrastructure.data.manager import DataManager
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
 from .market import MarketStatus
 
 logger = logging.getLogger(__name__)

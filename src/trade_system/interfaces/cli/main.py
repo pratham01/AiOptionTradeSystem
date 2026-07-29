@@ -8,16 +8,16 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.advisory import TradeAdvisor, TradeContext, TradeProposal
-from trade_system.application.advisory.llm import LlmAdvisorClient
-from trade_system.application.backtesting import BacktestEngine
-from trade_system.infrastructure.brokers.legacy import FyersAuthService, FyersBrokerClient
-from trade_system.config import Settings
-from trade_system.infrastructure.data import CsvDataCatalog, HistoricalDataService
+from trade_system.domains.advisory.application.advisory import TradeAdvisor, TradeContext, TradeProposal
+from trade_system.domains.advisory.application.advisory.llm import LlmAdvisorClient
+from trade_system.domains.analysis.application.backtesting import BacktestEngine
+from trade_system.domains.trading.infrastructure.brokers.legacy import FyersAuthService, FyersBrokerClient
+from trade_system.shared.config import Settings
+from trade_system.domains.market_data.infrastructure.data import CsvDataCatalog, HistoricalDataService
 from trade_system.interfaces.live import LiveMarketDataService
-from trade_system.utils.logging_utils import configure_logging
-from trade_system.application.research import AutonomousResearchOrchestrator
-from trade_system.application.strategies import build_strategy, registered_strategies
+from trade_system.shared.utils.logging_utils import configure_logging
+from trade_system.domains.analysis.application.research import AutonomousResearchOrchestrator
+from trade_system.domains.strategy.application.strategies import build_strategy, registered_strategies
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,6 +70,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify and heal F&O database history",
     )
 
+    bollinger_parser = subparsers.add_parser(
+        "bollinger-research",
+        help="Run the autonomous agent loop for Bollinger Option strategy",
+    )
+    bollinger_parser.add_argument("--year", type=int, default=2026)
+    bollinger_parser.add_argument("--symbol", default="NSE_NIFTY50-INDEX")
+    bollinger_parser.add_argument("--mode", choices=["intraday", "swing"], default="intraday")
+
+    prajwal_parser = subparsers.add_parser(
+        "prajwal-scan",
+        help="Run the Prajwal Price Action Agent scanner",
+    )
+    prajwal_parser.add_argument("--symbol", default="NSE_NIFTY50-INDEX")
+    prajwal_parser.add_argument("--timeframe", choices=["5m", "15m", "daily"], default="15m")
+
+    weekly_parser = subparsers.add_parser(
+        "weekly-breakout-scan",
+        help="Run the Weekly Breakout Agent scanner",
+    )
+    weekly_parser.add_argument("--min-consolidation-weeks", type=int, default=4)
+    weekly_parser.add_argument("--direction", choices=["bullish", "bearish", "both"], default="both")
+
+    ultimate_scan_parser = subparsers.add_parser(
+        "ultimate-scan",
+        help="Run the Ultimate Intraday Option Buying Agent",
+    )
+    ultimate_scan_parser.add_argument("--date", default=None, help="Target date (YYYY-MM-DD)")
+
+    ultimate_bt_parser = subparsers.add_parser(
+        "ultimate-backtest",
+        help="Backtest the Ultimate Intraday Agent over historical data",
+    )
+    ultimate_bt_parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
+    ultimate_bt_parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
+
     return parser
 
 
@@ -121,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
             user_id=settings.fyers.user_id,
         )
         catalog = CsvDataCatalog(settings.data_dir / "fo_historical")
+        # LIVE_SYMBOLS in .env controls the WebSocket subscription list (typically the 3 main
+        # indices). The full F&O universe is loaded separately by _initialize_trading_day()
+        # and tracked for sector scope analytics without generating Telegram noise.
         symbols = args.symbol or settings.live_symbols
         timeframe = args.timeframe_minutes or settings.live_timeframe_minutes
         service = LiveMarketDataService(
@@ -134,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "sanity-check":
-        from trade_system.application.agent.data_sanity_agent import DataSanityAgent
+        from trade_system.domains.advisory.application.agent.data_sanity_agent import DataSanityAgent
         agent = DataSanityAgent(settings)
         result = agent.ensure_data_sanity(min_candles=100)
         print(f"Sanity check complete. Healed symbols: {result.get('healed_daily', [])}")
@@ -197,6 +235,81 @@ def main(argv: list[str] | None = None) -> int:
             },
             indent=2,
         ))
+        return 0
+
+    if args.command == "bollinger-research":
+        from trade_system.domains.analysis.application.research.bollinger_agent import BollingerResearchOrchestrator
+        orchestrator = BollingerResearchOrchestrator(root=Path.cwd())
+        artifacts = orchestrator.run_upgrade_cycle(year=args.year, symbol=args.symbol, mode=args.mode)
+        print(json.dumps(
+            {
+                "baseline_summary_path": str(artifacts.baseline_summary_path),
+                "upgraded_summary_path": str(artifacts.upgraded_summary_path),
+                "candidate_config_path": str(artifacts.candidate_config_path),
+                "comparison_path": str(artifacts.comparison_path),
+                "report_path": str(artifacts.report_path),
+            },
+            indent=2,
+        ))
+        return 0
+
+    if args.command == "prajwal-scan":
+        from trade_system.domains.advisory.application.agent.prajwal_agent import PrajwalPriceActionAgent
+        agent = PrajwalPriceActionAgent()
+        symbols = [s.strip() for s in args.symbol.split(",")]
+        suggestions = agent.scan_symbols(symbols, timeframe=args.timeframe)
+        
+        if not suggestions:
+            print("No high probability setups found.")
+        else:
+            for s in suggestions:
+                print(f"[{s['timestamp']}] {s['symbol']} | {s['action']}")
+                print(f"Reason: {s['reason']}")
+                print(f"Entry: {s['entry']} | SL: {s['stop_loss']} | Target: {s['target']}")
+                print(f"AI Narrative: {s['llm_narrative']}")
+                print("-" * 50)
+        return 0
+
+    if args.command == "weekly-breakout-scan":
+        from trade_system.domains.advisory.application.agent.weekly_breakout_agent import WeeklyBreakoutAgent
+        agent = WeeklyBreakoutAgent()
+        print(f"Scanning for {args.direction} weekly breakouts after {args.min_consolidation_weeks}+ weeks of consolidation...")
+        suggestions = agent.scan_universe(min_consolidation_weeks=args.min_consolidation_weeks, direction=args.direction)
+        
+        if not suggestions:
+            print("No high probability setups found.")
+        else:
+            for s in suggestions:
+                print(f"[{s['breakout_date']}] {s['symbol']} | {s['type']} BREAKOUT")
+                print(f"Squeeze duration: {s['squeeze_weeks']} weeks | Close: {s['close']} | BBW: {s['bbw']} | Vol Surge: {s['volume_score']}x")
+                print("-" * 50)
+        return 0
+
+    if args.command == "ultimate-scan":
+        from trade_system.domains.advisory.application.agent.ultimate_intraday_agent import UltimateIntradayAgent
+        from datetime import datetime
+        agent = UltimateIntradayAgent()
+        target_date = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else None
+        trades = agent.scan(target_date)
+
+        if not trades:
+            print("No high probability setups found.")
+        else:
+            for t in trades:
+                print(t.format_display())
+                print("-" * 60)
+        return 0
+
+    if args.command == "ultimate-backtest":
+        from trade_system.domains.analysis.application.backtesting.ultimate_agent_backtest import UltimateAgentBacktest
+        from datetime import datetime
+        from pathlib import Path
+        agent_bt = UltimateAgentBacktest()
+        start = datetime.strptime(args.start, "%Y-%m-%d").date()
+        end = datetime.strptime(args.end, "%Y-%m-%d").date()
+        output_dir = Path("reports/ultimate_agent")
+        agent_bt.run(output_dir, start_date=start, end_date=end)
+        print(f"\nBacktest complete. Results saved to {output_dir}/")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

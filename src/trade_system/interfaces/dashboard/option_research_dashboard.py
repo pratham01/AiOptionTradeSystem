@@ -5,8 +5,8 @@ import plotly.graph_objects as go
 from datetime import datetime
 import asyncio
 
-from trade_system.application.agent.option_research_agent import OptionResearchAgent
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.advisory.application.agent.option_research_agent import OptionResearchAgent
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 # --- CUSTOM CSS ---
 st.markdown("""

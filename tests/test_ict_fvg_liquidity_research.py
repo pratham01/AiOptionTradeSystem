@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.backtesting.ict_fvg_liquidity_research import FVGDetector, IctFvgLiquidityResearch
+from trade_system.domains.analysis.application.backtesting.ict_fvg_liquidity_research import FVGDetector, IctFvgLiquidityResearch
 
 
 def test_fvg_detector_detects_bullish_gap():

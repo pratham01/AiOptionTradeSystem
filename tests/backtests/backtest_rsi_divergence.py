@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 from pathlib import Path
-from trade_system.application.indicators.rsi_divergence import RsiDivergence
+from trade_system.domains.strategy.application.indicators.rsi_divergence import RsiDivergence
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -61,9 +61,9 @@ def main():
     # 2. Intraday Backtest (Mock or fetch if available)
     # We'll try to fetch 5min data for the last week to compare
     import asyncio
-    from trade_system.config import Settings
-    from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
-    from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+    from trade_system.shared.config import Settings
+    from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
+    from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
     from datetime import date, timedelta
 
     async def get_intraday_data():

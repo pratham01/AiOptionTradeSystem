@@ -2,10 +2,10 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers import _parse_nse_market_status
-from trade_system.config import Settings
-from trade_system.config.settings import TelegramConfig, FyersConfig
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import _parse_nse_market_status
+from trade_system.shared.config import Settings
+from trade_system.shared.config.settings import TelegramConfig, FyersConfig
 from trade_system.interfaces.live.collector import LiveMarketDataService
 
 
@@ -43,7 +43,7 @@ class _DummyCatalog:
 def test_collector_converts_epoch_ticks_to_ist_session_time():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -60,7 +60,7 @@ def test_refresh_token_via_totp_rebuilds_broker_with_named_credentials(monkeypat
         telegram=TelegramConfig(bot_token="token", chat_id="chat"),
     )
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,

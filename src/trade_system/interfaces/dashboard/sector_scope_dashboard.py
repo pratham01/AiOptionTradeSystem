@@ -6,21 +6,22 @@ import plotly.graph_objects as go
 from datetime import datetime, date, time as dt_time
 from pathlib import Path
 import json
+from trade_system.interfaces.dashboard.shared_broker import fetch_live_quotes
 
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from sqlalchemy import text
-from trade_system.infrastructure.data.fo_universe import get_sector_mapping, get_stocks_by_sector
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_sector_mapping, get_stocks_by_sector
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
 import importlib
-import trade_system.application.analysis.intraday_edge_scorer
-import trade_system.application.analysis.smart_entry_trigger
-importlib.reload(trade_system.application.analysis.intraday_edge_scorer)
-importlib.reload(trade_system.application.analysis.smart_entry_trigger)
+import trade_system.domains.analysis.application.analysis.intraday_edge_scorer
+import trade_system.domains.analysis.application.analysis.smart_entry_trigger
+importlib.reload(trade_system.domains.analysis.application.analysis.intraday_edge_scorer)
+importlib.reload(trade_system.domains.analysis.application.analysis.smart_entry_trigger)
 
-from trade_system.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
-from trade_system.application.analysis.smart_entry_trigger import SmartEntryTrigger
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.config import Settings
+from trade_system.domains.analysis.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
+from trade_system.domains.analysis.application.analysis.smart_entry_trigger import SmartEntryTrigger
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
 
 # --- COMPACT CSS STYLING ---
 st.markdown("""
@@ -166,123 +167,6 @@ def fetch_target_date_and_data(selected_date_str=None):
     df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed')
     return selected_date_str, df, last_candle_ts
 
-@st.cache_data(ttl=60)
-def fetch_live_quotes(symbols):
-    import os
-    import json
-    from datetime import datetime, timedelta
-    from pathlib import Path
-    from trade_system.core.ports.broker import MarketQuote
-    
-    cache_path = Path("data/live_quotes_cache.json")
-    
-    # Try reading from file cache first
-    cached_quotes = {}
-    use_cache = False
-    
-    if cache_path.exists():
-        try:
-            with open(cache_path, "r") as f:
-                cache_data = json.load(f)
-            cached_time_str = cache_data.get("timestamp")
-            if cached_time_str:
-                cached_time = datetime.fromisoformat(cached_time_str)
-                # If cache is fresh (less than 60 seconds old), we can reuse it
-                if datetime.now() - cached_time < timedelta(seconds=60):
-                    use_cache = True
-                
-                # Deserialize quotes
-                for sym, q_dict in cache_data.get("quotes", {}).items():
-                    cached_quotes[sym] = MarketQuote(
-                        symbol=q_dict["symbol"],
-                        exchange=q_dict["exchange"],
-                        last_price=float(q_dict["last_price"]),
-                        open=float(q_dict["open"]),
-                        high=float(q_dict["high"]),
-                        low=float(q_dict["low"]),
-                        close=float(q_dict["close"]),
-                        previous_close=float(q_dict["previous_close"]),
-                        volume=int(q_dict["volume"]),
-                        change=float(q_dict["change"]),
-                        change_percent=float(q_dict["change_percent"]),
-                        timestamp=datetime.fromisoformat(q_dict["timestamp"]),
-                        bid=float(q_dict.get("bid", 0.0)),
-                        ask=float(q_dict.get("ask", 0.0)),
-                        bid_qty=int(q_dict.get("bid_qty", 0)),
-                        ask_qty=int(q_dict.get("ask_qty", 0)),
-                        ltp=float(q_dict.get("ltp", 0.0))
-                    )
-        except Exception:
-            pass
-            
-    if use_cache and all(s in cached_quotes for s in symbols):
-        return {s: cached_quotes[s] for s in symbols}
-        
-    # Otherwise, fetch from broker manager
-    try:
-        from trade_system.infrastructure.brokers.factory import get_broker_manager, reset_broker_manager
-        from trade_system.config import Settings
-        
-        settings = Settings.load()
-        manager = get_broker_manager(settings)
-        
-        # Check if the access token in settings has changed compared to the one in the manager
-        fyers_broker_health = manager.brokers.get("fyers")
-        if fyers_broker_health:
-            current_token = settings.fyers.access_token
-            if getattr(fyers_broker_health.broker, 'access_token', None) != current_token:
-                reset_broker_manager()
-                manager = get_broker_manager(settings)
-                
-        try:
-            quotes = manager.get_quotes(symbols)
-        except Exception:
-            # If the broker manager fetch fails, reset and retry once
-            reset_broker_manager()
-            settings = Settings.load()
-            manager = get_broker_manager(settings)
-            quotes = manager.get_quotes(symbols)
-            
-        # Serialize and write to cache file
-        if quotes:
-            serialized_quotes = {}
-            for sym, q in quotes.items():
-                serialized_quotes[sym] = {
-                    "symbol": q.symbol,
-                    "exchange": q.exchange,
-                    "last_price": q.last_price,
-                    "open": q.open,
-                    "high": q.high,
-                    "low": q.low,
-                    "close": q.close,
-                    "previous_close": q.previous_close,
-                    "volume": q.volume,
-                    "change": q.change,
-                    "change_percent": q.change_percent,
-                    "timestamp": q.timestamp.isoformat(),
-                    "bid": q.bid,
-                    "ask": q.ask,
-                    "bid_qty": q.bid_qty,
-                    "ask_qty": q.ask_qty,
-                    "ltp": q.ltp
-                }
-            cache_payload = {
-                "timestamp": datetime.now().isoformat(),
-                "quotes": serialized_quotes
-            }
-            try:
-                cache_path.parent.mkdir(exist_ok=True)
-                with open(cache_path, "w") as f:
-                    json.dump(cache_payload, f)
-            except Exception:
-                pass
-                
-        return quotes
-    except Exception as e:
-        # Fallback to cached quotes (even if old) if API call fails
-        if cached_quotes:
-            return {s: cached_quotes[s] for s in symbols if s in cached_quotes}
-        raise e
 
 available_dates = fetch_available_dates()
 
@@ -391,10 +275,10 @@ else:
         latest_row = grp_sorted.iloc[-1]
         close_last = float(latest_row['close'])
         
-        # --- Volume Surge Computation ---
-        # Compute today's volume and 5-day average daily volume
+        # --- Time-Adjusted RVOL (Relative Volume) ---
+        # Compute today's volume and time-adjusted historical average
         volume_today = 0
-        avg_volume_5d = 0
+        avg_vol_time_adj = 0
         vol_surge = 0.0
         
         today_candles = grp_sorted[grp_sorted['timestamp'].dt.date == target_date]
@@ -406,18 +290,29 @@ else:
         elif not today_candles.empty:
             volume_today = int(today_candles['volume'].sum())
         
-        # Historical daily volumes for last 5 trading days
-        if not prev_candles_all.empty:
+        # Determine the current time cutoff based on today's available candles or current time
+        current_time_limit = None
+        if not today_candles.empty:
+            current_time_limit = today_candles['timestamp'].dt.time.max()
+        elif is_today:
+            current_time_limit = datetime.now().time()
+            
+        # Historical average volume up to the same time of day over the last 10 trading days
+        if not prev_candles_all.empty and current_time_limit is not None:
             prev_candles_all = prev_candles_all.copy()
-            prev_candles_all['trade_date'] = prev_candles_all['timestamp'].dt.date
-            daily_vols = prev_candles_all.groupby('trade_date')['volume'].sum()
-            # Take last 5 trading days
-            last_5_days = daily_vols.sort_index().tail(5)
-            if not last_5_days.empty:
-                avg_volume_5d = int(last_5_days.mean())
+            # Filter historical candles to only include those up to the current time limit
+            prev_candles_filtered = prev_candles_all[prev_candles_all['timestamp'].dt.time <= current_time_limit].copy()
+            
+            if not prev_candles_filtered.empty:
+                prev_candles_filtered['trade_date'] = prev_candles_filtered['timestamp'].dt.date
+                daily_vols = prev_candles_filtered.groupby('trade_date')['volume'].sum()
+                # Use a larger sample (10 days) for time-adjusted average to smooth out noise
+                last_10_days = daily_vols.sort_index().tail(10)
+                if not last_10_days.empty:
+                    avg_vol_time_adj = int(last_10_days.mean())
         
-        if avg_volume_5d > 0 and volume_today > 0:
-            vol_surge = round(volume_today / avg_volume_5d, 2)
+        if avg_vol_time_adj > 0 and volume_today > 0:
+            vol_surge = round(volume_today / avg_vol_time_adj, 2)
         
         # Override with live quote LTP and compute pChange if applicable
         pchange = None
@@ -469,7 +364,7 @@ else:
                 "close_prev": close_prev,
                 "pChange": pchange,
                 "volume_today": volume_today,
-                "avg_volume_5d": avg_volume_5d,
+                "avg_vol_time_adj": avg_vol_time_adj,
                 "vol_surge": vol_surge
             })
             
@@ -493,7 +388,7 @@ else:
                             "close_prev": prev_close,
                             "pChange": pchange,
                             "volume_today": quote.volume or 0,
-                            "avg_volume_5d": 0,
+                            "avg_vol_time_adj": 0,
                             "vol_surge": 0.0
                         })
             if live_symbols_to_add:
@@ -506,7 +401,7 @@ else:
                 if today_candle_count < 2:
                     st.sidebar.warning(f"⚠️ No intraday candles in DB yet. Showing **daily change** as fallback. Start the live collector for {selected_lookback} precision.")
     else:
-        merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange", "volume_today", "avg_volume_5d", "vol_surge"])
+        merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange", "volume_today", "avg_vol_time_adj", "vol_surge"])
     
     # Sector performance
     if not merged_closes.empty:
@@ -518,11 +413,218 @@ else:
     sector_perf = sector_perf.sort_values(by='pChange', ascending=False)
     
     options = sorted(sector_perf['sector'].unique())
-    
+
+    # -----------------------------------------------------------------
+    # Pre-compute Intraday VWAP (15m) & Daily RSI (14-Day) for symbols
+    # -----------------------------------------------------------------
+    def _compute_vwap_rsi(df_all: pd.DataFrame, symbols: list, target_date) -> dict:
+        """Returns {symbol: {vwap, vs_vwap, daily_rsi}} for all symbols in list."""
+        result = {}
+        tgt_df = df_all[df_all['timestamp'].dt.date == target_date]
+        if tgt_df.empty and not df_all.empty:
+            latest_available = df_all['timestamp'].dt.date.max()
+            tgt_df = df_all[df_all['timestamp'].dt.date == latest_available]
+
+        # Fetch daily data in bulk to properly compute 14-day RSI (Wilder's EMA)
+        rsi_dict = {}
+        if symbols:
+            try:
+                from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+                from sqlalchemy import text
+                placeholders = ', '.join([f"'{s}'" for s in symbols])
+                # Fetch recent 50 daily candles per symbol to ensure sufficient data for EMA
+                query_daily = text(f"""
+                    SELECT symbol, timestamp, close 
+                    FROM (
+                        SELECT symbol, timestamp, close,
+                               row_number() over (partition by symbol order by timestamp desc) as rn
+                        FROM ohlcv_daily 
+                        WHERE symbol IN ({placeholders})
+                    )
+                    WHERE rn <= 50
+                    ORDER BY symbol, timestamp ASC
+                """)
+                with get_engine().connect() as conn:
+                    daily_df = pd.read_sql(query_daily, conn)
+                
+                if not daily_df.empty:
+                    for sym, group in daily_df.groupby('symbol'):
+                        closes = group['close']
+                        if len(closes) >= 15:
+                            delta = closes.diff()
+                            gain = delta.where(delta > 0, 0.0)
+                            loss = -delta.where(delta < 0, 0.0)
+                            avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+                            avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+                            rs = avg_gain / avg_loss
+                            rsi = 100 - (100 / (1 + rs))
+                            val = rsi.iloc[-1]
+                            if pd.notna(val):
+                                rsi_dict[sym] = round(val, 1)
+            except Exception as e:
+                pass
+
+        for sym in symbols:
+            sym_df_full = df_all[df_all['symbol'] == sym].sort_values('timestamp').copy()
+            sym_df = tgt_df[tgt_df['symbol'] == sym].sort_values('timestamp').copy()
+
+            if sym_df_full.empty:
+                result[sym] = {"vwap": None, "vs_vwap": None, "daily_rsi": None}
+                continue
+
+            # 1. Intraday VWAP on target date 15m candles
+            vwap_val = None
+            vs_vwap = None
+            if not sym_df.empty and len(sym_df) >= 2:
+                sym_df['tp'] = (sym_df['high'] + sym_df['low'] + sym_df['close']) / 3.0
+                cum_vol = sym_df['volume'].cumsum()
+                safe_cum_vol = cum_vol.replace(0, float('nan'))
+                vwap_series = (sym_df['tp'] * sym_df['volume']).cumsum() / safe_cum_vol
+                vwap_val = float(vwap_series.iloc[-1]) if not vwap_series.dropna().empty else None
+                close_last = float(sym_df['close'].iloc[-1])
+                vs_vwap = ((close_last - vwap_val) / vwap_val * 100) if vwap_val and vwap_val > 0 else None
+
+            # 2. Daily RSI (14-Day) from pre-calculated dictionary
+            daily_rsi_val = rsi_dict.get(sym)
+
+            result[sym] = {"vwap": vwap_val, "vs_vwap": vs_vwap, "daily_rsi": daily_rsi_val}
+        return result
+
     # Pre-calculate global leaderboards
-    top_gainers = merged_closes.sort_values(by='pChange', ascending=False).head(5)
-    top_losers = merged_closes.sort_values(by='pChange', ascending=True).head(5)
-    
+    top_gainers = merged_closes.sort_values(by='pChange', ascending=False).head(10)
+    top_losers = merged_closes.sort_values(by='pChange', ascending=True).head(10)
+
+    def _compute_entry_times(prev_closes: dict, target_date) -> dict:
+        try:
+            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+            from sqlalchemy import text
+            query = text("""
+                SELECT symbol, timestamp, close
+                FROM ohlcv_5m
+                WHERE date(timestamp) = :tgt_date
+            """)
+            with get_engine().connect() as conn:
+                tgt_df = pd.read_sql(query, conn, params={"tgt_date": target_date.strftime("%Y-%m-%d")})
+        except Exception:
+            tgt_df = pd.DataFrame()
+            
+        if tgt_df.empty:
+            return {}
+            
+        tgt_df['timestamp'] = pd.to_datetime(tgt_df['timestamp'], format='mixed')
+        
+        # Fast way to compute % change for all symbols at all timestamps
+        pivot_closes = tgt_df.pivot_table(index='timestamp', columns='symbol', values='close')
+        pivot_closes = pivot_closes.ffill()
+        
+        entry_times = {}
+        prev_series = pd.Series(prev_closes)
+        
+        symbols_to_keep = pivot_closes.columns.intersection(prev_series.index)
+        pivot_closes = pivot_closes[symbols_to_keep]
+        prev_series = prev_series[symbols_to_keep]
+        
+        if pivot_closes.empty:
+            return {}
+            
+        # Compute percentage change
+        pchange_df = ((pivot_closes - prev_series) / prev_series) * 100
+        
+        # Rank gainers/losers
+        gainer_ranks = pchange_df.rank(axis=1, ascending=False, method='min')
+        loser_ranks = pchange_df.rank(axis=1, ascending=True, method='min')
+        
+        for sym in symbols_to_keep:
+            g_times = gainer_ranks.index[gainer_ranks[sym] <= 10]
+            l_times = loser_ranks.index[loser_ranks[sym] <= 10]
+            
+            g_entry = g_times[0].strftime("%H:%M") if len(g_times) > 0 else "—"
+            l_entry = l_times[0].strftime("%H:%M") if len(l_times) > 0 else "—"
+            
+            entry_times[sym] = {"gainer_entry": g_entry, "loser_entry": l_entry}
+            
+        return entry_times
+
+    if not merged_closes.empty:
+        prev_closes_dict = merged_closes.set_index('symbol')['close_prev'].to_dict()
+        entry_times_dict = _compute_entry_times(prev_closes_dict, target_date)
+    else:
+        entry_times_dict = {}
+
+    # -----------------------------------------------------------------
+    # Compute Near Breakout / Near Breakdown stocks (within 0.75% of Key Resistance/Support or High/Low)
+    # -----------------------------------------------------------------
+    def _compute_near_breakout_breakdown(df_all: pd.DataFrame, merged_df: pd.DataFrame, target_date) -> tuple[list, list]:
+        tgt_df = df_all[df_all['timestamp'].dt.date == target_date]
+        if tgt_df.empty and not df_all.empty:
+            latest_available = df_all['timestamp'].dt.date.max()
+            tgt_df = df_all[df_all['timestamp'].dt.date == latest_available]
+
+        near_bo = []
+        near_bd = []
+
+        if tgt_df.empty:
+            return near_bo, near_bd
+
+        for symbol, grp in tgt_df.groupby('symbol'):
+            if symbol.endswith('-INDEX'):
+                continue
+            grp_sorted = grp.sort_values('timestamp')
+            if len(grp_sorted) < 2:
+                continue
+
+            day_high = float(grp_sorted['high'].max())
+            day_low = float(grp_sorted['low'].min())
+            ltp = float(grp_sorted['close'].iloc[-1])
+            if ltp <= 0:
+                continue
+
+            # Distance to day high / low
+            dist_high_pct = ((day_high - ltp) / ltp) * 100
+            dist_low_pct = ((ltp - day_low) / ltp) * 100
+
+            # Match sector and volume info from merged_df
+            match_row = merged_df[merged_df['symbol'] == symbol]
+            sector = match_row['sector'].values[0] if not match_row.empty else "UNKNOWN"
+            pchange = match_row['pChange'].values[0] if not match_row.empty else 0.0
+            vs = match_row['vol_surge'].values[0] if not match_row.empty and 'vol_surge' in match_row else 0.0
+
+            # Near Breakout: Price within 0.75% below Day High, with positive movement
+            if 0 <= dist_high_pct <= 0.75 and pchange > 0:
+                near_bo.append({
+                    "symbol": symbol,
+                    "sector": sector,
+                    "ltp": ltp,
+                    "level": day_high,
+                    "dist_pct": dist_high_pct,
+                    "pChange": pchange,
+                    "vol_surge": vs,
+                    "type": "Near Day High"
+                })
+
+            # Near Breakdown: Price within 0.75% above Day Low, with negative movement
+            if 0 <= dist_low_pct <= 0.75 and pchange < 0:
+                near_bd.append({
+                    "symbol": symbol,
+                    "sector": sector,
+                    "ltp": ltp,
+                    "level": day_low,
+                    "dist_pct": dist_low_pct,
+                    "pChange": pchange,
+                    "vol_surge": vs,
+                    "type": "Near Day Low"
+                })
+
+        near_bo_sorted = sorted(near_bo, key=lambda x: x['dist_pct'])[:5]
+        near_bd_sorted = sorted(near_bd, key=lambda x: x['dist_pct'])[:5]
+
+        return near_bo_sorted, near_bd_sorted
+
+    raw_near_bo, raw_near_bd = _compute_near_breakout_breakdown(df, merged_closes, target_date)
+
+    _gl_symbols = list(top_gainers['symbol'].values) + list(top_losers['symbol'].values) + [x['symbol'] for x in raw_near_bo] + [x['symbol'] for x in raw_near_bd]
+    _indicators = _compute_vwap_rsi(df, list(set(_gl_symbols)), target_date)
+
     gainers_data = []
     for idx, row in top_gainers.iterrows():
         sym_clean = row['symbol'].replace("NSE:", "").replace("-EQ", "")
@@ -536,14 +638,42 @@ else:
             vs_label = f"🔴 {vs:.1f}x"
         else:
             vs_label = "⚪ N/A"
+        ind = _indicators.get(row['symbol'], {})
+        rsi_v = ind.get('daily_rsi')
+        vwap_v = ind.get('vwap')
+        vs_vwap = ind.get('vs_vwap')
+        # RSI label
+        if rsi_v is None:
+            rsi_label = "—"
+        elif rsi_v >= 70:
+            rsi_label = f"🔥 {rsi_v:.0f}"
+        elif rsi_v <= 30:
+            rsi_label = f"🧊 {rsi_v:.0f}"
+        else:
+            rsi_label = f"{rsi_v:.0f}"
+        vwap_v = ind.get('vwap')
+        if vs_vwap is None:
+            vwap_label = "—"
+        elif vs_vwap > 0:
+            vwap_label = f"↑ {vs_vwap:+.1f}%"
+        else:
+            vwap_label = f"↓ {vs_vwap:+.1f}%"
+            
+        vwap_val_str = f"₹{vwap_v:.2f}" if vwap_v is not None else "—"
+        
+        entry_info = entry_times_dict.get(row['symbol'], {})
+        entry_time = entry_info.get("gainer_entry", "—")
         gainers_data.append({
             "Symbol": sym_clean,
             "Sector": row['sector'],
             "LTP": row['close_last'],
             "Change": row['pChange'],
-            "Vol Surge": vs_label
+            "Vol Surge": vs_label,
+            "Daily RSI": rsi_label,
+            "VWAP": vwap_val_str,
+            "Entry Time": entry_time,
         })
-        
+
     losers_data = []
     for idx, row in top_losers.iterrows():
         sym_clean = row['symbol'].replace("NSE:", "").replace("-EQ", "")
@@ -556,12 +686,82 @@ else:
             vs_label = f"🔴 {vs:.1f}x"
         else:
             vs_label = "⚪ N/A"
+        ind = _indicators.get(row['symbol'], {})
+        rsi_v = ind.get('daily_rsi')
+        vs_vwap = ind.get('vs_vwap')
+        if rsi_v is None:
+            rsi_label = "—"
+        elif rsi_v >= 70:
+            rsi_label = f"🔥 {rsi_v:.0f}"
+        elif rsi_v <= 30:
+            rsi_label = f"🧊 {rsi_v:.0f}"
+        else:
+            rsi_label = f"{rsi_v:.0f}"
+        vwap_v = ind.get('vwap')
+        if vs_vwap is None:
+            vwap_label = "—"
+        elif vs_vwap > 0:
+            vwap_label = f"↑ {vs_vwap:+.1f}%"
+        else:
+            vwap_label = f"↓ {vs_vwap:+.1f}%"
+            
+        vwap_val_str = f"₹{vwap_v:.2f}" if vwap_v is not None else "—"
+        
+        entry_info = entry_times_dict.get(row['symbol'], {})
+        entry_time = entry_info.get("loser_entry", "—")
         losers_data.append({
             "Symbol": sym_clean,
             "Sector": row['sector'],
             "LTP": row['close_last'],
             "Change": row['pChange'],
-            "Vol Surge": vs_label
+            "Vol Surge": vs_label,
+            "Daily RSI": rsi_label,
+            "VWAP": vwap_val_str,
+            "Entry Time": entry_time,
+        })
+
+    near_bo_data = []
+    for item in raw_near_bo:
+        sym_clean = item['symbol'].replace("NSE:", "").replace("-EQ", "")
+        vs = item.get('vol_surge', 0)
+        vs_label = f"🟢 {vs:.1f}x" if vs >= 1.5 else (f"🟡 {vs:.1f}x" if vs >= 1.0 else (f"🔴 {vs:.1f}x" if vs > 0 else "⚪ N/A"))
+        ind = _indicators.get(item['symbol'], {})
+        rsi_v = ind.get('daily_rsi')
+        vs_vwap = ind.get('vs_vwap')
+        rsi_label = f"🔥 {rsi_v:.0f}" if rsi_v and rsi_v >= 70 else (f"🧊 {rsi_v:.0f}" if rsi_v and rsi_v <= 30 else (f"{rsi_v:.0f}" if rsi_v else "—"))
+        vwap_label = f"↑ {vs_vwap:+.1f}%" if vs_vwap and vs_vwap > 0 else (f"↓ {vs_vwap:+.1f}%" if vs_vwap else "—")
+        near_bo_data.append({
+            "Symbol": sym_clean,
+            "Sector": item['sector'],
+            "LTP": item['ltp'],
+            "High/Res": item['level'],
+            "Dist %": f"{item['dist_pct']:.2f}%",
+            "Change": item['pChange'],
+            "Vol Surge": vs_label,
+            "Daily RSI": rsi_label,
+            "vs VWAP": vwap_label
+        })
+
+    near_bd_data = []
+    for item in raw_near_bd:
+        sym_clean = item['symbol'].replace("NSE:", "").replace("-EQ", "")
+        vs = item.get('vol_surge', 0)
+        vs_label = f"🟢 {vs:.1f}x" if vs >= 1.5 else (f"🟡 {vs:.1f}x" if vs >= 1.0 else (f"🔴 {vs:.1f}x" if vs > 0 else "⚪ N/A"))
+        ind = _indicators.get(item['symbol'], {})
+        rsi_v = ind.get('daily_rsi')
+        vs_vwap = ind.get('vs_vwap')
+        rsi_label = f"🔥 {rsi_v:.0f}" if rsi_v and rsi_v >= 70 else (f"🧊 {rsi_v:.0f}" if rsi_v and rsi_v <= 30 else (f"{rsi_v:.0f}" if rsi_v else "—"))
+        vwap_label = f"↑ {vs_vwap:+.1f}%" if vs_vwap and vs_vwap > 0 else (f"↓ {vs_vwap:+.1f}%" if vs_vwap else "—")
+        near_bd_data.append({
+            "Symbol": sym_clean,
+            "Sector": item['sector'],
+            "LTP": item['ltp'],
+            "Low/Sup": item['level'],
+            "Dist %": f"{item['dist_pct']:.2f}%",
+            "Change": item['pChange'],
+            "Vol Surge": vs_label,
+            "Daily RSI": rsi_label,
+            "vs VWAP": vwap_label
         })
 
     # Max absolute change for bar widths
@@ -690,16 +890,16 @@ else:
     # ---- TAB 1: Gainers & Losers ----
     with tab_leaderboard:
         col_gainers, col_losers = st.columns(2)
-        
+
         with col_gainers:
-            st.markdown("##### 🟢 Top 5 Gainers")
+            st.markdown("##### 🟢 Top 10 Gainers")
             if gainers_data:
                 gainer_df = pd.DataFrame(gainers_data)
                 st.dataframe(
                     gainer_df.style.format({
                         "LTP": "₹{:.2f}",
                         "Change": "{:+.2f}%"
-                    }).applymap(
+                    }).map(
                         lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else "",
                         subset=["Change"]
                     ),
@@ -709,16 +909,16 @@ else:
                     selection_mode="single-row",
                     key="gainer_leaderboard"
                 )
-        
+
         with col_losers:
-            st.markdown("##### 🔴 Top 5 Losers")
+            st.markdown("##### 🔴 Top 10 Losers")
             if losers_data:
                 loser_df = pd.DataFrame(losers_data)
                 st.dataframe(
                     loser_df.style.format({
                         "LTP": "₹{:.2f}",
                         "Change": "{:+.2f}%"
-                    }).applymap(
+                    }).map(
                         lambda v: "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else "",
                         subset=["Change"]
                     ),
@@ -729,7 +929,49 @@ else:
                     key="loser_leaderboard"
                 )
 
-        # Auto-expand: show stocks of clicked sector
+        st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+        col_near_bo, col_near_bd = st.columns(2)
+
+        with col_near_bo:
+            st.markdown("##### 🚀 Stocks Near Breakout (< 0.75% to Day High)")
+            if near_bo_data:
+                bo_df = pd.DataFrame(near_bo_data)
+                st.dataframe(
+                    bo_df.style.format({
+                        "LTP": "₹{:.2f}",
+                        "High/Res": "₹{:.2f}",
+                        "Change": "{:+.2f}%"
+                    }).map(
+                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else "",
+                        subset=["Change"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    key="near_bo_table"
+                )
+            else:
+                st.info("No stocks currently within 0.75% of intraday breakout level.")
+
+        with col_near_bd:
+            st.markdown("##### ⚠️ Stocks Near Breakdown (< 0.75% to Day Low)")
+            if near_bd_data:
+                bd_df = pd.DataFrame(near_bd_data)
+                st.dataframe(
+                    bd_df.style.format({
+                        "LTP": "₹{:.2f}",
+                        "Low/Sup": "₹{:.2f}",
+                        "Change": "{:+.2f}%"
+                    }).map(
+                        lambda v: "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else "",
+                        subset=["Change"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    key="near_bd_table"
+                )
+            else:
+                st.info("No stocks currently within 0.75% of intraday breakdown level.")
+
         if st.session_state.get('clicked_stock_sector'):
             clicked_sector = st.session_state['clicked_stock_sector']
             sector_stocks_df = merged_closes[merged_closes['sector'] == clicked_sector].copy()
@@ -747,7 +989,7 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Build vol surge labels for drill-down
+                # Build vol surge & indicator labels for drill-down
                 def _vol_surge_label(vs):
                     if vs >= 1.5:
                         return f"🟢 {vs:.1f}x"
@@ -756,16 +998,42 @@ else:
                     elif vs > 0:
                         return f"🔴 {vs:.1f}x"
                     return "⚪ N/A"
-                
+
                 sector_stocks_df['Vol Surge'] = sector_stocks_df['vol_surge'].apply(_vol_surge_label)
-                
-                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange', 'Vol Surge']].copy()
-                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge']
+
+                # Map Daily RSI & vs VWAP indicators
+                rsi_labels = []
+                vwap_labels = []
+                for sym in sector_stocks_df['symbol']:
+                    ind = _indicators.get(sym, {})
+                    rsi_v = ind.get('daily_rsi')
+                    vs_vwap = ind.get('vs_vwap')
+                    if rsi_v is None:
+                        rsi_labels.append("—")
+                    elif rsi_v >= 70:
+                        rsi_labels.append(f"🔥 {rsi_v:.0f}")
+                    elif rsi_v <= 30:
+                        rsi_labels.append(f"🧊 {rsi_v:.0f}")
+                    else:
+                        rsi_labels.append(f"{rsi_v:.0f}")
+
+                    if vs_vwap is None:
+                        vwap_labels.append("—")
+                    elif vs_vwap > 0:
+                        vwap_labels.append(f"↑ {vs_vwap:+.1f}%")
+                    else:
+                        vwap_labels.append(f"↓ {vs_vwap:+.1f}%")
+
+                sector_stocks_df['Daily RSI'] = rsi_labels
+                sector_stocks_df['vs VWAP'] = vwap_labels
+
+                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
+                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
                 st.dataframe(
                     display_df.style.format({
                         "LTP (₹)": "₹{:.2f}",
                         "Change %": "{:+.2f}%"
-                    }).applymap(
+                    }).map(
                         lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
                         subset=["Change %"]
                     ),
@@ -1030,7 +1298,7 @@ else:
                     if not weekly_highs.empty:
                         is_weekly_high = latest_close >= (weekly_highs.max() * 0.995)
                     try:
-                        from trade_system.application.indicators import calculate_supertrend
+                        from trade_system.domains.strategy.application.indicators import calculate_supertrend
                         st_d = calculate_supertrend(grp_d)
                         if not st_d.empty:
                             last_st_d = st_d.iloc[-1]
@@ -1042,10 +1310,23 @@ else:
                 if f_weekly and not is_weekly_high: continue
                 if f_st and not touches_daily_st: continue
                 if f_abnormal and vol_ratio < float(vol_surge): continue
+
+                ind = _indicators.get(symbol, {})
+                rsi_v = ind.get('daily_rsi')
+                if rsi_v is None:
+                    rsi_label = "—"
+                elif rsi_v >= 70:
+                    rsi_label = f"🔥 {rsi_v:.0f}"
+                elif rsi_v <= 30:
+                    rsi_label = f"🧊 {rsi_v:.0f}"
+                else:
+                    rsi_label = f"{rsi_v:.0f}"
+
                 stock_rows.append({
                     "Symbol": symbol.replace("NSE:", "").replace("-EQ", ""),
                     "LTP (₹)": latest_row['close'], "Change %": p_change,
                     "Vol Surge": vol_ratio, "VWAP": vwap,
+                    "Daily RSI": rsi_label,
                     "ORB Hi": orb_high, "ORB Lo": orb_low,
                     "Status": status,
                     "52W": "🔥" if is_52w_high else "—",
@@ -1070,7 +1351,7 @@ else:
         st.subheader("📦 Volatility Compression & Squeeze Radar")
         st.caption("Scans F&O and liquid stocks for low-volatility coiling patterns (NR7, Inside Bars) that typically precede explosive moves.")
         
-        from trade_system.application.indicators.compression import CompressionIndicator
+        from trade_system.domains.strategy.application.indicators.compression import CompressionIndicator
         
         screener = BreakoutScreener()
         fo_symbols = list(screener.fo_metadata.keys())
@@ -1090,7 +1371,7 @@ else:
                 try:
                     with engine.connect() as conn:
                         df_comp = pd.read_sql(query_comp, conn, params={"target_date": target_date.isoformat()})
-                    df_comp['timestamp'] = pd.to_datetime(df_comp['timestamp'])
+                    df_comp['timestamp'] = pd.to_datetime(df_comp['timestamp'], format="mixed")
                 except Exception as ex:
                     st.error(f"Failed to query database for compression scan: {ex}")
                     df_comp = pd.DataFrame()
@@ -1163,7 +1444,7 @@ else:
                                 "Close (₹)": "{:.2f}",
                                 "ATR (₹)": "{:.2f}",
                                 "Squeeze Score": "{:.1f}%"
-                            }).applymap(
+                            }).map(
                                 lambda v: "color: #ff9f1c; font-weight:700" if v == "🔥 YES" else "",
                                 subset=["Coiled"]
                             ),
@@ -1442,10 +1723,10 @@ else:
                         "LTP (₹)": "{:.2f}",
                         "Chg %": "{:+.2f}%",
                         "Edge Score": "{:.0f}/100"
-                    }).applymap(
+                    }).map(
                         lambda v: "color: #22c55e; font-weight:700" if v == "🟢 CALL" else "color: #ef4444; font-weight:700" if v == "🔴 PUT" else "",
                         subset=["Dir"]
-                    ).applymap(
+                    ).map(
                         lambda v: "color: #22c55e; font-weight:700" if v == "TRIGGERED" else "color: #eab308; font-weight:700" if v == "APPROACHING" else "",
                         subset=["Status"]
                     ),

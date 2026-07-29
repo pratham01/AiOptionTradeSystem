@@ -6,7 +6,7 @@ root_path = Path(__file__).parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.application.analysis.candlestick_patterns import CandlestickPatternAnalyzer
+from trade_system.domains.analysis.application.analysis.candlestick_patterns import CandlestickPatternAnalyzer
 
 if __name__ == "__main__":
     artifacts = CandlestickPatternAnalyzer().run(

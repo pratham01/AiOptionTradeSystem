@@ -2,7 +2,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from trade_system.application.backtesting.zone_engine_research import ZoneEngineResearch
+from trade_system.domains.analysis.application.backtesting.zone_engine_research import ZoneEngineResearch
 
 
 def test_zone_engine_run_2026_smoke(tmp_path: Path):

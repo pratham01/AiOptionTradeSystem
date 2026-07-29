@@ -8,10 +8,10 @@ from pathlib import Path
 import json
 import logging
 
-from trade_system.infrastructure.data.fo_universe import FO_METADATA, get_fo_universe, get_stocks_by_sector, get_sector_mapping
-from trade_system.application.indicators.volume_delta import VolumeDeltaIndicator
-from trade_system.application.indicators.volume_profile import VolumeProfileIndicator
-from trade_system.config import Settings
+from trade_system.domains.market_data.infrastructure.data.fo_universe import FO_METADATA, get_fo_universe, get_stocks_by_sector, get_sector_mapping
+from trade_system.domains.strategy.application.indicators.volume_delta import VolumeDeltaIndicator
+from trade_system.domains.strategy.application.indicators.volume_profile import VolumeProfileIndicator
+from trade_system.shared.config import Settings
 from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 
 LOGGER = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def fetch_market_rankings(_broker):
         # If API returns nothing, try DB fallback
         if not quotes:
             LOGGER.warning("Broker returned zero quotes for rankings. Falling back to DB.")
-            from trade_system.infrastructure.database.connection import get_engine
+            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
             from sqlalchemy import text
             query = text("SELECT symbol, close FROM ohlcv_15m WHERE timestamp > datetime('now', '-5 days') ORDER BY timestamp ASC")
             with get_engine().connect() as conn:
@@ -69,7 +69,7 @@ def fetch_market_rankings(_broker):
             
             if not db_data.empty:
                 # Group by symbol to get change
-                db_data['date'] = pd.to_datetime(db_data['timestamp']).dt.date
+                db_data['date'] = pd.to_datetime(db_data['timestamp'], format="mixed").dt.date
                 grouped = db_data.groupby('symbol')
                 for sym, group in grouped:
                     if len(group) > 0:
@@ -111,9 +111,9 @@ def fetch_market_rankings(_broker):
         LOGGER.error(f"Market rankings fetch failed: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-from trade_system.application.indicators.compression import CompressionIndicator
-from trade_system.application.indicators.vwap import VWAPIndicator
-from trade_system.application.indicators.supertrend import SupertrendIndicator
+from trade_system.domains.strategy.application.indicators.compression import CompressionIndicator
+from trade_system.domains.strategy.application.indicators.vwap import VWAPIndicator
+from trade_system.domains.strategy.application.indicators.supertrend import SupertrendIndicator
 
 def fetch_stock_details(broker, symbol):
     end_dt = date.today()
@@ -168,8 +168,8 @@ def fetch_stock_details(broker, symbol):
 @st.cache_data(ttl=600)
 def get_rsi_label(symbol):
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.repository import get_market_data
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.repository import get_market_data
         from sqlalchemy.orm import Session
         engine = get_engine()
         with Session(engine) as session:
@@ -212,7 +212,7 @@ def render_stock_deep_dive(_broker, top_symbol):
 
             # MWPL
             try:
-                from trade_system.application.analysis.mwpl_analyzer import MwplAnalyzer
+                from trade_system.domains.analysis.application.analysis.mwpl_analyzer import MwplAnalyzer
                 mw_analyzer = MwplAnalyzer()
                 mw_data = mw_analyzer.get_mwpl_data()
                 clean_sym = top_symbol.replace("NSE:", "").replace("-EQ", "")
@@ -225,7 +225,7 @@ def render_stock_deep_dive(_broker, top_symbol):
 
             # FVG
             try:
-                from trade_system.application.indicators.retracement import RetracementIndicator
+                from trade_system.domains.strategy.application.indicators.retracement import RetracementIndicator
                 ret_ind = RetracementIndicator()
                 df_5m_calc = ret_ind.calculate(df_5m)
                 active_zones = ret_ind.get_active_zones(df_5m_calc)
@@ -287,7 +287,7 @@ def render_stock_deep_dive(_broker, top_symbol):
                 if st.button(f"🔍 Perform Multi-Agent Research on {top_symbol}", key="multi_agent_research_btn"):
                     with st.spinner("Executing Swarm Deep Research..."):
                         try:
-                            from trade_system.application.agent.option_chain_agent import OptionChainAgent
+                            from trade_system.domains.advisory.application.agent.option_chain_agent import OptionChainAgent
                             oc_agent = OptionChainAgent(_broker)
                             import asyncio
                             oc_analysis = asyncio.run(oc_agent.analyze(top_symbol))
@@ -456,7 +456,7 @@ if broker:
         st.info("These stocks were rejected by the **Sideways Shield** (Low ADX) or **Buyer Viability** (Tight Range). Monitor them for a late-session breakout.")
 
         try:
-            from trade_system.infrastructure.database.connection import get_engine
+            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
             from sqlalchemy import text
             query = text("""
                 SELECT timestamp, symbol, action, message 

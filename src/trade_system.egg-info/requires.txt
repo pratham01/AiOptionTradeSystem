@@ -12,6 +12,8 @@ httpx>=0.24
 openai>=1.0
 anthropic>=0.8
 httpx>=0.24
+playwright>=1.40
+beautifulsoup4>=4.12
 
 [all]
 trade_system[agent,api,dev,evolution]

@@ -12,9 +12,9 @@ from sqlalchemy import text
 sys.path.insert(0, 'src')
 os.chdir(os.path.dirname(os.path.abspath(__file__)) + '/..')
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.application.advisory.llm import LlmAdvisorClient
-from trade_system.application.analysis import pro_oc_analyzer
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.advisory.application.advisory.llm import LlmAdvisorClient
+from trade_system.domains.analysis.application.analysis import pro_oc_analyzer
 
 async def main():
     print("🧠 AGENTIC DERIVATIVES FORENSICS & OPTION RECOMMENDER\n")

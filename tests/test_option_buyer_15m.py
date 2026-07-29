@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.backtesting.option_buyer_15m import OptionBuyer15mResearch
+from trade_system.domains.analysis.application.backtesting.option_buyer_15m import OptionBuyer15mResearch
 
 
 def test_option_buyer_15m_research_outputs_summary(tmp_path: Path):

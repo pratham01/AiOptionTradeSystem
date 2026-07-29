@@ -3,7 +3,7 @@ Direct verification of the PreMarketNewsAgent with the new MoneyControl scraper.
 """
 import asyncio
 import logging
-from trade_system.application.agent.premarket_news_agent import PreMarketNewsAgent
+from trade_system.domains.advisory.application.agent.premarket_news_agent import PreMarketNewsAgent
 
 logging.basicConfig(level=logging.INFO)
 

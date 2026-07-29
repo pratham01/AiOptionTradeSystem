@@ -7,10 +7,10 @@ from datetime import datetime, date
 from pathlib import Path
 import logging
 
-from trade_system.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
-from trade_system.application.analysis import pro_oc_analyzer
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.config import Settings
+from trade_system.domains.analysis.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
+from trade_system.domains.analysis.application.analysis import pro_oc_analyzer
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.shared.config import Settings
 from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 
 LOGGER = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def load_db_price_data(symbol: str, target_date: str) -> pd.DataFrame:
             """)
             df = pd.read_sql(query, conn, params={"symbol": symbol, "start_time": start_time, "end_time": end_time})
             if not df.empty:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed")
             return df
     except Exception as e:
         LOGGER.error(f"Error loading price data: {e}")
@@ -250,14 +250,28 @@ def render_metrics_grid(
     pcr: float, atm_iv_val: float, iv_status: str, iv_color: str
 ):
     """Render the key walls and PCR status card grid."""
+    def fmt(v, format_str, prefix="", suffix=""):
+        try:
+            if v is None or v != v: return "N/A"
+            return f"{prefix}{v:{format_str}}{suffix}"
+        except Exception:
+            return "N/A"
+
+    def fmt_int(v, prefix="", suffix=""):
+        try:
+            if v is None or v != v: return "N/A"
+            return f"{prefix}{int(v):,}{suffix}"
+        except Exception:
+            return "N/A"
+
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         st.markdown(f"""
         <div class="status-card" style="border-top: 5px solid #ff4d6d;">
             <div class="status-title">🔴 Call Wall (Resistance)</div>
-            <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">₹{call_wall:,.0f}</div>
-            <div class="status-desc">{dist_to_call_wall:.2f}% away | OI: {call_wall_oi:,.0f}</div>
+            <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">{fmt(call_wall, ',.0f', prefix='₹')}</div>
+            <div class="status-desc">{fmt(dist_to_call_wall, '.2f', suffix='%')} away | OI: {fmt(call_wall_oi, ',.0f')}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -265,8 +279,8 @@ def render_metrics_grid(
         st.markdown(f"""
         <div class="status-card" style="border-top: 5px solid #00d084;">
             <div class="status-title">🟢 Put Wall (Support)</div>
-            <div class="status-value" style="color: #00d084; font-size:1.6rem;">₹{put_wall:,.0f}</div>
-            <div class="status-desc">{dist_to_put_wall:.2f}% away | OI: {put_wall_oi:,.0f}</div>
+            <div class="status-value" style="color: #00d084; font-size:1.6rem;">{fmt(put_wall, ',.0f', prefix='₹')}</div>
+            <div class="status-desc">{fmt(dist_to_put_wall, '.2f', suffix='%')} away | OI: {fmt(put_wall_oi, ',.0f')}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -274,8 +288,8 @@ def render_metrics_grid(
         st.markdown(f"""
         <div class="status-card" style="border-top: 5px solid #ffb703;">
             <div class="status-title">Spot Price</div>
-            <div class="status-value" style="color: #ffb703; font-size:1.6rem;">₹{spot_price:,.2f}</div>
-            <div class="status-desc">Max Pain Strike: ₹{int(max_pain_strike):,}</div>
+            <div class="status-value" style="color: #ffb703; font-size:1.6rem;">{fmt(spot_price, ',.2f', prefix='₹')}</div>
+            <div class="status-desc">Max Pain Strike: {fmt_int(max_pain_strike, prefix='₹')}</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -283,8 +297,8 @@ def render_metrics_grid(
         st.markdown(f"""
         <div class="status-card" style="border-top: 5px solid {iv_color};">
             <div class="status-title">PCR & Premium Cost</div>
-            <div class="status-value" style="color: {iv_color}; font-size:1.6rem;">{pcr:.2f}</div>
-            <div class="status-desc">{iv_status} ({f"{atm_iv_val:.1f}%" if atm_iv_val else "N/A"} IV)</div>
+            <div class="status-value" style="color: {iv_color}; font-size:1.6rem;">{fmt(pcr, '.2f')}</div>
+            <div class="status-desc">{iv_status} ({fmt(atm_iv_val, '.1f', suffix='%')} IV)</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1168,12 +1182,13 @@ def run_dashboard():
     st.markdown("---")
 
     # --- 2. TRANSITIONS & CHARTING ---
-    tab_chart, tab_transitions, tab_strikes, tab_pro_trader, tab_iv_greeks = st.tabs([
+    tab_chart, tab_transitions, tab_strikes, tab_pro_trader, tab_iv_greeks, tab_sniper = st.tabs([
         "📈 Price Action & Smart OI Overlay",
         "⏱️ Signal Transitions Timeline",
         "🎯 Filtered Signal Strikes",
         "🏦 Pro Trader Analytics",
-        "📊 IV Skew & Greeks"
+        "📊 IV Skew & Greeks",
+        "🎯 Sniper Reversals"
     ])
 
     with tab_chart:
@@ -1197,9 +1212,95 @@ def run_dashboard():
         )
         render_tab_iv_greeks(latest_oc, spot_price, analyzer, pro_atm)
 
+    with tab_sniper:
+        render_tab_sniper(snapshots, spot_price, analyzer)
+
     # Render footer information help section
     render_footer_help()
 
+
+def render_tab_sniper(snapshots: list, spot_price: float, analyzer: SmartOIAnalyzer):
+    """Render the Sniper Reversal strategy scanner."""
+    st.subheader("🎯 Sniper Reversals (Volatility Contraction & Breakout)")
+    st.caption("Scans for sideways premium + volume dry-up, followed by an explosive volume-backed reversal.")
+
+    if not snapshots or len(snapshots) < 6:
+        st.info(f"Not enough data to scan for Sniper Reversals (Have {len(snapshots)} snapshots, need at least 6).")
+        return
+        
+    if spot_price is None:
+        st.warning("Waiting for spot price data to initialize the Sniper Reversal scanner...")
+        return
+
+    try:
+        # 1. Identify ATM Strike
+        atm_strike = round(spot_price / analyzer.strike_step) * analyzer.strike_step
+        
+        # We will scan ATM and ±1 strikes
+        target_strikes = [atm_strike - analyzer.strike_step, atm_strike, atm_strike + analyzer.strike_step]
+        
+        try:
+            from trade_system.domains.analysis.application.analysis.sniper_reversal import OptionOISniperScanner
+        except ImportError:
+            st.error("Sniper Reversal scanner not found.")
+            return
+
+        scanner = OptionOISniperScanner(lookback_window=5, breakout_vol_multiplier=1.5)
+        
+        results = []
+        all_scans = []
+        
+        for strike in target_strikes:
+            for opt_type in ["CE", "PE"]:
+                # Build chronological series for this strike/type
+                series_data = []
+                for ts, df in snapshots:
+                    row = df[(df["strike"] == strike) & (df["option_type"] == opt_type)]
+                    if not row.empty:
+                        data = row.iloc[0].to_dict()
+                        data["timestamp"] = ts
+                        series_data.append(data)
+                
+                if len(series_data) >= 6:
+                    series_df = pd.DataFrame(series_data)
+                    res = scanner.detect(series_df)
+                    res["strike"] = strike
+                    res["option_type"] = opt_type
+                    
+                    if res["status"] != "NEUTRAL":
+                        results.append(res)
+                    else:
+                        all_scans.append(res)
+        
+        if not results:
+            st.success("No active Sniper Reversal patterns detected at the moment.")
+            st.caption("The algorithm is actively scanning the ATM and near-ATM strikes for volume contraction and sudden premium/volume spikes.")
+        else:
+            st.markdown("### 🔥 Detected Reversals")
+            for res in results:
+                color = "#00d084" if "BULLISH" in res["status"] else "#ff4d6d"
+                st.markdown(f'''
+                <div class="card" style="border-left: 5px solid {color}; padding: 15px; margin-bottom: 10px;">
+                    <h4 style="color: {color}; margin-top: 0;">{res['strike']} {res['option_type']} - {res['status']}</h4>
+                    <div style="display: flex; gap: 20px;">
+                        <div><b>Trigger LTP:</b> ₹{res.get('trigger_ltp', 'N/A')}</div>
+                        <div><b>Premium Surge:</b> {res.get('ltp_surge_pct', 0)}%</div>
+                        <div><b>Vol Expansion:</b> {res.get('vol_expansion_ratio', 0)}x</div>
+                        <div><b>OI Change:</b> {res.get('oi_change_pct', 0)}%</div>
+                        <div><b>Vol Dry-up Slope:</b> {res.get('vol_slope', 0)}</div>
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
+                
+        with st.expander("🔍 View Live Scanner Status (Why no signal?)"):
+            st.write("Here is what the scanner sees under the hood for the active strikes:")
+            for scan in all_scans:
+                st.markdown(f"**{scan['strike']} {scan['option_type']}**: {scan['reason']}")
+                
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error in Sniper Reversal scanner: {e}")
+        st.error("The Sniper Reversal scanner encountered an issue. Please check the logs.")
 
 if __name__ == "__main__":
     run_dashboard()

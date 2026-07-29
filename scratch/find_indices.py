@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path("src").absolute()))
 
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from sqlalchemy import text
 
 engine = get_engine()

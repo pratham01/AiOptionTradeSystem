@@ -5,9 +5,9 @@ from datetime import datetime
 # Add src to python path
 sys.path.append(str(Path("src").resolve()))
 
-from trade_system.application.agent.conviction_fuser_agent import ConvictionFuserAgent
-from trade_system.core import SessionPlan, TradeSuggestion, MarketContext, TradeDirection, TradeHorizon
-from trade_system.core.models.domain import MarketRegime, OptionParams, SetupFeatures, TradeOutcome
+from trade_system.domains.advisory.application.agent.conviction_fuser_agent import ConvictionFuserAgent
+from trade_system.shared import SessionPlan, TradeSuggestion, MarketContext, TradeDirection, TradeHorizon
+from trade_system.domains.trading.domain.models.domain import MarketRegime, OptionParams, SetupFeatures, TradeOutcome
 
 def run_test():
     fuser = ConvictionFuserAgent(max_trades_per_day=3)

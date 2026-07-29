@@ -1,6 +1,6 @@
 import logging
 import os
-from trade_system.config import Settings
+from trade_system.shared.config import Settings
 from fyers_apiv3 import fyersModel
 
 logging.basicConfig(level=logging.DEBUG)

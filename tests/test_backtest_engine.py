@@ -1,8 +1,8 @@
 import pandas as pd
 
-from trade_system.application.backtesting import BacktestEngine
-from trade_system.application.strategies.base import Strategy
-from trade_system.core.models.legacy import Signal
+from trade_system.domains.analysis.application.backtesting import BacktestEngine
+from trade_system.domains.strategy.application.strategies.base import Strategy
+from trade_system.domains.trading.domain.models.legacy import Signal
 
 
 class DummyStrategy(Strategy):

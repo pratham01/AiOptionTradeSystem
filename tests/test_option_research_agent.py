@@ -2,7 +2,7 @@ import pytest
 import pandas as pd
 from unittest.mock import MagicMock
 
-from trade_system.application.agent.option_research_agent import OptionResearchAgent
+from trade_system.domains.advisory.application.agent.option_research_agent import OptionResearchAgent
 
 class MockLlmClient:
     async def complete(self, prompt: str) -> str:

@@ -3,7 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from datetime import date
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from sqlalchemy import text
 import pandas as pd
 

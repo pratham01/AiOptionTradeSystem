@@ -16,13 +16,13 @@ root_path = Path(__file__).parent.parent
 if str(root_path / "src") not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient
-from trade_system.infrastructure.data.history import HistoricalDataService
-from trade_system.infrastructure.data.storage import CsvDataCatalog
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.database.repository import save_market_data_batch
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient
+from trade_system.domains.market_data.infrastructure.data.history import HistoricalDataService
+from trade_system.domains.market_data.infrastructure.data.storage import CsvDataCatalog
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.repository import save_market_data_batch
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 LOGGER = logging.getLogger(__name__)

@@ -1,8 +1,9 @@
-from trade_system.config.settings import TelegramConfig, FyersConfig
+from trade_system.shared.config.settings import TelegramConfig, FyersConfig
 import pandas as pd
 
-from trade_system.config import Settings
-from trade_system.infrastructure.data.storage import CsvDataCatalog
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.domain.ports.broker import HistoricalData
+from trade_system.domains.market_data.infrastructure.data.storage import CsvDataCatalog
 from trade_system.interfaces.live.collector import LiveMarketDataService, _merge_intraday_3min_bars
 from trade_system.interfaces.live.collector import IctLiveTrade
 from trade_system.interfaces.live.confirmed_strategy import (
@@ -147,6 +148,28 @@ class _DummyBroker:
     def get_quotes(self, symbols: list[str]):
         return {symbol: self.quote_payload.get(symbol, {}) for symbol in symbols}
 
+    def fetch_history(self, **kwargs) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    def get_historical_data(self, **kwargs) -> list[HistoricalData]:
+        df = self.fetch_history(**kwargs)
+        if df.empty:
+            return []
+        
+        records = []
+        for _, row in df.iterrows():
+            records.append(
+                HistoricalData(
+                    timestamp=row["timestamp"],
+                    open=row["open"],
+                    high=row["high"],
+                    low=row["low"],
+                    close=row["close"],
+                    volume=row.get("volume", 0),
+                )
+            )
+        return records
+
 
 class _DummyCatalog:
     def live_bars_path(self, *_args, **_kwargs):
@@ -158,7 +181,7 @@ def test_premarket_console_summary_reports_gap_level_profile_and_mood():
     broker = _DummyBroker(settings)
     broker.quote_payload["NSE:NIFTY50-INDEX"] = {"lp": 22535.0}
     service = LiveMarketDataService(
-        broker=broker,
+        broker=broker, broker_manager=broker,
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -202,12 +225,12 @@ def test_premarket_console_summary_reports_gap_level_profile_and_mood():
 def test_fetch_recent_daily_context_keeps_last_completed_day_when_today_not_present():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
     )
-    service.broker.fetch_history = lambda **_kwargs: pd.DataFrame(
+    service.broker_manager.fetch_history = lambda **_kwargs: pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-04-22", "2026-04-23"]),
             "open": [24000.0, 24100.0],
@@ -227,12 +250,12 @@ def test_fetch_recent_daily_context_keeps_last_completed_day_when_today_not_pres
 def test_fetch_recent_daily_context_excludes_current_day_partial_bar():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
     )
-    service.broker.fetch_history = lambda **_kwargs: pd.DataFrame(
+    service.broker_manager.fetch_history = lambda **_kwargs: pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-04-23", "2026-04-24"]),
             "open": [24100.0, 24200.0],
@@ -256,7 +279,7 @@ def test_previous_day_supertrend_message_includes_opening_reference_break_status
     broker = _DummyBroker(settings)
     broker.quote_payload["NSE:NIFTY50-INDEX"] = {"lp": 22440.0}
     service = LiveMarketDataService(
-        broker=broker,
+        broker=broker, broker_manager=broker,
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -283,7 +306,7 @@ def test_previous_day_supertrend_message_reports_hold_when_opening_price_respect
     broker = _DummyBroker(settings)
     broker.quote_payload["NSE:NIFTY50-INDEX"] = {"lp": 22480.0}
     service = LiveMarketDataService(
-        broker=broker,
+        broker=broker, broker_manager=broker,
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -306,7 +329,7 @@ def test_previous_day_supertrend_message_reports_hold_when_opening_price_respect
 def test_supertrend_alert_uses_current_session_bar_transition():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -335,7 +358,7 @@ def test_supertrend_alert_uses_current_session_bar_transition():
 def test_supertrend_touch_alert_fires_when_candle_hits_line():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -387,7 +410,7 @@ def test_ict_eod_lines_summarize_experimental_trade_stats():
         enable_experimental_ict_stream=True,
     )
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -502,12 +525,12 @@ def test_merge_intraday_3min_bars_keeps_pure_ohlcv():
 def test_patch_minute_volume_from_history_uses_fyers_history_when_live_volume_zero():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
     )
-    service.broker.fetch_history = lambda **_kwargs: pd.DataFrame(
+    service.broker_manager.fetch_history = lambda **_kwargs: pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-03-25 09:16:00"]),
             "open": [23149.9],
@@ -537,7 +560,7 @@ def test_patch_minute_volume_from_history_uses_fyers_history_when_live_volume_ze
 def test_fetch_intraday_history_cache_refreshes_when_later_minute_is_requested():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -568,7 +591,7 @@ def test_fetch_intraday_history_cache_refreshes_when_later_minute_is_requested()
             }
         )
 
-    service.broker.fetch_history = _fetch_history
+    service.broker_manager.fetch_history = _fetch_history
 
     early = service._fetch_intraday_history_with_cache(
         "NSE:NIFTY50-INDEX",
@@ -591,7 +614,7 @@ def test_backfill_recent_live_minute_volumes_updates_zero_rows(tmp_path):
         option_chain_dir=tmp_path / "option_chain_data",
     )
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=CsvDataCatalog(tmp_path / "data"),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -607,7 +630,7 @@ def test_backfill_recent_live_minute_volumes_updates_zero_rows(tmp_path):
         },
         index=pd.to_datetime(["2026-03-25 09:16:00", "2026-03-25 09:17:00"]),
     )
-    service.broker.fetch_history = lambda **_kwargs: pd.DataFrame(
+    service.broker_manager.fetch_history = lambda **_kwargs: pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2026-03-25 09:16:00", "2026-03-25 09:17:00"]),
             "open": [100.0, 101.0],
@@ -629,7 +652,7 @@ def test_save_option_chain_snapshot_writes_expected_schema(tmp_path):
     )
     settings.ensure_directories()
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -679,7 +702,7 @@ def test_save_option_chain_snapshot_repairs_existing_old_schema_file(tmp_path):
     )
     settings.ensure_directories()
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -726,7 +749,7 @@ def test_save_option_chain_snapshot_repairs_existing_old_schema_file(tmp_path):
 def test_select_adjacent_option_chain_strikes_uses_seven_nearest_levels():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"), option_chain_adjacent_strikes=7)
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -751,7 +774,7 @@ def test_select_adjacent_option_chain_strikes_uses_seven_nearest_levels():
 def test_compute_previous_day_supertrend_seed_uses_strategy_timeframe_history():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -795,7 +818,7 @@ def test_build_option_chain_strike_summary_includes_both_ce_and_pe(tmp_path):
     )
     settings.ensure_directories()
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -847,7 +870,7 @@ def test_load_previous_day_option_chain_snapshot_returns_latest_reference(tmp_pa
     )
     settings.ensure_directories()
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -902,7 +925,7 @@ def test_limit_to_recent_trading_sessions_keeps_last_three_sessions():
 def test_send_eod_summary_reports_flip_and_touch_counts():
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -941,7 +964,7 @@ def test_major_gap_alert_fires_on_first_live_price():
         major_gap_threshold_pct=0.5,
     )
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,
@@ -967,7 +990,7 @@ def test_major_gap_alert_fires_on_first_live_price():
 def test_previous_day_level_touch_alert_fires_when_price_crosses_level(monkeypatch):
     settings = Settings(telegram=TelegramConfig(bot_token="token", chat_id="chat"))
     service = LiveMarketDataService(
-        broker=_DummyBroker(settings),
+        broker=_DummyBroker(settings), broker_manager=_DummyBroker(settings),
         catalog=_DummyCatalog(),
         symbols=["NSE:NIFTY50-INDEX"],
         settings=settings,

@@ -6,10 +6,10 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path / "src") not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker as LegacyFyersBroker
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker as ClientFyersBroker
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker as LegacyFyersBroker
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker as ClientFyersBroker
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
 
 print("Legacy FyersBroker fetch_history signature:")
 print(inspect.signature(LegacyFyersBroker.fetch_history))

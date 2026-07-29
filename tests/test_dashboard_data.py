@@ -1,4 +1,4 @@
-from trade_system.config.settings import TelegramConfig, FyersConfig
+from trade_system.shared.config.settings import TelegramConfig, FyersConfig
 from pathlib import Path
 import pandas as pd
 from trade_system.interfaces.dashboard.data import load_strategy_summaries, load_strategy_trades

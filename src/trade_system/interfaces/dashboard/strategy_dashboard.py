@@ -146,63 +146,83 @@ def main():
     if selected_strat:
         trades_df = cached_load_strategy_trades(ROOT, selected_strat)
         if not trades_df.empty:
-            trades_df = trades_df.sort_values('entry_time')
-            trades_df['cum_pnl'] = trades_df['points_captured'].cumsum()
+            # --- Guard: ensure required columns exist before rendering ---
+            has_time_cols = 'entry_time' in trades_df.columns and 'exit_time' in trades_df.columns
+            has_points = 'points_captured' in trades_df.columns
+
+            if has_time_cols:
+                trades_df = trades_df.sort_values('entry_time')
+            if has_points:
+                trades_df['cum_pnl'] = trades_df['points_captured'].cumsum()
             
             # --- Equity Curve & Drawdown ---
-            st.markdown(f"#### Performance Curve: {selected_strat}")
-            fig_equity = go.Figure()
-            
-            # Main Equity Line
-            fig_equity.add_trace(go.Scatter(
-                x=trades_df['entry_time'], y=trades_df['cum_pnl'],
-                name="Cumulative PnL", line=dict(color="#00b4d8", width=3),
-                fill='tozeroy', fillcolor='rgba(0, 180, 216, 0.1)'
-            ))
-            
-            # Max Drawdown overlay
-            cum_max = trades_df['cum_pnl'].cummax()
-            drawdown = trades_df['cum_pnl'] - cum_max
-            fig_equity.add_trace(go.Scatter(
-                x=trades_df['entry_time'], y=drawdown,
-                name="Drawdown", line=dict(color="#ff4d6d", width=1),
-                fill='tozeroy', fillcolor='rgba(255, 77, 109, 0.1)', yaxis="y2"
-            ))
-            
-            fig_equity.update_layout(
-                height=450, margin=dict(l=0, r=0, t=20, b=0),
-                yaxis=dict(title="Points"),
-                yaxis2=dict(title="Drawdown", overlaying="y", side="right", showgrid=False),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
-            )
-            st.plotly_chart(fig_equity, use_container_width=True)
+            if has_time_cols and has_points:
+                st.markdown(f"#### Performance Curve: {selected_strat}")
+                fig_equity = go.Figure()
+                
+                # Main Equity Line
+                fig_equity.add_trace(go.Scatter(
+                    x=trades_df['entry_time'], y=trades_df['cum_pnl'],
+                    name="Cumulative PnL", line=dict(color="#00b4d8", width=3),
+                    fill='tozeroy', fillcolor='rgba(0, 180, 216, 0.1)'
+                ))
+                
+                # Max Drawdown overlay
+                cum_max = trades_df['cum_pnl'].cummax()
+                drawdown = trades_df['cum_pnl'] - cum_max
+                fig_equity.add_trace(go.Scatter(
+                    x=trades_df['entry_time'], y=drawdown,
+                    name="Drawdown", line=dict(color="#ff4d6d", width=1),
+                    fill='tozeroy', fillcolor='rgba(255, 77, 109, 0.1)', yaxis="y2"
+                ))
+                
+                fig_equity.update_layout(
+                    height=450, margin=dict(l=0, r=0, t=20, b=0),
+                    yaxis=dict(title="Points"),
+                    yaxis2=dict(title="Drawdown", overlaying="y", side="right", showgrid=False),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                )
+                st.plotly_chart(fig_equity, use_container_width=True)
+            else:
+                st.info("📊 Equity curve unavailable — `entry_time` or `points_captured` columns are missing from this strategy's trade log.")
 
             # --- Stats Grid ---
-            win_df = trades_df[trades_df['points_captured'] > 0]
-            loss_df = trades_df[trades_df['points_captured'] <= 0]
-            
-            s1, s2, s3, s4 = st.columns(4)
-            s1.write(f"📊 **Win Rate:** {len(win_df)/len(trades_df):.1%}")
-            s1.write(f"📈 **Profit Factor:** {abs(win_df['points_captured'].sum() / (loss_df['points_captured'].sum() or -1)):.2f}")
-            
-            s2.write(f"🟢 **Avg Win:** {win_df['points_captured'].mean():.2f} pts")
-            s2.write(f"🔴 **Avg Loss:** {loss_df['points_captured'].mean():.2f} pts")
-            
-            s3.write(f"⏱️ **Avg Holding:** {trades_df['holding_minutes'].mean():.1f} mins")
-            s3.write(f"⚠️ **Max Loss:** {trades_df['points_captured'].min():.2f} pts")
-            
-            s4.write(f"🌊 **Max Drawdown:** {drawdown.min():.2f} pts")
-            s4.write(f"📅 **Total Trades:** {len(trades_df)}")
+            if has_points:
+                win_df = trades_df[trades_df['points_captured'] > 0]
+                loss_df = trades_df[trades_df['points_captured'] <= 0]
+                
+                s1, s2, s3, s4 = st.columns(4)
+                s1.write(f"📊 **Win Rate:** {len(win_df)/max(len(trades_df),1):.1%}")
+                s1.write(f"📈 **Profit Factor:** {abs(win_df['points_captured'].sum() / (loss_df['points_captured'].sum() or -1)):.2f}")
+                
+                s2.write(f"🟢 **Avg Win:** {win_df['points_captured'].mean():.2f} pts" if not win_df.empty else "🟢 **Avg Win:** N/A")
+                s2.write(f"🔴 **Avg Loss:** {loss_df['points_captured'].mean():.2f} pts" if not loss_df.empty else "🔴 **Avg Loss:** N/A")
+                
+                if 'holding_minutes' in trades_df.columns:
+                    s3.write(f"⏱️ **Avg Holding:** {trades_df['holding_minutes'].mean():.1f} mins")
+                else:
+                    s3.write("⏱️ **Avg Holding:** N/A")
+                s3.write(f"⚠️ **Max Loss:** {trades_df['points_captured'].min():.2f} pts")
+                
+                if has_points:
+                    drawdown_val = (trades_df['cum_pnl'] - trades_df['cum_pnl'].cummax()).min() if 'cum_pnl' in trades_df.columns else 0
+                    s4.write(f"🌊 **Max Drawdown:** {drawdown_val:.2f} pts")
+                s4.write(f"📅 **Total Trades:** {len(trades_df)}")
 
             # --- Trade Log ---
             with st.expander("📖 View Full Trade Execution Log"):
                 cols = ['entry_time', 'exit_time', 'direction', 'points_captured', 'peak_profit_pts', 'reason']
                 available = [c for c in cols if c in trades_df.columns]
-                st.dataframe(
-                    trades_df[available].sort_values('entry_time', ascending=False),
-                    use_container_width=True
-                )
+                if available:
+                    sort_col = 'entry_time' if 'entry_time' in available else available[0]
+                    st.dataframe(
+                        trades_df[available].sort_values(sort_col, ascending=False),
+                        use_container_width=True
+                    )
+                else:
+                    st.dataframe(trades_df, use_container_width=True)
+
 
     # 5. AI Research Lab
     st.markdown("---")

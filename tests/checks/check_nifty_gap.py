@@ -1,5 +1,5 @@
 import pandas as pd
-from trade_system.application.indicators.supertrend import calculate_supertrend
+from trade_system.domains.strategy.application.indicators.supertrend import calculate_supertrend
 from trade_system.interfaces.live.helpers import get_gap_adjusted_data
 
 def check_gap():

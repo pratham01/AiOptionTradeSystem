@@ -15,10 +15,10 @@ if str(root_path) not in sys.path:
 
 import argparse
 import logging
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
-from trade_system.application.analysis.top_gainers import NSETop100GainersFetcher
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
+from trade_system.domains.analysis.application.analysis.top_gainers import NSETop100GainersFetcher
+from trade_system.shared.notifications.telegram import TelegramNotifier
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch Top 100 Gainers from NSE")
@@ -30,7 +30,7 @@ def main() -> int:
 
     try:
         settings = Settings.load()
-        from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+        from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
         authenticator = FyersAuthenticator(settings)
         broker = FyersBroker(
             client_id=settings.fyers_client_id,

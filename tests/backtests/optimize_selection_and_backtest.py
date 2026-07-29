@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date
 from sqlalchemy import text
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 def get_daily_candles_from_15m(df_15m):
     """Aggregates 15-minute candles into daily candles."""

@@ -18,7 +18,7 @@ class MarketKnowledgeGraph:
     def get_impact_path(self, event): return []
     def get_all_sectors(self): return ["IT", "BANKING", "AUTO", "METALS", "ENERGY", "PHARMA", "CONSUMER"]
 
-from trade_system.infrastructure.data.fo_universe import FO_METADATA
+from trade_system.domains.market_data.infrastructure.data.fo_universe import FO_METADATA
 
 # Page Config (handled by main.py)
 
@@ -72,7 +72,7 @@ def load_agent_stats():
     """Load neural weights and latest feedback."""
     weights = {}
     try:
-        from trade_system.application.evolution.weight_evolver import WeightEvolver
+        from trade_system.domains.analysis.application.evolution.weight_evolver import WeightEvolver
         evolver = WeightEvolver()
         weights = evolver.load_weights("setup_validator")
     except Exception:
@@ -89,8 +89,8 @@ def load_agent_stats():
 def load_thought_stream(limit=100):
     """Load latest deliberations from the database."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.repository import get_latest_thoughts
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.repository import get_latest_thoughts
         from sqlalchemy.orm import Session
         engine = get_engine()
         with Session(engine) as session:
@@ -221,7 +221,7 @@ with memory_tab:
         st.write("#### 📜 Learned Skills (Behavioral Rules)")
         st.caption("AI-generated rules stored in `data/skills/` to avoid repeating mistakes.")
         try:
-            from trade_system.application.agent.skill_registry import SkillRegistry
+            from trade_system.domains.advisory.application.agent.skill_registry import SkillRegistry
             registry = SkillRegistry()
             skills = registry.list_skills()
             if skills:

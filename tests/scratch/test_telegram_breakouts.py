@@ -5,17 +5,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import logging
 logging.basicConfig(level=logging.INFO)
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.factory import get_broker_manager
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
 from trade_system.interfaces.live import LiveMarketDataService
-from trade_system.infrastructure.data import CsvDataCatalog
+from trade_system.domains.market_data.infrastructure.data import CsvDataCatalog
 
 def test_telegram():
     print("Loading settings...")
     settings = Settings.load()
     
     # Initialize broker and catalog
-    from trade_system.infrastructure.brokers.legacy import FyersBrokerClient
+    from trade_system.domains.trading.infrastructure.brokers.legacy import FyersBrokerClient
     broker = FyersBrokerClient(
         client_id=settings.fyers.client_id,
         access_token=settings.fyers.access_token,

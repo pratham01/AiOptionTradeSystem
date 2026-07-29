@@ -18,8 +18,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from trade_system.interfaces.api.mcp_server import MCPServer, mcp_server
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
-from trade_system.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.shared.config import Settings
 
 LOGGER = logging.getLogger(__name__)
 

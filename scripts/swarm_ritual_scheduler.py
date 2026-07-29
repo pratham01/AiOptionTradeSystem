@@ -10,10 +10,10 @@ import time
 from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 
-from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
-from trade_system.config import Settings
+from trade_system.domains.advisory.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.shared.config import Settings
 
 # Configure logging
 logging.basicConfig(

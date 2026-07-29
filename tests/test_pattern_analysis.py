@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.analysis import MarketPatternAnalyzer
+from trade_system.domains.analysis.application.analysis import MarketPatternAnalyzer
 
 
 def test_pattern_analyzer_outputs_files(tmp_path: Path):

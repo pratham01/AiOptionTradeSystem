@@ -1,5 +1,5 @@
 import pandas as pd
-from trade_system.application.indicators.supertrend import calculate_supertrend
+from trade_system.domains.strategy.application.indicators.supertrend import calculate_supertrend
 
 def check_csv():
     df = pd.read_csv("data/NSE_NIFTY50-INDEX_3min_2026.csv", parse_dates=["timestamp"])

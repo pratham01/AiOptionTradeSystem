@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.research.llm import ResearchLlmClient
-from trade_system.application.research.orchestrator import AutonomousResearchOrchestrator
+from trade_system.domains.analysis.application.research.llm import ResearchLlmClient
+from trade_system.domains.analysis.application.research.orchestrator import AutonomousResearchOrchestrator
 
 
 ROOT = Path(__file__).resolve().parents[1]

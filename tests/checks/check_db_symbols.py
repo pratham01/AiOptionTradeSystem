@@ -8,10 +8,10 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.database.models import OhlcvDaily
-from trade_system.config import Settings
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.models import OhlcvDaily
+from trade_system.shared.config import Settings
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
 
 def check_symbols():
     engine = get_engine()

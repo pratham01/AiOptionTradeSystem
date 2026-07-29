@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.analysis.candlestick_patterns import CandlestickPatternAnalyzer
+from trade_system.domains.analysis.application.analysis.candlestick_patterns import CandlestickPatternAnalyzer
 
 
 def test_candlestick_pattern_analyzer_outputs(tmp_path: Path):

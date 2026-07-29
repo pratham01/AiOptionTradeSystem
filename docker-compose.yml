@@ -1,46 +1,146 @@
-version: '3.8'
-
 services:
-  # The live trading and monitoring bot
+  # ─────────────────────────────────────────────────────────
+  # Redis — Event bus for inter-agent communication
+  # ─────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: trade_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────
+  # Live Trading Bot — Main trading engine
+  # ─────────────────────────────────────────────────────────
   live-bot:
     build: .
     container_name: trade_bot_live
     restart: unless-stopped
-    command: python -m trade_system live
-    volumes:
-      - ./data:/app/data
-      - ./.env:/app/.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python scripts/run_live_trading.py
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; open('/app/logs/bot_out.log')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
-  # The Streamlit Dashboard
+  # ─────────────────────────────────────────────────────────
+  # 15-Minute DB Sync — Historical data fetcher
+  # ─────────────────────────────────────────────────────────
+  sync-15m-db:
+    build: .
+    container_name: trade_bot_sync_15m
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python src/trade_system/interfaces/live/sync_15m_db.py
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; open('/app/logs/sync_15m_out.log')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────
+  # ST Touch Scanner — Supertrend options scanner
+  # ─────────────────────────────────────────────────────────
+  st-touch-scanner:
+    build: .
+    container_name: trade_bot_st_scanner
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: python scripts/run_live_st_scanner.py
+    env_file: .env
+    environment:
+      - TZ=Asia/Kolkata
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; open('/app/logs/st_scanner.log')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ─────────────────────────────────────────────────────────
+  # Streamlit Dashboard — Monitoring & analysis UI
+  # ─────────────────────────────────────────────────────────
   dashboard:
     build: .
     container_name: trade_bot_dashboard
     restart: unless-stopped
-    command: streamlit run src/trade_system/interfaces/dashboard/main.py --server.port 8502
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      streamlit run src/trade_system/interfaces/dashboard/main.py
+      --server.port 8502
+      --server.address 0.0.0.0
+      --server.headless true
+      --browser.gatherUsageStats false
     ports:
       - "8502:8502"
-    volumes:
-      - ./data:/app/data
-      - ./.env:/app/.env
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
-  # Cron service for End-Of-Day tasks (Backfill, Predictor, Reporting)
+  # ─────────────────────────────────────────────────────────
+  # Cron Tasks — End-of-day batch jobs (4:15 PM IST, Mon-Fri)
+  # ─────────────────────────────────────────────────────────
   cron-tasks:
     build: .
     container_name: trade_bot_cron
     restart: unless-stopped
-    # This runs a simple foreground cron loop. 
-    # The actual crontab is loaded from a file or we can use a sleep loop for simplicity.
     command: >
-      sh -c "echo '15 16 * * 1-5 cd /app && python scripts/run_post_market_swarm.py >> /proc/1/fd/1 2>&1' > /etc/cron.d/trade-cron &&
+      sh -c "echo '15 10 * * 1-5 cd /app && PYTHONPATH=src python scripts/run_post_market_swarm.py >> /proc/1/fd/1 2>&1' > /etc/cron.d/trade-cron &&
              chmod 0644 /etc/cron.d/trade-cron &&
              crontab /etc/cron.d/trade-cron &&
              cron -f"
-    volumes:
-      - ./data:/app/data
-      - ./.env:/app/.env
+    env_file: .env
     environment:
       - TZ=Asia/Kolkata
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+volumes:
+  redis_data:
+    driver: local

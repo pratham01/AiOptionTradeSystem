@@ -10,9 +10,9 @@ root_path = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_path))
 sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.config import Settings
-from trade_system.application.agent.nifty500_top_stocks_agent import Nifty500TopStocksAgent
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
+from trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent import Nifty500TopStocksAgent
+from trade_system.shared.notifications.telegram import TelegramNotifier
 
 async def run_broadcast():
     print("Loading settings...")
@@ -33,7 +33,7 @@ async def run_broadcast():
     print("\nInstantiating Nifty500TopStocksAgent and fetching real data...")
     agent = Nifty500TopStocksAgent()
     
-    with patch("trade_system.application.agent.nifty500_top_stocks_agent.datetime") as mock_dt:
+    with patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.datetime") as mock_dt:
         mock_dt.now.return_value = mock_weekday
         analysis = await agent.get_top_stocks_analysis(send_telegram=False)
         

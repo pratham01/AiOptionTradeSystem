@@ -251,8 +251,8 @@ def create_readme_update(root_dir: Path) -> None:
 
 Preferred imports:
 ```python
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
 ```
 
 ## Running Scripts

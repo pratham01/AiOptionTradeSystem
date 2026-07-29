@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, time
 import time as sleep_timer
 from zoneinfo import ZoneInfo
-from trade_system.core.ports.broker import Broker as BaseBroker
-from trade_system.infrastructure.brokers.legacy.fyers import _parse_nse_market_status
+from trade_system.domains.trading.domain.ports.broker import Broker as BaseBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import _parse_nse_market_status
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")

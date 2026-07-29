@@ -14,9 +14,9 @@ root_path = Path(__file__).parent.parent
 if str(root_path / "src") not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.database.models import Base
-from trade_system.infrastructure.database.repository import save_market_data_batch
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.models import Base
+from trade_system.domains.market_data.infrastructure.database.repository import save_market_data_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)

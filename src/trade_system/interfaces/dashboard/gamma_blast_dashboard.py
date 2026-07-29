@@ -14,8 +14,8 @@ from datetime import date, datetime
 from pathlib import Path
 from sqlalchemy import text
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.application.analysis.gamma_blast_strategy import GammaBlastDetector
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.analysis.application.analysis.gamma_blast_strategy import GammaBlastDetector
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -144,7 +144,7 @@ with engine.connect() as conn:
     df_1m = pd.read_sql(query_spot, conn, params={"symbol": underlying, "td": target_date.isoformat()})
 
 if not df_1m.empty:
-    df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"])
+    df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"], format="mixed")
     
     # Calculate Bollinger squeeze on historical day
     df_before_3 = df_1m[df_1m["timestamp"].dt.time <= datetime.strptime("14:30", "%H:%M").time()]
@@ -202,7 +202,7 @@ with engine.connect() as conn:
     df_oc = pd.read_sql(query_oc, conn, params={"symbol": underlying, "td": target_date.isoformat()})
 
 if not df_oc.empty:
-    df_oc["timestamp"] = pd.to_datetime(df_oc["timestamp"])
+    df_oc["timestamp"] = pd.to_datetime(df_oc["timestamp"], format="mixed")
     timestamps = sorted(df_oc["timestamp"].unique())
     selected_ts = st.select_slider("Select Option Chain Timestamp", options=timestamps, format_func=lambda x: x.strftime("%H:%M:%S"))
     
@@ -254,4 +254,4 @@ if backtest_path.exists():
         st.markdown("**All Generated Trades Log**")
         st.dataframe(trades, use_container_width=True, hide_index=True)
 else:
-    st.info("Run the 0DTE backtester to see historical performance: `python -m trade_system.application.backtesting.gamma_blast_backtest`")
+    st.info("Run the 0DTE backtester to see historical performance: `python -m trade_system.domains.analysis.application.backtesting.gamma_blast_backtest`")

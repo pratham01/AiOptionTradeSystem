@@ -6,8 +6,8 @@ with open(filepath, 'r') as f:
     content = f.read()
 
 # 1. Add Import
-import_str = "from trade_system.infrastructure.database.repository import save_market_data_batch, save_option_chain_batch"
-new_import = import_str + "\nfrom trade_system.application.analysis.breakout_screener import BreakoutScreener"
+import_str = "from trade_system.domains.market_data.infrastructure.database.repository import save_market_data_batch, save_option_chain_batch"
+new_import = import_str + "\nfrom trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener"
 content = content.replace(import_str, new_import)
 
 # 2. Add properties

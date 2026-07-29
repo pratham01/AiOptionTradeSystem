@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.backtesting.big_move_detector import UpsideBigMoveResearch
+from trade_system.domains.analysis.application.backtesting.big_move_detector import UpsideBigMoveResearch
 
 
 def test_upside_big_move_research_creates_threshold_summary(tmp_path: Path) -> None:

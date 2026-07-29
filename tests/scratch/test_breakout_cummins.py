@@ -9,8 +9,8 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
 
 def test_breakout():
     engine = get_engine()

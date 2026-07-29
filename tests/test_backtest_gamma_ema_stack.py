@@ -5,7 +5,7 @@ Unit test for GEX + EMA Stack backtester.
 import pandas as pd
 import numpy as np
 from datetime import date, datetime
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from tests.backtests.backtest_gamma_ema_stack import run_gex_backtest, compute_daily_gex_series
 
 def test_gex_backtest_execution():

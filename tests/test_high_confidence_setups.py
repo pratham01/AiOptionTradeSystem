@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.analysis.high_confidence_setups import HighConfidenceSetupAnalyzer
+from trade_system.domains.analysis.application.analysis.high_confidence_setups import HighConfidenceSetupAnalyzer
 
 
 def test_high_confidence_setup_summary(tmp_path: Path):

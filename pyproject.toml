@@ -38,6 +38,8 @@ agent = [
     "openai>=1.0",
     "anthropic>=0.8",
     "httpx>=0.24",
+    "playwright>=1.40",
+    "beautifulsoup4>=4.12",
 ]
 evolution = [
     "scikit-learn>=1.3",

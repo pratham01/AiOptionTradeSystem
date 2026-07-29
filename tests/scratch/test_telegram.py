@@ -9,8 +9,8 @@ if str(root_path) not in sys.path:
 import logging
 logging.basicConfig(level=logging.INFO)
 
-from trade_system.config import Settings
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
+from trade_system.shared.notifications.telegram import TelegramNotifier
 
 def test_telegram():
     settings = Settings.load()

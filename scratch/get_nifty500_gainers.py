@@ -7,8 +7,8 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.application.agent.top_gainers_agent import BrokerTopGainersAgent, create_fyers_broker, format_top_gainers_table
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.domains.advisory.application.agent.top_gainers_agent import BrokerTopGainersAgent, create_fyers_broker, format_top_gainers_table
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
 
 async def main():
     try:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.infrastructure.data.storage import CsvDataCatalog
+from trade_system.domains.market_data.infrastructure.data.storage import CsvDataCatalog
 
 
 def test_live_bar_file_naming_and_no_symbol_column(tmp_path: Path):

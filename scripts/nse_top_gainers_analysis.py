@@ -33,9 +33,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import pandas as pd
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.factory import get_broker_manager
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
 
 LOGGER = logging.getLogger(__name__)
 

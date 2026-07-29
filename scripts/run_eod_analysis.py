@@ -12,13 +12,13 @@ import requests
 import io
 import pandas as pd
 
-from trade_system.config import Settings
-from trade_system.utils.logging_utils import configure_logging
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.application.analysis.eod_analyzer import EODAnalyzer
-from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+from trade_system.shared.config import Settings
+from trade_system.shared.utils.logging_utils import configure_logging
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient as FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.domains.analysis.application.analysis.eod_analyzer import EODAnalyzer
+from trade_system.domains.advisory.application.agent.postmarket_improver_agent import PostMarketImproverAgent
 
 async def run_eod_workflow():
     # 1. Setup

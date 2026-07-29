@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date
 from sqlalchemy import text
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 def run_backtest_for_symbol(conn, symbol, start_test_date="2026-05-25", end_test_date="2026-05-29"):
     # Load data with a 2-week warm-up lookback (from May 10, 2026) to avoid indicator cold-starts

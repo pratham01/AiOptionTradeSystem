@@ -9,10 +9,10 @@ if str(root_path) not in sys.path:
 import os
 from datetime import datetime, timedelta
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.factory import get_broker_manager
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
 
 def test_data():
     settings = Settings.load()

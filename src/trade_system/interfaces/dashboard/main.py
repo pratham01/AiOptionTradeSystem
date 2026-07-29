@@ -15,14 +15,18 @@ HERE = Path(__file__).parent
 pages = {
     "Live Operations": [
         st.Page(HERE / "agent_dashboard.py", title="Agent Dashboard", icon="🤖", default=True),
+        st.Page(HERE / "broker_health_dashboard.py", title="Broker Health", icon="🔌"),
         st.Page(HERE / "market_mood_dashboard.py", title="Market Mood", icon="📊"),
         st.Page(HERE / "smart_oi_dashboard.py", title="Smart OI", icon="🎯"),
         st.Page(HERE / "sector_scope_dashboard.py", title="Sector Scope", icon="🧭"),
         st.Page(HERE / "option_edge_dashboard.py", title="Option Edge", icon="⚡"),
     ],
     "Research & Strategy": [
+        st.Page(HERE / "greeks_exposure_dashboard.py", title="GEX & DEX Engine", icon="🧲"),
         st.Page(HERE / "nifty_volatility_dashboard.py", title="Nifty Volatility Lab", icon="🧭"),
         st.Page(HERE / "option_research_dashboard.py", title="Option Research Lab", icon="🔬"),
+        st.Page(HERE / "trade_book_dashboard.py", title="Detailed Trade Book", icon="📖"),
+        st.Page(HERE / "bollinger_breakout_dashboard.py", title="Bollinger Breakout Lab", icon="⚡"),
         st.Page(HERE / "candlestick_pattern_dashboard.py", title="Candlestick Pattern Lab", icon="🕯️"),
         st.Page(HERE / "strategy_dashboard.py", title="Strategy Lab", icon="🧪"),
         st.Page(HERE / "volumetric_order_flow_dashboard.py", title="Volumetric Order Flow", icon="📊"),
@@ -40,11 +44,28 @@ st.sidebar.title("🚀 Trade System V2")
 st.sidebar.caption("Autonomous Multi-Agent Swarm")
 st.sidebar.markdown("---")
 
+# Live Bot Status Indicator
+try:
+    from trade_system.shared.live_state import LiveStateReader
+    _reader = LiveStateReader()
+    if _reader.is_bot_running():
+        _health = _reader.get_system_health()
+        st.sidebar.success("🟢 Live Bot: **Running**")
+        if _health:
+            _db_written = _health.get("db_total_written", 0)
+            _db_queue = _health.get("db_queue_depth", 0)
+            st.sidebar.caption(f"DB writes: {_db_written:,} | Queue: {_db_queue}")
+    else:
+        st.sidebar.warning("🔴 Live Bot: **Offline**")
+        st.sidebar.caption("Dashboard using broker API fallback")
+except Exception:
+    st.sidebar.info("⚪ Live Bot: **Unknown**")
+
 # Global Auto-Refresh
 refresh_rate = st.sidebar.select_slider(
     "🔄 Auto-Refresh (seconds)",
-    options=[0, 10, 30, 60, 300],
-    value=60,
+    options=[0, 5, 10, 30, 60, 300],
+    value=10,
     help="Set to 0 to disable implicit updates."
 )
 
@@ -55,8 +76,6 @@ if refresh_rate > 0:
 pg.run()
 
 # Implicit Update Logic
-# We use st_autorefresh to trigger a clean server-side script rerun at the selected refresh rate,
-# preventing the browser window from performing a full reload and resetting DOM/connections.
 if refresh_rate > 0:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=refresh_rate * 1000, key="global_dashboard_refresh")
@@ -64,3 +83,4 @@ if refresh_rate > 0:
 # Sidebar Footer
 st.sidebar.markdown("---")
 st.sidebar.info("System Status: **Operational**")
+

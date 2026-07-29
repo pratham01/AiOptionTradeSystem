@@ -7,8 +7,8 @@ from sqlalchemy import text
 # Add src folder to system path
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.application.indicators.compression import CompressionIndicator
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.strategy.application.indicators.compression import CompressionIndicator
 
 def run_compression_analysis():
     engine = get_engine()

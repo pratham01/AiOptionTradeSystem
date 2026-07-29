@@ -2,7 +2,7 @@ import sys, os
 sys.path.insert(0, 'src')
 
 import asyncio
-from trade_system.application.agent.top_gainer_analysis_agent import TopGainerAnalysisAgent
+from trade_system.domains.advisory.application.agent.top_gainer_analysis_agent import TopGainerAnalysisAgent
 
 async def main():
     print("🚀 Initializing Top Gainer Analysis Agent...")

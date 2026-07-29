@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, date
 from sqlalchemy import text
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.application.strategies.volume_divergence import VolumeDivergenceStrategy
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.strategy.application.strategies.volume_divergence import VolumeDivergenceStrategy
 
 def get_daily_candles_from_15m(df_15m):
     df = df_15m.copy()

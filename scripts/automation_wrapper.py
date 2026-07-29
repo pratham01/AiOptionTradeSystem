@@ -11,14 +11,14 @@ import time
 import logging
 from datetime import datetime, time as dt_time
 
-from trade_system.config import Settings
-from trade_system.utils.logging_utils import configure_logging
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.brokers.factory import get_broker_manager
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
-from trade_system.application.indicators.supertrend import SupertrendIndicator
-from trade_system.infrastructure.data.manager import DataManager
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
+from trade_system.shared.utils.logging_utils import configure_logging
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+from trade_system.domains.strategy.application.indicators.supertrend import SupertrendIndicator
+from trade_system.domains.market_data.infrastructure.data.manager import DataManager
+from trade_system.shared.notifications.telegram import TelegramNotifier
 from trade_system.interfaces.live.market import MarketStatus
 from trade_system.interfaces.live.engine import TradeEngine
 

@@ -14,8 +14,8 @@ import logging
 # Ensure the project root is importable so we can reach the trade_system package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthenticator
 
 LOGGER = logging.getLogger(__name__)
 

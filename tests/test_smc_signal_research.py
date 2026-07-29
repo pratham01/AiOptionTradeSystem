@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.backtesting.smc_signal_research import SmcSignalResearch
+from trade_system.domains.analysis.application.backtesting.smc_signal_research import SmcSignalResearch
 
 
 def test_smc_signal_research_runs(tmp_path: Path) -> None:

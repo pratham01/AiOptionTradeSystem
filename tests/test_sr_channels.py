@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from trade_system.application.indicators.support_resistance_channels import (
+from trade_system.domains.strategy.application.indicators.support_resistance_channels import (
     SupportResistanceChannelDetector,
     SRChannel,
     SRSnapshot,

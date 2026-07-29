@@ -22,7 +22,7 @@ from glob import glob
 from datetime import datetime, date
 from typing import List, Any, Dict
 from sqlalchemy import text
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)

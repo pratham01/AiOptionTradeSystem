@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from trade_system.application.indicators.compression import CompressionIndicator
+from trade_system.domains.strategy.application.indicators.compression import CompressionIndicator
 
 def test_compression_indicator_calculation():
     # Construct 20 bars of data

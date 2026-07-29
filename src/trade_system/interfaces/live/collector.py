@@ -14,22 +14,24 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from trade_system.application.backtesting.ict_fvg_liquidity_research import (
+from trade_system.domains.analysis.application.backtesting.ict_fvg_liquidity_research import (
     FVGDetector,
     IctFvgLiquidityResearch,
     LiquidityTracker,
     MarketStructureTracker,
     OrderBlockDetector,
 )
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient
-from trade_system.config import IndicatorConfig, Settings
-from trade_system.infrastructure.data.storage import CsvDataCatalog
-from trade_system.application.indicators import calculate_supertrend
-from trade_system.application.indicators.rsi_divergence import RsiDivergence
-from trade_system.application.agent.live_alert_agent import LiveAlertAgent
-from trade_system.application.analysis.mwpl_analyzer import MwplAnalyzer
-from trade_system.application.agent.early_morning_agent import EarlyMorningAgent
-from trade_system.application.agent.sniper_reversal_agent import SniperReversalAgent
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient
+from trade_system.shared import TradeSuggestion, TradeDirection
+from trade_system.shared.config import IndicatorConfig, Settings
+from trade_system.domains.market_data.infrastructure.data.storage import CsvDataCatalog
+from trade_system.domains.strategy.application.indicators import calculate_supertrend
+from trade_system.domains.strategy.application.indicators.rsi_divergence import RsiDivergence
+from trade_system.domains.advisory.application.agent.live_alert_agent import LiveAlertAgent
+from trade_system.domains.analysis.application.analysis.mwpl_analyzer import MwplAnalyzer
+from trade_system.domains.advisory.application.agent.early_morning_agent import EarlyMorningAgent
+from trade_system.domains.advisory.application.agent.sniper_reversal_agent import SniperReversalAgent
+from trade_system.domains.advisory.application.agent.gamma_blast_agent import GammaBlastAgent
 from trade_system.interfaces.live.confirmed_strategy import (
     build_confirmed_entry_message as _build_confirmed_entry_message,
     build_confirmed_exit_message as _build_confirmed_exit_message,
@@ -37,6 +39,8 @@ from trade_system.interfaces.live.confirmed_strategy import (
     confirmed_exit_payload as _confirmed_exit_payload,
     prepare_confirmed_strategy_frame as _prepare_confirmed_strategy_frame,
 )
+from trade_system.domains.market_data.infrastructure.database.db_write_worker import DbWriteWorker
+from trade_system.shared.live_state import LiveStateWriter
 from trade_system.interfaces.live.helpers import (
     _completed_timeframe_bars,
     _is_market_timestamp,
@@ -48,15 +52,31 @@ from trade_system.interfaces.live.helpers import (
     resample_to_timeframe,
     valid_supertrend_rows as _valid_supertrend_rows,
 )
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.database.repository import save_market_data_batch, save_option_chain_batch
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
-from trade_system.application.analysis.intraday_option_edge import IntradayOptionEdgePipeline
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.repository import save_market_data_batch, save_option_chain_batch
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.analysis.application.analysis.intraday_option_edge import IntradayOptionEdgePipeline
 from sqlalchemy.orm import Session
 
-from trade_system.application.indicators.volume_profile import VolumeProfileIndicator
-from trade_system.core import VolumeProfileSummary
+from trade_system.domains.strategy.application.indicators.volume_profile import VolumeProfileIndicator
+from trade_system.shared import VolumeProfileSummary
+from trade_system.domains.strategy.application.indicators.support_resistance_channels import SupportResistanceChannelDetector
+from trade_system.domains.trading.application.execution.execution_engine import ExecutionEngine
+from trade_system.domains.trading.application.execution.position_manager import PositionManager
+from trade_system.domains.advisory.application.agent.risk_manager import RiskManager
+
+# ---------------------------------------------------------------------------
+# NEW: Modular DDD pipeline imports (Phase 6+7 wiring)
+# ---------------------------------------------------------------------------
+from trade_system.domains.market_data.application.bar_store import BarStore
+from trade_system.interfaces.live.bar_aggregator import BarAggregator
+from trade_system.interfaces.live.pipelines.index_pipeline import IndexPipeline
+from trade_system.interfaces.live.pipelines.fo_pipeline import FoPipeline
+from trade_system.interfaces.live.pipelines.orb_pipeline import OrbPipeline
+from trade_system.interfaces.live.pipelines.sr_pipeline import SrPipeline
+from trade_system.interfaces.live.pipelines.gamma_pipeline import GammaPipeline
+
 
 LOGGER = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -100,18 +120,27 @@ class LiveMarketDataService:
         broker: FyersBrokerClient,
         catalog: CsvDataCatalog,
         symbols: list[str],
+        broker_manager=None,
         timeframe_minutes: int = 1,
         strategy_timeframe_minutes: int | None = None,
         indicator_config: IndicatorConfig | None = None,
         settings: Settings | None = None,
     ) -> None:
         self.broker = broker
+        self.settings = settings or broker.settings
+        if broker_manager is None:
+            from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+            self.broker_manager = get_broker_manager(self.settings)
+        else:
+            self.broker_manager = broker_manager
+        
         self.catalog = catalog
         self.symbols = symbols
         self.timeframe_minutes = timeframe_minutes
-        self.settings = settings or broker.settings
         self.indicator_config = indicator_config or self.settings.indicator_config
         self.engine = get_engine()
+        self.db_worker = DbWriteWorker(self.engine)
+        self.db_worker.start()
         self.last_initialization_attempt = 0.0
         self.strategy_timeframe_minutes = strategy_timeframe_minutes or self.indicator_config.trend_timeframe_minutes
         self.supertrend_period = self.indicator_config.supertrend_period
@@ -128,8 +157,16 @@ class LiveMarketDataService:
         self.mwpl_analyzer = MwplAnalyzer(settings=self.settings)
         self.early_morning_agent = EarlyMorningAgent(broker=self.broker)
         self.sniper_agent = SniperReversalAgent()
+        self.gamma_agent = GammaBlastAgent()
         self.mwpl_setups = self.mwpl_analyzer.identify_setups()
         
+        self.risk_manager = RiskManager()
+        self.execution_engine = ExecutionEngine(broker=self.broker, risk_manager=self.risk_manager, settings=self.settings)
+        self.position_manager = PositionManager(broker=self.broker, risk_manager=self.risk_manager, settings=self.settings)
+        
+        # Inject execution components into agents that support autonomous trading
+        self.alert_agent.set_execution_engine(self.execution_engine, self.position_manager)
+
         self.confirmed_timeframe_minutes = self.indicator_config.confirmed_timeframe_minutes
         self.confirmed_entry_cutoff = self.indicator_config.confirmed_entry_cutoff
 
@@ -156,6 +193,8 @@ class LiveMarketDataService:
         self.first_live_price: dict[str, float | None] = {symbol: None for symbol in symbols}
         self.premarket_reports_sent: dict[str, date | None] = {symbol: None for symbol in symbols}
         self.last_level_alert_time: dict[str, dict[str, pd.Timestamp]] = {symbol: {} for symbol in symbols}
+        self.sr_detector = SupportResistanceChannelDetector()
+        self.last_sr_alert_time: dict[str, dict[str, pd.Timestamp]] = {symbol: {} for symbol in symbols}
         self.daily_zones: dict[str, dict[str, float]] = {symbol: {} for symbol in symbols}
         self.zone_buffer_pct: float = 0.002
 
@@ -190,7 +229,13 @@ class LiveMarketDataService:
         self.ict_open_position: dict[str, dict[str, object] | None] = {symbol: None for symbol in symbols}
         self.ict_trades: dict[str, list[IctLiveTrade]] = {symbol: [] for symbol in symbols}
         self.ict_signal_events: dict[str, list[dict[str, object]]] = {symbol: [] for symbol in symbols}
-        
+
+        self.gamma_open_position: dict[str, dict[str, object] | None] = {symbol: None for symbol in symbols}
+        self.gamma_trades: dict[str, list[dict[str, object]]] = {symbol: [] for symbol in symbols}
+
+        # RSI divergence tracking — must mirror _reset_intraday_state
+        self.last_rsi_div_signal_time: dict[str, datetime | None] = {symbol: None for symbol in symbols}
+
         self.breakout_screener = BreakoutScreener()
         self.breakout_thread: threading.Thread | None = None
         self.last_breakout_alerts: dict[str, pd.Timestamp] = {}
@@ -204,6 +249,105 @@ class LiveMarketDataService:
         # Opening Range (first 15-min candle) tracking
         self.first_15min_candle: dict[str, dict | None] = {symbol: None for symbol in symbols}
         self.first_15min_break_sent: dict[str, set] = {symbol: set() for symbol in symbols}
+
+        # Live state writer for dashboard communication
+        self._live_state = LiveStateWriter()
+
+        # ----------------------------------------------------------------
+        # Modular DDD pipeline wiring (after all state dicts are initialised)
+        # ----------------------------------------------------------------
+        _market_start_clock = self._parse_clock(self.settings.market_start)
+        _market_end_clock = self._parse_clock(self.settings.market_end)
+
+        # BarStore: centralised persistence (DB async + CSV)
+        self.bar_store = BarStore(
+            db_worker=self.db_worker,
+            catalog=self.catalog,
+            strategy_timeframe_minutes=self.strategy_timeframe_minutes,
+            market_start=_market_start_clock,
+            market_end=_market_end_clock,
+        )
+
+        # BarAggregator: tick → 1-min bar emitter
+        # minute_data is the shared reference — aggregator writes into it;
+        # pipelines read from it.
+        self.bar_aggregator = BarAggregator(
+            symbols=symbols,
+            on_bar_complete=self._on_bar_complete,
+            minute_data_ref=self.minute_data,
+        )
+
+        # IndexPipeline: full analytics for index symbols
+        self.index_pipeline = IndexPipeline(
+            settings=self.settings,
+            alert_agent=self.alert_agent,
+            notifier=self.notifier,
+            confirmed_notifier=self.confirmed_notifier,
+            bar_store=self.bar_store,
+            strategy_timeframe_minutes=self.strategy_timeframe_minutes,
+            supertrend_period=self.supertrend_period,
+            supertrend_multiplier=self.supertrend_multiplier,
+            rsi_divergence=self.rsi_divergence,
+            early_morning_agent=self.early_morning_agent,
+            sniper_agent=self.sniper_agent,
+            gamma_agent=self.gamma_agent,
+            mwpl_analyzer=self.mwpl_analyzer,
+            mwpl_setups=self.mwpl_setups,
+            ict_fvg=self.ict_fvg,
+            ict_ob=self.ict_ob,
+            ict_liq=self.ict_liq,
+            ict_ms=self.ict_ms,
+        )
+
+        # FoPipeline: lightweight analytics for F&O equity symbols
+        self.fo_pipeline = FoPipeline(
+            settings=self.settings,
+            bar_store=self.bar_store,
+            strategy_timeframe_minutes=self.strategy_timeframe_minutes,
+        )
+
+        # Pre-register all symbols in both pipelines
+        for sym in symbols:
+            if self._is_index(sym):
+                self.index_pipeline.register_symbol(sym)
+            else:
+                self.fo_pipeline.register_symbol(sym)
+
+        # ---- Phase 7: ORB / S/R / Gamma pipelines (index-only) ----
+        self.orb_pipeline = OrbPipeline(
+            notifier=self.notifier,
+            confirmed_notifier=self.confirmed_notifier,
+        )
+        self.sr_pipeline = SrPipeline(
+            notifier=self.notifier,
+            alert_agent=self.alert_agent,
+            alert_debounce_seconds=self.alert_debounce_seconds,
+        )
+        self.gamma_pipeline = GammaPipeline(
+            gamma_agent=self.gamma_agent,
+            notifier=self.notifier,
+            latest_oc_analysis=self.latest_oc_analysis,
+        )
+        # Register index symbols in these pipelines
+        for sym in symbols:
+            if self._is_index(sym):
+                self.orb_pipeline.register_symbol(sym)
+                self.sr_pipeline.register_symbol(sym)
+                self.gamma_pipeline.register_symbol(sym)
+
+    # ------------------------------------------------------------------
+    # Symbol classification helpers (single source of truth)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_index(symbol: str) -> bool:
+        """Return True for NSE/BSE index symbols (e.g. NSE:NIFTY50-INDEX)."""
+        return symbol.endswith("-INDEX")
+
+    @staticmethod
+    def _is_fo_stock(symbol: str) -> bool:
+        """Return True for F&O equity symbols (e.g. NSE:RELIANCE-EQ)."""
+        return not symbol.endswith("-INDEX")
 
     @staticmethod
     def _now_ist() -> datetime:
@@ -287,6 +431,8 @@ class LiveMarketDataService:
             on_message=self.on_message,
         )
         self.ws_running = True
+        self._live_state.set_bot_running(True)
+        self._live_state.flush(force=True)
         self.notifier.send("🟢 <b>Trading Bot Started</b>\n\nMarket is open. Live monitoring started.")
         threading.Thread(target=self.ws.connect, daemon=True).start()
         self._start_option_chain_thread()
@@ -303,6 +449,9 @@ class LiveMarketDataService:
         self.oc_running = False
         self.ws_running = False
         self.ws = None
+        self.db_worker.stop()
+        self._live_state.set_bot_running(False)
+        self._live_state.flush(force=True)
 
     def on_open(self) -> None:
         LOGGER.info("Websocket connected. Subscribing to %s", self.symbols)
@@ -343,6 +492,15 @@ class LiveMarketDataService:
 
     def on_error(self, message) -> None:
         LOGGER.error("Websocket error: %s", message)
+        msg_str = str(message).lower()
+        # Detect fatal token errors and request a refresh on the next cycle
+        if "token" in msg_str or "-99" in msg_str or "-300" in msg_str:
+            LOGGER.warning("Websocket reported token error. Forcing token refresh on next cycle.")
+            if hasattr(self, "broker"):
+                # Invalidate the cached websocket token so a fresh one is used on reconnect
+                self.broker._ws_token_cache = None
+                self.broker.force_refresh = True
+            self.ws_running = False  # Signal run_forever() to restart the websocket
 
     def _initialize_trading_day(self, current_date: date) -> None:
         self.market_open_today = False
@@ -355,7 +513,7 @@ class LiveMarketDataService:
             try:
                 LOGGER.info("Running post-market weekend analysis...")
                 import asyncio
-                from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+                from trade_system.domains.advisory.application.agent.postmarket_improver_agent import PostMarketImproverAgent
                 agent = PostMarketImproverAgent(broker=self.broker)
 
                 
@@ -395,6 +553,16 @@ class LiveMarketDataService:
 
         self.market_open_today = True
         self.last_initialized_date = current_date
+
+        try:
+            LOGGER.info("Running DataHealer to auto-correct any missing/corrupt data from the last 2 days...")
+            from trade_system.domains.market_data.application.data_healer import DataHealer
+            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+            healer = DataHealer(get_engine(), self.broker)
+            # Quick heal: backfill any missing 15m/daily bars from the last 2 days
+            healer.heal(lookback_days=2, heal_15m=True, heal_daily=True, remove_corrupt=True)
+        except Exception as e:
+            LOGGER.error(f"Failed to run DataHealer: {e}", exc_info=True)
 
         for symbol in self.symbols:
             try:
@@ -459,14 +627,19 @@ class LiveMarketDataService:
                 curr_trend = self.last_trend.get(symbol)
                 trend_icon = "🟢 UP" if curr_trend == 1 else "🔴 DOWN" if curr_trend == -1 else "⚪ NEUTRAL"
                 
-                self.notifier.send(
-                    f"📊 <b>Premarket Report — {self._short_symbol(symbol)}</b>\n\n"
-                    f"{report}"
-                    f"{zone_info}\n\n"
-                    f"🧭 <b>Current Trend:</b> {trend_icon}"
-                )
+                # Only send premarket Telegram report for index symbols.
+                # F&O stock reports are suppressed unless explicitly enabled to avoid
+                # flooding the alert channel with 180+ messages on startup.
+                is_index = self._is_index(symbol)
+                if is_index or getattr(self.settings, "enable_fo_telegram_alerts", False):
+                    self.notifier.send(
+                        f"📊 <b>Premarket Report — {self._short_symbol(symbol)}</b>\n\n"
+                        f"{report}"
+                        f"{zone_info}\n\n"
+                        f"🧭 <b>Current Trend:</b> {trend_icon}"
+                    )
                 self.premarket_reports_sent[symbol] = current_date
-                LOGGER.info("Sent comprehensive premarket report for %s", symbol)
+                LOGGER.info("Generated premarket report for %s (telegram=%s)", symbol, is_index)
             else:
                 LOGGER.info("Premarket report already sent for %s today. Skipping.", symbol)
 
@@ -508,12 +681,34 @@ class LiveMarketDataService:
         self.ict_trades = {symbol: [] for symbol in self.symbols}
         self.ict_signal_events = {symbol: [] for symbol in self.symbols}
         self.daily_zones = {symbol: {} for symbol in self.symbols}
-        self.zone_buffer_pct = 0.002 # 0.2% buffer for zone proximity
+        self.zone_buffer_pct = 0.002
+
+        # Gamma strategy state
+        self.gamma_open_position = {symbol: None for symbol in self.symbols}
+        self.gamma_trades = {symbol: [] for symbol in self.symbols}
 
         self.first_15min_candle = {symbol: None for symbol in self.symbols}
         self.first_15min_break_sent = {symbol: set() for symbol in self.symbols}
 
+        self.last_rsi_div_signal_time = {symbol: None for symbol in self.symbols}
+
         self.eod_summary_sent_for = None
+
+        # Reset modular DDD pipeline state
+        if hasattr(self, "bar_aggregator"):
+            self.bar_aggregator.reset(self.symbols)
+        index_syms = [s for s in self.symbols if self._is_index(s)]
+        fo_syms = [s for s in self.symbols if self._is_fo_stock(s)]
+        if hasattr(self, "index_pipeline"):
+            self.index_pipeline.reset(index_syms)
+        if hasattr(self, "fo_pipeline"):
+            self.fo_pipeline.reset(fo_syms)
+        if hasattr(self, "orb_pipeline"):
+            self.orb_pipeline.reset(index_syms)
+        if hasattr(self, "sr_pipeline"):
+            self.sr_pipeline.reset(index_syms)
+        if hasattr(self, "gamma_pipeline"):
+            self.gamma_pipeline.reset(index_syms)
     def _refresh_premarket_reference_data(self, symbol: str) -> None:
         self._store_recent_daily_history(symbol)
         self._refresh_recent_3min_history(symbol)
@@ -523,19 +718,37 @@ class LiveMarketDataService:
         if not recent_daily:
             return
         payload = pd.DataFrame(recent_daily).rename(columns={"date": "trade_date"})
-        payload["timestamp"] = pd.to_datetime(payload["trade_date"])
+        payload["timestamp"] = pd.to_datetime(payload["trade_date"], format="mixed")
         self.catalog.write_historical_yearly(payload, symbol, "D")
 
     def _refresh_recent_3min_history(self, symbol: str) -> None:
         lookback_days = max(self.settings.premarket_intraday_history_days, 1) + 2
         today = self._today_ist()
-        frame = self.broker.fetch_history(
-            symbol=symbol,
-            resolution=str(self.strategy_timeframe_minutes),
-            range_from=(today - timedelta(days=lookback_days)).isoformat(),
-            range_to=today.isoformat(),
-        )
-        if frame.empty:
+        
+        try:
+            data = self.broker_manager.get_historical_data(
+                symbol=symbol,
+                start_date=today - timedelta(days=lookback_days),
+                end_date=today,
+                timeframe=str(self.strategy_timeframe_minutes),
+            )
+            if not data:
+                return
+            
+            records = [
+                {
+                    "timestamp": d.timestamp,
+                    "open": d.open,
+                    "high": d.high,
+                    "low": d.low,
+                    "close": d.close,
+                    "volume": d.volume,
+                }
+                for d in data
+            ]
+            frame = pd.DataFrame(records)
+        except Exception as e:
+            LOGGER.error(f"Failed to refresh recent {self.strategy_timeframe_minutes}min history for {symbol}: {e}")
             return
         frame = self._limit_to_recent_trading_sessions(
             frame.sort_values("timestamp").drop_duplicates(subset=["timestamp"]),
@@ -551,9 +764,9 @@ class LiveMarketDataService:
         if frame.empty:
             return frame
         session_count = max(int(session_count), 1)
-        session_dates = list(pd.to_datetime(frame["timestamp"]).dt.date.drop_duplicates())
+        session_dates = list(pd.to_datetime(frame["timestamp"], format="mixed").dt.date.drop_duplicates())
         selected_dates = set(session_dates[-session_count:])
-        trimmed = frame[pd.to_datetime(frame["timestamp"]).dt.date.isin(selected_dates)].copy()
+        trimmed = frame[pd.to_datetime(frame["timestamp"], format="mixed").dt.date.isin(selected_dates)].copy()
         return trimmed.sort_values("timestamp").reset_index(drop=True)
 
     def _recent_strategy_context(self, symbol: str) -> pd.DataFrame:
@@ -568,18 +781,39 @@ class LiveMarketDataService:
     def _fetch_seed_minute_data(self, symbol: str, days: int = 3) -> pd.DataFrame:
         to_date = self._today_ist()
         from_date = to_date - timedelta(days=days)
-        frame = self.broker.fetch_history(
-            symbol=symbol,
-            resolution="1",
-            range_from=from_date.isoformat(),
-            range_to=to_date.isoformat(),
-        )
-        if frame.empty:
+        
+        try:
+            # Use broker manager for failover-supported fetch
+            # factory.py expects datetime objects
+            data = self.broker_manager.get_historical_data(
+                symbol=symbol,
+                start_date=from_date,
+                end_date=to_date,
+                timeframe="1",
+            )
+            
+            if not data:
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+                
+            # Convert list[HistoricalData] to DataFrame
+            records = [
+                {
+                    "timestamp": d.timestamp,
+                    "open": d.open,
+                    "high": d.high,
+                    "low": d.low,
+                    "close": d.close,
+                    "volume": d.volume,
+                }
+                for d in data
+            ]
+            frame = pd.DataFrame(records)
+            frame = frame.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
+            return frame.set_index("timestamp")
+            
+        except Exception as e:
+            LOGGER.error(f"Failed to fetch seed minute data for {symbol}: {e}")
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        frame = frame.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
-        if "symbol" in frame.columns:
-            frame = frame.drop(columns=["symbol"])
-        return frame.set_index("timestamp")
 
     def _load_existing_today_minute_file(self, symbol: str, current_date: date) -> None:
         path = self.catalog.live_bars_path(symbol, 1, current_date.isoformat())
@@ -649,22 +883,40 @@ class LiveMarketDataService:
 
     def _fetch_recent_daily_context(self, symbol: str) -> list[dict[str, float | str]]:
         today = self._today_ist()
-        frame = self.broker.fetch_history(
-            symbol=symbol,
-            resolution="D",
-            range_from=(today - timedelta(days=14)).isoformat(),
-            range_to=today.isoformat(),
-        )
-        if frame.empty:
+        
+        try:
+            data = self.broker_manager.get_historical_data(
+                symbol=symbol,
+                start_date=today - timedelta(days=14),
+                end_date=today,
+                timeframe="DAY",
+            )
+            if not data:
+                return []
+                
+            records = [
+                {
+                    "timestamp": d.timestamp,
+                    "open": d.open,
+                    "high": d.high,
+                    "low": d.low,
+                    "close": d.close,
+                    "volume": d.volume,
+                }
+                for d in data
+            ]
+            frame = pd.DataFrame(records)
+        except Exception as e:
+            LOGGER.error(f"Failed to fetch recent daily context for {symbol}: {e}")
             return []
         ordered = frame.sort_values("timestamp").copy()
-        ordered["timestamp"] = pd.to_datetime(ordered["timestamp"])
+        ordered["timestamp"] = pd.to_datetime(ordered["timestamp"], format="mixed")
         ordered = ordered[ordered["timestamp"].dt.date < today]
         if ordered.empty:
             return []
         return [
             {
-                "date": pd.to_datetime(row["timestamp"]).strftime("%Y-%m-%d"),
+                "date": pd.to_datetime(row["timestamp"], format="mixed").strftime("%Y-%m-%d"),
                 "open": float(row["open"]),
                 "high": float(row["high"]),
                 "low": float(row["low"]),
@@ -1055,12 +1307,24 @@ class LiveMarketDataService:
             return
         self._check_gap_and_previous_day_levels(symbol, tick)
         
-        # --- Zone Alerts ---
-        self._maybe_alert_zone_proximity(symbol, float(tick["ltp"]), tick["timestamp"])
+        # --- Autonomous Position Management ---
+        self.position_manager.process_tick(symbol, float(tick["ltp"]), tick["timestamp"])
 
-        # --- First 15-min Candle (ORB) Breakout Alert ---
-        self._maybe_alert_first_15min_break(symbol, float(tick["ltp"]), tick["timestamp"])
-        
+        price = float(tick["ltp"])
+        tick_time = tick["timestamp"]
+
+        # --- ORB breakout detection (index-only, delegates to OrbPipeline) ---
+        if self._is_index(symbol) and hasattr(self, "orb_pipeline"):
+            self.orb_pipeline.on_tick(symbol, price, tick_time)
+
+        # --- Zone and level proximity (index-only, delegates to SrPipeline) ---
+        if self._is_index(symbol) and hasattr(self, "sr_pipeline"):
+            self.sr_pipeline.on_tick(symbol, price, tick_time)
+
+        # --- Legacy zone alert (kept for non-index symbols) ---
+        if not self._is_index(symbol):
+            self._maybe_alert_zone_proximity(symbol, price, tick_time)
+
         tick_minute = tick["timestamp"].replace(second=0, microsecond=0)
         current_minute = self.current_minute[symbol]
         if current_minute is None:
@@ -1070,6 +1334,10 @@ class LiveMarketDataService:
             self.current_minute[symbol] = tick_minute
         self.tick_buffer[symbol].append(tick)
         self.last_tick_price[symbol] = float(tick["ltp"])
+
+        # Update live state for dashboard (non-blocking)
+        self._live_state.update_tick(symbol, float(tick["ltp"]), float(tick.get("volume", 0)), tick["timestamp"])
+        self._live_state.flush()
 
     def _check_gap_and_previous_day_levels(self, symbol: str, tick: dict) -> None:
         price = float(tick["ltp"])
@@ -1224,6 +1492,7 @@ class LiveMarketDataService:
             )
 
     def _flush_symbol_minute(self, symbol: str) -> None:
+        """Complete the current minute bar and route it to the appropriate pipeline."""
         if not self.tick_buffer[symbol]:
             return
         buffered_ticks = self.tick_buffer[symbol]
@@ -1231,32 +1500,364 @@ class LiveMarketDataService:
         self.tick_buffer[symbol] = []
         if minute_bar is None:
             return
+
+        # Backfill zero volumes from REST history
         minute_bar = self._patch_minute_volume_from_history(symbol, minute_bar)
+
         last_tick_volume = float(buffered_ticks[-1].get("volume", 0.0) or 0.0)
         if last_tick_volume > 0:
             self.last_cumulative_volume[symbol] = last_tick_volume
+
+        # Update shared minute_data rolling window (BarAggregator also does this
+        # via on_bar_complete, but _flush_symbol_minute is still called directly
+        # from _flush_all_open_minutes at market close — keep both paths working)
         minute_df = minute_bar.to_frame().T.reset_index().rename(columns={"index": "timestamp"})
-        trade_date = minute_bar.name.date().isoformat()
-        self.catalog.append_frame(minute_df, self.catalog.live_bars_path(symbol, 1, trade_date))
-
-        # Save to Database
-        try:
-            with Session(self.engine) as session:
-                save_market_data_batch(session, symbol, "1", minute_df.to_dict("records"))
-        except Exception as e:
-            LOGGER.error(f"Failed to save live minute bar to DB for {symbol}: {e}")
-
+        trade_date = minute_bar.name.date()
         indexed = minute_df.set_index("timestamp")
         combined = pd.concat([self.minute_data[symbol], indexed]).sort_index()
-        self.minute_data[symbol] = combined[~combined.index.duplicated(keep="last")]
-        self._backfill_recent_live_minute_volumes(symbol, minute_bar.name.date())
-        self._update_intraday_yearly_3min_file(symbol, minute_bar.name.date())
-        self._maybe_set_first_15min_candle(symbol, minute_bar.name.date())
-        self._run_supertrend(symbol)
+        self.minute_data[symbol] = combined[~combined.index.duplicated(keep="last")].tail(1500)
+
+        # --- Persist via BarStore (replaces direct catalog.append_frame + db_worker.enqueue) ---
+        try:
+            self.bar_store.save_1min_bar(symbol, minute_bar, trade_date)
+        except Exception as exc:
+            LOGGER.error("BarStore.save_1min_bar failed for %s: %s", symbol, exc)
+
+        # --- Backfill recent zero-volume bars ---
+        self._backfill_recent_live_minute_volumes(symbol, trade_date)
+
+        # --- Strategy-timeframe file + analytics via BarStore ---
+        try:
+            updated_strategy = self.bar_store.update_strategy_file(
+                symbol,
+                self.minute_data[symbol],
+                trade_date,
+                resample_fn=resample_to_timeframe,
+                completed_bars_fn=_completed_timeframe_bars,
+                sanitize_fn=_sanitize_intraday_minutes,
+                latest_session_minute_fn=_latest_session_minute,
+            )
+            if not updated_strategy.empty:
+                self.strategy_data[symbol] = updated_strategy
+                # Sync to IndexPipeline so it can query strategy_data via get_strategy_data()
+                if self._is_index(symbol):
+                    self.index_pipeline._strategy_data[symbol] = updated_strategy
+                else:
+                    self.fo_pipeline._strategy_data[symbol] = updated_strategy
+        except Exception as exc:
+            LOGGER.error("BarStore.update_strategy_file failed for %s: %s", symbol, exc)
+
+        # --- Route to analytics pipeline ---
+        self._on_bar_complete(symbol, minute_bar, self.minute_data)
+
+        # --- Update live state dashboard ---
+        self._live_state.update_minute_bar(
+            symbol,
+            open_=float(minute_bar.get("open", 0)),
+            high=float(minute_bar.get("high", 0)),
+            low=float(minute_bar.get("low", 0)),
+            close=float(minute_bar.get("close", 0)),
+            volume=int(minute_bar.get("volume", 0)),
+        )
+        self._live_state.update_health(db_stats=self.db_worker.stats(), ws_connected=self.ws_running)
+        self._live_state.flush(force=True)
+
+    def _on_bar_complete(
+        self,
+        symbol: str,
+        bar: pd.Series,
+        minute_data: dict[str, pd.DataFrame],
+    ) -> None:
+        """
+        Central routing point for completed 1-min bars.
+
+        Dispatches to IndexPipeline (full analytics) or FoPipeline (lightweight)
+        based on symbol classification.  Also handles concerns that remain in the
+        orchestrator: ORB detection, S/R channel touch, Gamma Blast, ICT stream,
+        and Confirmed Strategy (until those are migrated to their own modules).
+        """
+        current_date = self._today_ist()
+
+        if self._is_index(symbol):
+            # Full index analytics — SuperTrend flip, RSI div, SMC, Sniper, MWPL
+            try:
+                self.index_pipeline.on_bar(symbol, bar, minute_data)
+                # Sync strategy_data back to orchestrator for legacy method access
+                self.strategy_data[symbol] = self.index_pipeline.get_strategy_data(symbol)
+                if self.last_trend[symbol] != self.index_pipeline.get_last_trend(symbol):
+                    self.last_trend[symbol] = self.index_pipeline.get_last_trend(symbol)
+            except Exception as exc:
+                LOGGER.error("IndexPipeline.on_bar failed for %s: %s", symbol, exc)
+
+            # ORB, S/R, Gamma Blast — now routed to dedicated pipelines
+            current_date = self._today_ist()
+
+            if hasattr(self, "orb_pipeline"):
+                self.orb_pipeline.on_bar(symbol, bar, minute_data, current_date)
+                # Sync candle back to orchestrator state for dashboard/EOD access
+                candle = self.orb_pipeline.get_candle(symbol)
+                if candle:
+                    self.first_15min_candle[symbol] = candle
+
+            if hasattr(self, "sr_pipeline"):
+                # Sync previous-day levels into sr_pipeline on each bar
+                self.sr_pipeline.set_previous_day_levels(symbol, self.previous_day_levels.get(symbol))
+                self.sr_pipeline.set_daily_zones(symbol, self.daily_zones.get(symbol, {}))
+                self.sr_pipeline.on_bar(symbol, bar, minute_data)
+
+            if hasattr(self, "gamma_pipeline"):
+                self.gamma_pipeline.on_bar(symbol, bar, minute_data)
+                # Sync open trade back to orchestrator for EOD summary
+                open_trade = self.gamma_pipeline.get_open_trade(symbol)
+                self.gamma_open_position[symbol] = (
+                    open_trade.__dict__ if open_trade else None
+                )
+
+            # ICT stream (experimental, remains in orchestrator for now)
+            if self.settings.enable_experimental_ict_stream:
+                adjusted = get_gap_adjusted_data(
+                    self.strategy_data.get(symbol, pd.DataFrame()).sort_index(),
+                    self.supertrend_period,
+                    current_date,
+                )
+                self._run_experimental_ict_stream(symbol, adjusted)
+
+            latest_minute = pd.Timestamp(self.strategy_data[symbol].index.max()) \
+                if symbol in self.strategy_data and not self.strategy_data[symbol].empty else None
+            self._run_confirmed_strategy(
+                symbol,
+                get_gap_adjusted_data(
+                    self.strategy_data.get(symbol, pd.DataFrame()).sort_index(),
+                    self.supertrend_period,
+                    current_date,
+                ),
+                latest_minute,
+            )
+
+        else:
+            # Lightweight F&O analytics — RSI, volume surge, 3m to DB
+            try:
+                self.fo_pipeline.on_bar(symbol, bar, minute_data)
+                # Sync strategy_data back to orchestrator
+                self.strategy_data[symbol] = self.fo_pipeline.get_strategy_data(symbol)
+
+                # Dispatch any pending alerts (only sent if enable_fo_telegram_alerts=True)
+                pending = self.fo_pipeline.get_pending_alerts()
+                for alert in pending:
+                    self.notifier.send(alert.message)
+
+            except Exception as exc:
+                LOGGER.error("FoPipeline.on_bar failed for %s: %s", symbol, exc)
+
 
     def _flush_all_open_minutes(self) -> None:
         for symbol in self.symbols:
             self._flush_symbol_minute(symbol)
+
+    def _check_sr_channel_touch(self, symbol: str, minute_bar: pd.Series) -> None:
+        """Evaluate Support/Resistance channels on the 15-minute timeframe and send alerts."""
+        df = self.minute_data.get(symbol)
+        if df is None or df.empty:
+            return
+            
+        try:
+            # Generate 15-minute bars for SR detection
+            df_15m = resample_to_timeframe(df, 15).reset_index()
+            if len(df_15m) < 25:  # minimal requirement for pivot_period=10 is 2*10+2=22
+                return
+                
+            snapshots = self.sr_detector.calculate(df_15m)
+            if not snapshots:
+                return
+                
+            latest_snap = snapshots[-1]
+            channels = latest_snap.channels
+            if not channels:
+                return
+                
+            current_price = float(minute_bar.get("close", 0.0))
+            if current_price == 0.0:
+                return
+                
+            now = self._now_ist()
+            last_alerts = self.last_sr_alert_time.get(symbol, {})
+            
+            # Use a tiny buffer around the channel to define a "touch" (e.g., 0.1% or exactly within channel)
+            # The SRChannel is defined by bottom and top. 
+            for ch in channels:
+                buffer = current_price * 0.001 # 0.1% buffer
+                if (ch.low - buffer) <= current_price <= (ch.high + buffer):
+                    # Unique ID for this channel
+                    channel_id = f"{ch.channel_type}_{ch.low:.1f}_{ch.high:.1f}"
+                    last_time = last_alerts.get(channel_id)
+                    
+                    # Cooldown of 60 minutes for the exact same channel alert
+                    if last_time is None or (now - last_time).total_seconds() > 3600:
+                        self.last_sr_alert_time[symbol][channel_id] = now
+                        
+                        ch_type_str = ch.channel_type.capitalize()
+                        msg = (
+                            f"🔔 <b>{symbol} - 15m SR {ch_type_str} Touch</b>\n\n"
+                            f"Price: ₹{current_price:.2f}\n"
+                            f"Channel: ₹{ch.low:.2f} - ₹{ch.high:.2f}\n"
+                            f"Time: {now.strftime('%H:%M:%S')}"
+                        )
+                        self.notifier.send(msg)
+        except Exception as e:
+            LOGGER.error(f"Failed to check SR channel touches for {symbol}: {e}")
+
+    def _evaluate_gamma_blast(self, symbol: str) -> None:
+        """Evaluate Gamma Blast strategy and manage active trades."""
+        open_trade = self.gamma_open_position.get(symbol)
+        if open_trade:
+            self._manage_gamma_blast_trade(symbol, open_trade)
+            return
+
+        df = self.minute_data.get(symbol)
+        if df is None or len(df) < 30:
+            return
+            
+        now = self._now_ist()
+        if not (dt_time(14, 30) <= now.time() <= dt_time(15, 5)):
+            return
+
+        df_eval = df.tail(100).copy()
+        
+        today_mask = df_eval.index.date == now.date()
+        if not today_mask.any():
+            return
+            
+        df_today = df_eval[today_mask]
+        if not df_today.empty:
+            typical_price = (df_today['high'] + df_today['low'] + df_today['close']) / 3
+            df_eval.loc[today_mask, 'vwap'] = (typical_price * df_today['volume']).cumsum() / df_today['volume'].cumsum()
+        
+        delta = df_eval['close'].diff()
+        gain = (delta.where(delta > 0, 0.0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
+        rs = gain / loss
+        df_eval['rsi'] = 100 - (100 / (1 + rs))
+        
+        df_eval['volume_sma_20'] = df_eval['volume'].rolling(window=20).mean()
+        
+        oc_analysis = self.latest_oc_analysis.get(self._short_symbol(symbol))
+        
+        try:
+            suggestion = self.gamma_agent.analyze_for_gamma_blast(
+                symbol=symbol,
+                df=df_eval.reset_index(),
+                oc_analysis=oc_analysis
+            )
+        except Exception as e:
+            LOGGER.error(f"GammaBlastAgent error for {symbol}: {e}")
+            return
+            
+        if suggestion:
+            LOGGER.info(f"🚀 GAMMA BLAST TRIGGERED: {symbol} - {suggestion.direction.name}")
+            
+            # Select ATM option from OC
+            opt_symbol = "N/A"
+            entry_premium = 0.0
+            if oc_analysis and oc_analysis.chain_df is not None:
+                atm_strike = round(suggestion.entry_zone_low / 50) * 50 if "NIFTY50" in symbol else round(suggestion.entry_zone_low / 100) * 100
+                opt_type = "CE" if suggestion.direction == TradeDirection.CALL else "PE"
+                mask = (oc_analysis.chain_df['strike'] == atm_strike) & (oc_analysis.chain_df['option_type'] == opt_type)
+                if mask.any():
+                    opt_row = oc_analysis.chain_df[mask].iloc[0]
+                    opt_symbol = opt_row['symbol']
+                    entry_premium = float(opt_row['ltp'])
+            
+            self.gamma_open_position[symbol] = {
+                "symbol": symbol,
+                "direction": suggestion.direction,
+                "entry_time": now,
+                "entry_spot": float(df_eval['close'].iloc[-1]),
+                "option_symbol": opt_symbol,
+                "entry_premium": entry_premium,
+                "target_spot": float(suggestion.target),
+                "stop_spot": float(suggestion.stop_loss),
+                "reason": suggestion.narrative
+            }
+            
+            msg = (
+                f"💥 <b>0DTE GAMMA BLAST ALERT: {symbol}</b> 💥\n\n"
+                f"Direction: <b>{suggestion.direction.name}</b>\n"
+                f"Spot: ₹{df_eval['close'].iloc[-1]:.2f}\n"
+                f"Target Spot: ₹{suggestion.target:.2f}\n"
+                f"Stop Spot: ₹{suggestion.stop_loss:.2f}\n"
+                f"Option: {opt_symbol} @ ₹{entry_premium:.2f}\n\n"
+                f"<i>{suggestion.narrative}</i>"
+            )
+            self.notifier.send(msg)
+            
+    def _manage_gamma_blast_trade(self, symbol: str, trade: dict[str, object]) -> None:
+        """Trailing and exit logic for active Gamma Blast trade."""
+        now = self._now_ist()
+        
+        if now.time() >= dt_time(15, 12):
+            self._close_gamma_blast_trade(symbol, trade, "EOD_CLOSE", now)
+            return
+            
+        df = self.minute_data.get(symbol)
+        if df is None or df.empty:
+            return
+            
+        curr_spot = float(df['close'].iloc[-1])
+        target_spot = float(trade["target_spot"])
+        stop_spot = float(trade["stop_spot"])
+        direction = trade["direction"]
+        
+        if direction == TradeDirection.CALL:
+            if curr_spot >= target_spot:
+                self._close_gamma_blast_trade(symbol, trade, "TARGET_HIT", now)
+                return
+            if curr_spot <= stop_spot:
+                self._close_gamma_blast_trade(symbol, trade, "STOP_LOSS", now)
+                return
+        else:
+            if curr_spot <= target_spot:
+                self._close_gamma_blast_trade(symbol, trade, "TARGET_HIT", now)
+                return
+            if curr_spot >= stop_spot:
+                self._close_gamma_blast_trade(symbol, trade, "STOP_LOSS", now)
+                return
+            
+    def _close_gamma_blast_trade(self, symbol: str, trade: dict[str, object], reason: str, exit_time: datetime, exit_premium: float = 0.0) -> None:
+        """Close an active gamma blast trade and record PnL."""
+        entry_prem = float(trade["entry_premium"])
+        
+        if exit_premium == 0.0:
+            oc = self.latest_oc_analysis.get(self._short_symbol(symbol))
+            if oc and oc.chain_df is not None:
+                opt_row = oc.chain_df[oc.chain_df['symbol'] == trade["option_symbol"]]
+                if not opt_row.empty:
+                    exit_premium = float(opt_row.iloc[0]['ltp'])
+                    
+        pnl = exit_premium - entry_prem
+        pnl_pct = (pnl / entry_prem) * 100 if entry_prem > 0 else 0.0
+        
+        emoji = "🟢" if pnl > 0 else "🔴"
+        
+        direction_name = trade["direction"].name if hasattr(trade["direction"], "name") else str(trade["direction"])
+        msg = (
+            f"{emoji} <b>GAMMA BLAST CLOSED: {symbol}</b>\n\n"
+            f"Option: {trade['option_symbol']}\n"
+            f"Direction: {direction_name}\n"
+            f"Reason: <b>{reason}</b>\n\n"
+            f"Entry: ₹{entry_prem:.2f}\n"
+            f"Exit: ₹{exit_premium:.2f}\n"
+            f"PnL: <b>{pnl:+.2f} ({pnl_pct:+.1f}%)</b>"
+        )
+        self.notifier.send(msg)
+        
+        trade["exit_time"] = exit_time
+        trade["exit_premium"] = exit_premium
+        trade["pnl"] = pnl
+        trade["pnl_pct"] = pnl_pct
+        trade["exit_reason"] = reason
+        
+        self.gamma_trades[symbol].append(trade)
+        self.gamma_open_position[symbol] = None
 
     def _run_supertrend(self, symbol: str) -> None:
         current_date = self._today_ist()
@@ -1273,6 +1874,13 @@ class LiveMarketDataService:
         today_df = st_df[st_df.index.date == current_date]
         if not today_df.empty:
             self._check_trend_change(symbol, st_df)
+            # Push supertrend state to live state for dashboard
+            last_st = today_df.iloc[-1]
+            self._live_state.update_supertrend(
+                symbol,
+                direction=int(last_st.get("supertrend_direction", 0)),
+                level=float(last_st.get("supertrend", 0.0)),
+            )
         
         # --- RSI Divergence ---
         rsi_df = self.rsi_divergence.calculate(adjusted)
@@ -1687,7 +2295,7 @@ class LiveMarketDataService:
         if today_bars.empty:
             return
         merged = _merge_intraday_3min_bars(existing=existing, today_bars=today_bars)
-        self.strategy_data[symbol] = merged.set_index("timestamp").sort_index()
+        self.strategy_data[symbol] = merged.set_index("timestamp").sort_index().tail(1500)
         merged.to_csv(path, index=False)
 
     def _patch_minute_volume_from_history(self, symbol: str, minute_bar: pd.Series) -> pd.Series:
@@ -1719,17 +2327,38 @@ class LiveMarketDataService:
         if not cached.empty and cached.index.max().date() == trade_date:
             if min_timestamp is None or pd.Timestamp(cached.index.max()) >= pd.Timestamp(min_timestamp):
                 return cached
-        history = self.broker.fetch_history(
-            symbol=symbol,
-            resolution="1",
-            range_from=trade_date.isoformat(),
-            range_to=trade_date.isoformat(),
-        )
+        try:
+            data = self.broker_manager.get_historical_data(
+                symbol=symbol,
+                start_date=trade_date,
+                end_date=trade_date,
+                timeframe="1",
+            )
+            if not data:
+                return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+                
+            records = [
+                {
+                    "timestamp": d.timestamp,
+                    "open": d.open,
+                    "high": d.high,
+                    "low": d.low,
+                    "close": d.close,
+                    "volume": d.volume,
+                }
+                for d in data
+            ]
+            history = pd.DataFrame(records)
+            history = history.sort_values("timestamp").drop_duplicates(subset=["timestamp"])
+            history.set_index("timestamp", inplace=True)
+        except Exception as e:
+            LOGGER.error(f"Failed to fetch intraday history with cache for {symbol}: {e}")
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+            
         if history.empty:
             return history
         if "symbol" in history.columns:
             history = history.drop(columns=["symbol"])
-        history = history.set_index("timestamp").sort_index()
         self.history_volume_cache[symbol] = history
         return history
 
@@ -1980,7 +2609,7 @@ class LiveMarketDataService:
             analyzer.fyers = self.broker.fyers
             return analyzer
         try:
-            from trade_system.application.analysis.option_chain_analyzer import OptionChainAnalyzer
+            from trade_system.domains.analysis.application.analysis.option_chain_analyzer import OptionChainAnalyzer
         except Exception:
             LOGGER.exception("Failed to import OptionChainAnalyzer.")
             return None
@@ -2008,7 +2637,7 @@ class LiveMarketDataService:
                 # underlying symbol is now dynamic
                 full_symbol = f"BSE:{symbol}-INDEX" if symbol == "SENSEX" else f"NSE:{symbol}-INDEX"
                 db_records = current_df.to_dict('records')
-                from trade_system.infrastructure.database.repository import save_option_chain_batch
+                from trade_system.domains.market_data.infrastructure.database.repository import save_option_chain_batch
                 save_option_chain_batch(session, full_symbol, now, db_records)
         except Exception as e:
             LOGGER.error(f"Failed to save option chain snapshot to DB for {symbol}: {e}")
@@ -2206,8 +2835,8 @@ class LiveMarketDataService:
         history = self._load_option_chain_history(previous_files[-1])
         if history.empty or "timestamp" not in history.columns:
             return pd.DataFrame()
-        latest_ts = pd.to_datetime(history["timestamp"]).max()
-        snapshot = history[pd.to_datetime(history["timestamp"]) == latest_ts].copy()
+        latest_ts = pd.to_datetime(history["timestamp"], format="mixed").max()
+        snapshot = history[pd.to_datetime(history["timestamp"], format="mixed") == latest_ts].copy()
         return snapshot.reset_index(drop=True)
 
     def _select_adjacent_option_chain_strikes(
@@ -2245,10 +2874,19 @@ class LiveMarketDataService:
         closes = prices[1:]
         highs = np.maximum(opens, closes) * 1.001
         lows = np.minimum(opens, closes) * 0.999
-        idx = subset.index[1:]
-        ohlc = pd.DataFrame({'open': opens, 'high': highs, 'low': lows, 'close': closes}, index=idx)
+        
+        # Pass actual timestamps to ensure data continuity gap checks work
+        timestamps = subset['timestamp'].iloc[1:].values
+        ohlc = pd.DataFrame({
+            'open': opens, 
+            'high': highs, 
+            'low': lows, 
+            'close': closes,
+            'timestamp': timestamps
+        }, index=timestamps)
+        
         st_df = calculate_supertrend(ohlc, period=self.supertrend_period, multiplier=self.supertrend_multiplier)
-        if st_df.empty:
+        if st_df is None or st_df.empty:
             return None
         last = st_df.iloc[-1]
         return {
@@ -2478,12 +3116,13 @@ class LiveMarketDataService:
             if self.settings.enable_experimental_ict_stream:
                 lines.extend(self._build_ict_eod_lines(symbol))
                 self._write_ict_eod_trade_log(symbol, trade_date)
-        self.notifier.send("\n".join(lines))
+        if self._is_index(symbol) or getattr(self.settings, "enable_fo_telegram_alerts", False):
+            self.notifier.send("\n".join(lines))
 
         # Trigger EOD Post-Market Swarm Analysis automatically
         try:
             LOGGER.info("Market closed. Triggering Post-Market Swarm Analysis...")
-            from trade_system.application.agent.postmarket_improver_agent import PostMarketImproverAgent
+            from trade_system.domains.advisory.application.agent.postmarket_improver_agent import PostMarketImproverAgent
             improver = PostMarketImproverAgent(broker=self.broker)
             import asyncio
             import threading
@@ -2550,10 +3189,10 @@ def _merge_intraday_3min_bars(*, existing: pd.DataFrame, today_bars: pd.DataFram
     existing_frame = existing_frame[[col for col in existing_frame.columns if col in base_columns]].copy()
     if "timestamp" not in existing_frame.columns:
         existing_frame["timestamp"] = pd.to_datetime([])
-    existing_frame["timestamp"] = pd.to_datetime(existing_frame["timestamp"])
+    existing_frame["timestamp"] = pd.to_datetime(existing_frame["timestamp"], format="mixed")
 
     today_payload = today_bars.copy()[base_columns]
-    today_payload["timestamp"] = pd.to_datetime(today_payload["timestamp"])
+    today_payload["timestamp"] = pd.to_datetime(today_payload["timestamp"], format="mixed")
 
     merged = pd.concat([existing_frame, today_payload], ignore_index=True, sort=False)
     merged = merged.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)

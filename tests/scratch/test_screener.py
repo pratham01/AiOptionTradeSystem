@@ -9,7 +9,7 @@ if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
 from unittest.mock import MagicMock, patch
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
 
 def debug():
     # Construct 20 bars yesterday (June 11), 20 bars today (June 12) = 40 bars total
@@ -80,8 +80,8 @@ def debug():
     screener = BreakoutScreener()
     screener.fo_metadata = {"NSE:TESTSTOCK-EQ": "TEST_SECTOR"}
     
-    with patch("trade_system.application.analysis.breakout_screener.pd.read_sql") as mock_read_sql:
-        with patch("trade_system.application.analysis.breakout_screener.get_engine") as mock_engine:
+    with patch("trade_system.domains.analysis.application.analysis.breakout_screener.pd.read_sql") as mock_read_sql:
+        with patch("trade_system.domains.analysis.application.analysis.breakout_screener.get_engine") as mock_engine:
             mock_read_sql.side_effect = [mock_15m_data, mock_daily_df]
             
             mock_conn = MagicMock()

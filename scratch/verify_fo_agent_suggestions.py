@@ -7,8 +7,8 @@ from datetime import datetime, date
 root_path = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root_path))
 
-from trade_system.application.agent.fo_stock_suggester_agent import FoStockSuggesterAgent
-from trade_system.core import MarketContext, MarketRegime
+from trade_system.domains.advisory.application.agent.fo_stock_suggester_agent import FoStockSuggesterAgent
+from trade_system.shared import MarketContext, MarketRegime
 
 class MockBroker:
     pass
@@ -37,7 +37,7 @@ async def test_suggestions():
     
     # 4. Log suggestions to the database so they appear in the UI
     try:
-        from trade_system.application.evolution.trade_logger import TradeLogger
+        from trade_system.domains.analysis.application.evolution.trade_logger import TradeLogger
         trade_logger = TradeLogger()
         trade_logger.log_many(suggestions)
         print("Logged suggestions to database successfully!")

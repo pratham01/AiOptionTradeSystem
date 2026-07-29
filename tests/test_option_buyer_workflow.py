@@ -5,10 +5,10 @@ import json
 import pandas as pd
 from pathlib import Path
 
-from trade_system.core import TradeSuggestion, TradeDirection, TradeHorizon, OptionParams
-from trade_system.core.ports.broker import OrderSide
-from trade_system.application.agent.option_buyer_workflow import OptionBuyerExecutionWorkflow
-from trade_system.infrastructure.database.models import Base, SuggestedTrade
+from trade_system.shared import TradeSuggestion, TradeDirection, TradeHorizon, OptionParams
+from trade_system.domains.trading.domain.ports.broker import OrderSide
+from trade_system.domains.advisory.application.agent.option_buyer_workflow import OptionBuyerExecutionWorkflow
+from trade_system.domains.market_data.infrastructure.database.models import Base, SuggestedTrade
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from contextlib import contextmanager
@@ -40,7 +40,7 @@ def fixture_db_session():
         finally:
             session.close()
             
-    with patch("trade_system.application.agent.option_buyer_workflow.get_db_context", mock_get_db_context):
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.get_db_context", mock_get_db_context):
         yield Session
 
 
@@ -78,7 +78,7 @@ def fixture_mock_broker():
 async def test_resolve_option_contract_symbol(mock_broker, temp_positions_file):
     workflow = OptionBuyerExecutionWorkflow(broker=mock_broker, positions_file=temp_positions_file)
     
-    with patch("trade_system.application.agent.option_buyer_workflow.OptionChainAnalyzer") as MockAnalyzer:
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.OptionChainAnalyzer") as MockAnalyzer:
         mock_analyzer_instance = MockAnalyzer.return_value
         
         # Exact and fallback matching data
@@ -137,7 +137,7 @@ async def test_execute_buy_order(mock_broker, temp_positions_file, db_session):
     session.commit()
     session.close()
 
-    with patch("trade_system.application.agent.option_buyer_workflow.OptionChainAnalyzer") as MockAnalyzer:
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.OptionChainAnalyzer") as MockAnalyzer:
         mock_analyzer_instance = MockAnalyzer.return_value
         mock_analyzer_instance.get_option_chain_df.return_value = pd.DataFrame([
             {"strike": 22000, "expiry": "2026-06-18", "option_type": "CE", "symbol": "NSE:NIFTY2661822000CE"},
@@ -213,7 +213,7 @@ async def test_manage_open_positions_stop_loss_hit(mock_broker, temp_positions_f
     }
     
     # Mock datetime to standard morning trading hours
-    with patch("trade_system.application.agent.option_buyer_workflow.datetime") as mock_dt:
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 6, 12, 10, 30)
         
         await workflow.manage_open_positions()
@@ -277,7 +277,7 @@ async def test_manage_open_positions_target_hit(mock_broker, temp_positions_file
         "NSE:NIFTY2661822000CE": MockMarketQuote(last_price=175.0)
     }
     
-    with patch("trade_system.application.agent.option_buyer_workflow.datetime") as mock_dt:
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 6, 12, 10, 30)
         
         await workflow.manage_open_positions()
@@ -324,7 +324,7 @@ async def test_manage_open_positions_trailing_sl_activation_and_lock(mock_broker
         "NSE:NIFTY2661822000CE": MockMarketQuote(last_price=125.0)
     }
     
-    with patch("trade_system.application.agent.option_buyer_workflow.datetime") as mock_dt:
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 6, 12, 10, 30)
         
         await workflow.manage_open_positions()
@@ -397,7 +397,7 @@ async def test_manage_open_positions_eod_squareoff(mock_broker, temp_positions_f
     }
     
     # Mock datetime to 3:16 PM (EOD cutoff is 3:15 PM)
-    with patch("trade_system.application.agent.option_buyer_workflow.datetime") as mock_dt:
+    with patch("trade_system.domains.advisory.application.agent.option_buyer_workflow.datetime") as mock_dt:
         mock_dt.now.return_value = datetime(2026, 6, 12, 15, 16)
         
         await workflow.manage_open_positions()

@@ -8,7 +8,7 @@ from datetime import date, datetime, time as dt_time
 import pandas as pd
 import numpy as np
 
-from trade_system.application.analysis.gamma_blast_strategy import GammaBlastDetector
+from trade_system.domains.analysis.application.analysis.gamma_blast_strategy import GammaBlastDetector
 
 def test_is_expiry_day():
     # Tuesday (1) is Nifty expiry day in the database

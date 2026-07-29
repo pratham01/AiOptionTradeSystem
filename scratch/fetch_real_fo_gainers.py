@@ -2,10 +2,10 @@ import sys, os
 from pathlib import Path
 sys.path.insert(0, 'src')
 os.chdir(os.path.dirname(os.path.abspath(__file__)) + '/..')
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient
-from trade_system.application.analysis.top_gainers import NSETop100GainersFetcher
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient
+from trade_system.domains.analysis.application.analysis.top_gainers import NSETop100GainersFetcher
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
 
 s = Settings.load()
 broker = FyersBrokerClient(client_id=s.fyers.client_id, access_token=s.fyers.access_token, user_id=s.fyers.user_id)

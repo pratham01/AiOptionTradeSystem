@@ -7,10 +7,10 @@ from datetime import datetime, date
 root_path = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root_path))
 
-from trade_system.application.agent.fo_stock_suggester_agent import FoStockSuggesterAgent
-from trade_system.application.agent.candidate_screener_agent import CandidateScreenerAgent
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
-from trade_system.core import MarketContext, MarketRegime
+from trade_system.domains.advisory.application.agent.fo_stock_suggester_agent import FoStockSuggesterAgent
+from trade_system.domains.advisory.application.agent.candidate_screener_agent import CandidateScreenerAgent
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.shared import MarketContext, MarketRegime
 
 class MockBroker:
     pass

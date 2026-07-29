@@ -4,10 +4,10 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from datetime import date, timedelta
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.database.repository import get_market_data
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
-from trade_system.application.analysis.candlestick_patterns import CandlestickPatternAnalyzer
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.repository import get_market_data
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.domains.analysis.application.analysis.candlestick_patterns import CandlestickPatternAnalyzer
 from sqlalchemy.orm import Session
 
 # Configure logging

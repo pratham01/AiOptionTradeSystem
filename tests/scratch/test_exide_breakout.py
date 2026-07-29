@@ -1,7 +1,7 @@
 import pandas as pd
 from sqlalchemy import text
 from datetime import date
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 engine = get_engine()
 

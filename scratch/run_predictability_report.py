@@ -3,7 +3,7 @@ sys.path.insert(0, 'src')
 
 import asyncio
 import pandas as pd
-from trade_system.application.agent.option_research_agent import OptionResearchAgent
+from trade_system.domains.advisory.application.agent.option_research_agent import OptionResearchAgent
 
 async def main():
     agent = OptionResearchAgent()

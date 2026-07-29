@@ -6,13 +6,13 @@ import pandas as pd
 import numpy as np
 from datetime import date, datetime
 
-from trade_system.application.analysis.intraday_edge_scorer import (
+from trade_system.domains.analysis.application.analysis.intraday_edge_scorer import (
     IntradayEdgeScorer,
     EdgeScore,
     LayerResult,
     LAYER_WEIGHTS,
 )
-from trade_system.application.analysis.smart_entry_trigger import (
+from trade_system.domains.analysis.application.analysis.smart_entry_trigger import (
     SmartEntryTrigger,
     EntryTrigger,
 )

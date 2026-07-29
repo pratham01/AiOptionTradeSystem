@@ -6,7 +6,7 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)) + '/..')
 import pandas as pd
 import numpy as np
 from sqlalchemy import text
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 import warnings
 warnings.filterwarnings('ignore')
 

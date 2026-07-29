@@ -12,12 +12,12 @@ import asyncio
 import logging
 from typing import Any
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.factory import get_broker_manager
-from trade_system.core.ports.broker import OrderRequest, OrderSide, OrderType, BrokerError
-from trade_system.core.ports.repository import TradeRepository
-from trade_system.application.agent.orchestrator import TradeOrchestrator
-from trade_system.application.agent.option_buyer_workflow import OptionBuyerExecutionWorkflow
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+from trade_system.domains.trading.domain.ports.broker import OrderRequest, OrderSide, OrderType, BrokerError
+from trade_system.shared.ports.repository import TradeRepository
+from trade_system.domains.advisory.application.agent.orchestrator import TradeOrchestrator
+from trade_system.domains.advisory.application.agent.option_buyer_workflow import OptionBuyerExecutionWorkflow
 
 LOGGER = logging.getLogger(__name__)
 
@@ -146,9 +146,9 @@ class AgenticLiveEngine:
 
 def run_main():
     """CLI entry point for the live agent engine."""
-    from trade_system.application.agent.factory import build_orchestrator
-    from trade_system.infrastructure.database.connection import get_engine
-    from trade_system.infrastructure.database.repository import SQLAlchemyTradeRepository
+    from trade_system.domains.advisory.application.agent.factory import build_orchestrator
+    from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+    from trade_system.domains.market_data.infrastructure.database.repository import SQLAlchemyTradeRepository
 
     logging.basicConfig(
         level=logging.INFO,

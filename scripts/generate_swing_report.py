@@ -7,10 +7,10 @@ import logging
 from datetime import datetime
 import pandas as pd
 
-from trade_system.application.agent.orchestrator import TradeOrchestrator
-from trade_system.core import TradeHorizon, TradeDirection
-from trade_system.config import Settings
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.domains.advisory.application.agent.orchestrator import TradeOrchestrator
+from trade_system.shared import TradeHorizon, TradeDirection
+from trade_system.shared.config import Settings
+from trade_system.shared.notifications.telegram import TelegramNotifier
 
 async def generate_swing_report():
     logging.basicConfig(level=logging.INFO)

@@ -6,15 +6,15 @@ root_path = Path(__file__).parent
 if str(root_path / "src") not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
 import logging
 
 logging.basicConfig(level=logging.INFO)
 
 def search_symbol(query):
     settings = Settings.load()
-    from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+    from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
     auth = FyersAuthService(settings)
     token = auth.read_cached_token()
     

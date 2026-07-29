@@ -6,8 +6,8 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
+from trade_system.shared.notifications.telegram import TelegramNotifier
 
 def main():
     settings = Settings.load()

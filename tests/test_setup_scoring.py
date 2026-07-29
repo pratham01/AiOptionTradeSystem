@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.analysis.setup_scoring import SetupScoringAnalyzer
+from trade_system.domains.analysis.application.analysis.setup_scoring import SetupScoringAnalyzer
 
 
 def test_setup_scoring_outputs(tmp_path: Path):

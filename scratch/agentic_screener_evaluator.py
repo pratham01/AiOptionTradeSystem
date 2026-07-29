@@ -21,11 +21,11 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import text
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.application.agent.setup_validator_agent import SetupValidatorAgent
-from trade_system.application.agent.candidate_screener_agent import CandidateScore
-from trade_system.core import MarketContext, MarketRegime, TradeHorizon, OptionChainSnapshot
-from trade_system.application.advisory.llm import LlmAdvisorClient
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.advisory.application.agent.setup_validator_agent import SetupValidatorAgent
+from trade_system.domains.advisory.application.agent.candidate_screener_agent import CandidateScore
+from trade_system.shared import MarketContext, MarketRegime, TradeHorizon, OptionChainSnapshot
+from trade_system.domains.advisory.application.advisory.llm import LlmAdvisorClient
 
 warnings.filterwarnings('ignore')
 

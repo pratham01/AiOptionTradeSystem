@@ -1,5 +1,5 @@
 from datetime import date
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
 
 screener = BreakoutScreener()
 alerts = screener.scan_for_breakouts(

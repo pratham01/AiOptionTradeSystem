@@ -3,10 +3,10 @@ import numpy as np
 import logging
 from pathlib import Path
 from datetime import datetime, date
-from trade_system.application.indicators.supertrend import SupertrendIndicator
-from trade_system.application.indicators.rsi_divergence import RsiDivergence
-from trade_system.application.indicators.volume_profile import VolumeProfileIndicator
-from trade_system.application.indicators.retracement import RetracementIndicator
+from trade_system.domains.strategy.application.indicators.supertrend import SupertrendIndicator
+from trade_system.domains.strategy.application.indicators.rsi_divergence import RsiDivergence
+from trade_system.domains.strategy.application.indicators.volume_profile import VolumeProfileIndicator
+from trade_system.domains.strategy.application.indicators.retracement import RetracementIndicator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

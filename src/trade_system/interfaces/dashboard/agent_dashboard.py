@@ -131,8 +131,8 @@ def _render_trade_cards(trades):
 def load_session_plan():
     """Try to load today's session plan from DB (returns serializable dicts)."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.models import SuggestedTrade
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.models import SuggestedTrade
         from sqlalchemy.orm import Session
         engine = get_engine()
         today = date.today().isoformat()
@@ -159,7 +159,7 @@ def load_session_plan():
 def load_thought_stream(limit=15):
     """Fetch live thoughts from the DB."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         engine = get_engine()
         query = text("SELECT timestamp, agent_name, symbol, action, message FROM agent_thought_stream ORDER BY timestamp DESC LIMIT :limit")
@@ -173,7 +173,7 @@ def load_thought_stream(limit=15):
 def load_latest_synthesis():
     """Fetch the latest AI Swarm Synthesis Report."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         engine = get_engine()
         query = text("""
@@ -196,8 +196,8 @@ def load_latest_synthesis():
 def load_closed_trades(limit_days=30):
     """Load recently closed trades for stats (returns serializable dicts)."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.models import SuggestedTrade
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.models import SuggestedTrade
         from sqlalchemy.orm import Session
         engine = get_engine()
         cutoff = (date.today() - timedelta(days=limit_days)).isoformat()
@@ -224,7 +224,7 @@ def load_closed_trades(limit_days=30):
 def load_agent_weights():
     """Load active scoring weights."""
     try:
-        from trade_system.application.evolution.weight_evolver import WeightEvolver
+        from trade_system.domains.analysis.application.evolution.weight_evolver import WeightEvolver
         evolver = WeightEvolver()
         return {
             "candidate_screener": evolver.load_weights("candidate_screener"),
@@ -236,7 +236,7 @@ def load_agent_weights():
 @st.cache_data(ttl=601)
 def load_sector_performance():
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         import pandas as pd
         import json
@@ -293,7 +293,7 @@ def load_sector_performance():
 @st.cache_data(ttl=30)
 def load_agent_status():
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         import pandas as pd
         engine = get_engine()
@@ -312,7 +312,7 @@ def load_agent_status():
 @st.cache_data(ttl=15)
 def load_radar_alerts(limit=10):
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         import pandas as pd
         engine = get_engine()
@@ -334,7 +334,7 @@ def load_radar_alerts(limit=10):
 @st.cache_data(ttl=120)
 def load_latest_news():
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         import pandas as pd
         engine = get_engine()
@@ -355,14 +355,14 @@ def load_latest_news():
 @st.cache_data(ttl=300)
 def fetch_live_headlines():
     try:
-        from trade_system.utils.news_scraper import BusinessNewsScraper
+        from trade_system.shared.utils.news_scraper import BusinessNewsScraper
         scraper = BusinessNewsScraper()
         return scraper.get_all_headlines()
     except Exception as e:
         return [f"Failed to load headlines: {e}"]
 
 async def analyze_news_impact_async(headlines: list[str]) -> str:
-    from trade_system.application.advisory.llm import LlmAdvisorClient
+    from trade_system.domains.advisory.application.advisory.llm import LlmAdvisorClient
     llm = LlmAdvisorClient()
     if not llm.configured():
         return "LLM not configured. Please check your GOOGLE_API_KEY."
@@ -382,8 +382,8 @@ async def analyze_news_impact_async(headlines: list[str]) -> str:
 @st.cache_data(ttl=60)
 def load_detailed_suggested_trades(limit_days=30):
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.models import SuggestedTrade
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.models import SuggestedTrade
         from sqlalchemy.orm import Session
         from datetime import date, timedelta
         engine = get_engine()
@@ -449,8 +449,8 @@ def compute_option_buyer_metrics(trade_row):
     return round(mom_score + zone_score + eff_score, 1)
 
 async def generate_option_buyer_eod_report(trades_data: list) -> str:
-    from trade_system.application.advisory.llm import LlmAdvisorClient
-    from trade_system.infrastructure.database import log_agent_thought, get_db_session
+    from trade_system.domains.advisory.application.advisory.llm import LlmAdvisorClient
+    from trade_system.domains.market_data.infrastructure.database import log_agent_thought, get_db_session
     llm = LlmAdvisorClient()
     if not llm.configured():
         return "LLM not configured. Please check your GOOGLE_API_KEY."
@@ -494,7 +494,7 @@ async def generate_option_buyer_eod_report(trades_data: list) -> str:
 @st.cache_data(ttl=300)
 def load_historical_optimizations(limit=5):
     try:
-        from trade_system.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
         from sqlalchemy import text
         engine = get_engine()
         query = text("""
@@ -519,8 +519,8 @@ with st.sidebar:
     if st.button("🔄 Run Orchestrator Now", type="primary", use_container_width=True):
         with st.spinner("Running agentic pipeline..."):
             try:
-                from trade_system.application.agent.factory import build_orchestrator
-                from trade_system.config.settings import Settings
+                from trade_system.domains.advisory.application.agent.factory import build_orchestrator
+                from trade_system.shared.config.settings import Settings
                 
                 settings = Settings.load()
                 settings.ensure_directories()
@@ -558,9 +558,9 @@ with st.sidebar:
     
     if st.button("⚡ Run Custom Swarm", type="primary", use_container_width=True):
         with st.spinner("Instantiating custom swarm..."):
-            from trade_system.config import Settings
+            from trade_system.shared.config import Settings
             from dataclasses import replace
-            from trade_system.application.agent.factory import build_orchestrator
+            from trade_system.domains.advisory.application.agent.factory import build_orchestrator
             import asyncio
             
             try:
@@ -649,7 +649,7 @@ def _render_radar_and_status():
         radar_df = load_radar_alerts(limit=6)
         if not radar_df.empty:
             for _, row in radar_df.iterrows():
-                ts = pd.to_datetime(row['timestamp']).strftime('%H:%M:%S')
+                ts = pd.to_datetime(row['timestamp'], format="mixed").strftime('%H:%M:%S')
                 action = row['action']
                 sym = row['symbol'].split(':')[-1].replace('-EQ', '').replace('-INDEX', '') if row['symbol'] else ''
                 icon = "⚡" if "VOL" in action else "🚀" if "BREAKOUT" in action else "🔥" if "GAMMA" in action else "🎯"
@@ -770,7 +770,7 @@ with left_col:
             with st.chat_message("assistant"):
                 with st.spinner("Agent is analyzing database and synthesizing answer..."):
                     import asyncio
-                    from trade_system.application.agent.data_query_agent import DataQueryAgent
+                    from trade_system.domains.advisory.application.agent.data_query_agent import DataQueryAgent
                     try:
                         agent = DataQueryAgent()
                         response = asyncio.run(agent.process_query(prompt))
@@ -830,7 +830,7 @@ with left_col:
         hist_opt = load_historical_optimizations()
         if not hist_opt.empty:
             for _, r in hist_opt.iterrows():
-                ts_formatted = pd.to_datetime(r['timestamp']).strftime('%d %b %Y %H:%M')
+                ts_formatted = pd.to_datetime(r['timestamp'], format="mixed").strftime('%d %b %Y %H:%M')
                 with st.expander(f"Report — {ts_formatted}"):
                     st.markdown(r['message'])
         else:
@@ -845,7 +845,7 @@ with right_col:
         thoughts = load_thought_stream()
         if not thoughts.empty:
             for _, row in thoughts.iterrows():
-                ts = pd.to_datetime(row['timestamp']).strftime('%H:%M:%S')
+                ts = pd.to_datetime(row['timestamp'], format="mixed").strftime('%H:%M:%S')
                 agent = row['agent_name']
                 msg = row['message']
 

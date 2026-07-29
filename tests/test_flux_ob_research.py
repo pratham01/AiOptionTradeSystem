@@ -1,8 +1,8 @@
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from trade_system.application.indicators.flux_order_blocks import FluxOrderBlockDetector
-from trade_system.application.backtesting.flux_ob_research import FluxOrderBlockResearch
+from trade_system.domains.strategy.application.indicators.flux_order_blocks import FluxOrderBlockDetector
+from trade_system.domains.analysis.application.backtesting.flux_ob_research import FluxOrderBlockResearch
 
 def test_flux_order_block_detector():
     # Construct a mock dataframe with a clear swing pattern

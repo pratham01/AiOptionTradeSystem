@@ -1,0 +1,8 @@
+{
+  "mode": "intraday",
+  "period": 20,
+  "std_dev": 2.0,
+  "squeeze_lookback": 100,
+  "squeeze_percentile": 7.5,
+  "min_volatility_score": 1.4
+}

@@ -2,9 +2,9 @@ import sys
 from pathlib import Path
 sys.path.append(str(Path("src").resolve()))
 
-from trade_system.config.settings import Settings
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBrokerClient
+from trade_system.shared.config.settings import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBrokerClient
 
 settings = Settings()
 auth_service = FyersAuthService(settings)

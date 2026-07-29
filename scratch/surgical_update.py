@@ -1,9 +1,9 @@
 import asyncio
 import logging
-from trade_system.application.analysis.fo_historical_service import FOHistoricalService
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.domains.analysis.application.analysis.fo_historical_service import FOHistoricalService
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
 from datetime import date, timedelta
 
 logging.basicConfig(level=logging.INFO)

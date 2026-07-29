@@ -6,7 +6,7 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.application.agent.top_gainers_agent import create_fyers_broker
+from trade_system.domains.advisory.application.agent.top_gainers_agent import create_fyers_broker
 
 def main():
     try:

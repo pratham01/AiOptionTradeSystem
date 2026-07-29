@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
-from trade_system.application.agent.nifty500_top_stocks_agent import Nifty500TopStocksAgent
-from trade_system.application.agent.top_gainers_agent import GainerRow
+from trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent import Nifty500TopStocksAgent
+from trade_system.domains.advisory.application.agent.top_gainers_agent import GainerRow
 
 @pytest.fixture
 def mock_gainer_rows():
@@ -18,10 +18,10 @@ def mock_fo_worst_rows():
     ]
 
 @pytest.mark.asyncio
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.TelegramNotifier")
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.create_fyers_broker")
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.BrokerTopGainersAgent")
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.datetime")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.TelegramNotifier")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.create_fyers_broker")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.BrokerTopGainersAgent")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.datetime")
 async def test_get_top_stocks_analysis_success(mock_dt, MockAgent, mock_create_broker, MockTelegramNotifier, mock_gainer_rows, mock_fo_worst_rows):
     # Mock date to a weekday (Monday, June 15th, 2026)
     mock_dt.now.return_value = datetime(2026, 6, 15, 12, 0, 0)
@@ -66,10 +66,10 @@ async def test_get_top_stocks_analysis_success(mock_dt, MockAgent, mock_create_b
     assert "Worst F&O" in prompt_sent
 
 @pytest.mark.asyncio
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.TelegramNotifier")
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.create_fyers_broker")
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.BrokerTopGainersAgent")
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.datetime")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.TelegramNotifier")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.create_fyers_broker")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.BrokerTopGainersAgent")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.datetime")
 async def test_get_top_stocks_analysis_no_llm(mock_dt, MockAgent, mock_create_broker, MockTelegramNotifier, mock_gainer_rows, mock_fo_worst_rows):
     # Mock date to a weekday
     mock_dt.now.return_value = datetime(2026, 6, 15, 12, 0, 0)
@@ -107,7 +107,7 @@ async def test_get_top_stocks_analysis_no_llm(mock_dt, MockAgent, mock_create_br
     assert mock_notifier_instance.send.call_count == 1
 
 @pytest.mark.asyncio
-@patch("trade_system.application.agent.nifty500_top_stocks_agent.datetime")
+@patch("trade_system.domains.advisory.application.agent.nifty500_top_stocks_agent.datetime")
 async def test_get_top_stocks_analysis_weekend(mock_dt):
     # Mock date to a Sunday (June 14th, 2026)
     mock_dt.now.return_value = datetime(2026, 6, 14, 12, 0, 0)

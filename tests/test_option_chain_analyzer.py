@@ -1,7 +1,7 @@
 import pandas as pd
 import logging
 
-from trade_system.application.analysis.option_chain_analyzer import OptionChainAnalyzer
+from trade_system.domains.analysis.application.analysis.option_chain_analyzer import OptionChainAnalyzer
 
 
 class _DummyFyersClient:

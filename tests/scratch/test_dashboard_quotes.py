@@ -6,7 +6,7 @@ root_path = Path(__file__).resolve().parent.parent
 if str(root_path / "src") not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.interfaces.dashboard.sector_scope_dashboard import fetch_live_quotes
+from trade_system.interfaces.dashboard.shared_broker import fetch_live_quotes
 
 try:
     quotes = fetch_live_quotes(['NSE:SBIN-EQ', 'NSE:TATAMOTORS-EQ'])

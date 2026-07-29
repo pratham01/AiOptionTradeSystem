@@ -3,10 +3,10 @@ import pandas as pd
 from datetime import datetime
 from sqlalchemy import text
 
-from trade_system.core import MarketContext, MarketRegime, TradeHorizon
-from trade_system.application.agent.candidate_screener_agent import CandidateScore
-from trade_system.application.agent.setup_validator_agent import SetupValidatorAgent
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.shared import MarketContext, MarketRegime, TradeHorizon
+from trade_system.domains.advisory.application.agent.candidate_screener_agent import CandidateScore
+from trade_system.domains.advisory.application.agent.setup_validator_agent import SetupValidatorAgent
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 async def verify_institutional_logic():
     engine = get_engine()

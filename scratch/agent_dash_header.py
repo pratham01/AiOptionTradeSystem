@@ -92,8 +92,8 @@ def _render_trade_cards(trades):
 def load_session_plan():
     """Try to load today's session plan from DB or file."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.models import SuggestedTrade
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.models import SuggestedTrade
         from sqlalchemy.orm import Session
         engine = get_engine()
         today = date.today().isoformat()
@@ -112,8 +112,8 @@ def load_session_plan():
 def load_closed_trades(lookback_days: int = 30):
     """Load closed trades for performance metrics."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.models import SuggestedTrade
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.models import SuggestedTrade
         from sqlalchemy.orm import Session
         engine = get_engine()
         cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
@@ -132,7 +132,7 @@ def load_closed_trades(lookback_days: int = 30):
 def load_agent_weights():
     """Load current agent weights."""
     try:
-        from trade_system.application.evolution.weight_evolver import WeightEvolver
+        from trade_system.domains.analysis.application.evolution.weight_evolver import WeightEvolver
         evolver = WeightEvolver()
         return {
             "candidate_screener": evolver.load_weights("candidate_screener"),
@@ -145,8 +145,8 @@ def load_agent_weights():
 def load_evolution_reports(limit: int = 10):
     """Load recent evolution reports."""
     try:
-        from trade_system.infrastructure.database.connection import get_engine
-        from trade_system.infrastructure.database.models import EvolutionReport
+        from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+        from trade_system.domains.market_data.infrastructure.database.models import EvolutionReport
         from sqlalchemy.orm import Session
         engine = get_engine()
         with Session(engine) as session:
@@ -173,7 +173,7 @@ with st.sidebar:
     if st.button("🔄 Run Orchestrator Now", type="primary"):
         with st.spinner("Running agentic pipeline..."):
             try:
-                from trade_system.application.agent.orchestrator import TradeOrchestrator
+                from trade_system.domains.advisory.application.agent.orchestrator import TradeOrchestrator
                 orc = TradeOrchestrator()
                 plan = orc.run_session_sync()
                 st.success(f"✅ Generated {len(plan.all_suggestions())} suggestions!")
@@ -183,7 +183,7 @@ with st.sidebar:
     if st.button("📊 Run Evolution Loop"):
         with st.spinner("Running evolution loop..."):
             try:
-                from trade_system.application.evolution.evolution_loop import EvolutionLoop
+                from trade_system.domains.analysis.application.evolution.evolution_loop import EvolutionLoop
                 loop = EvolutionLoop()
                 result = loop.run()
                 st.success(f"✅ Win Rate: {result['win_rate']:.1%}")

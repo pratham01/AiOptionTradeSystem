@@ -37,25 +37,25 @@ def update_imports_in_file(file_path: Path) -> bool:
 
         # Update imports
         content = content.replace(
-            'from trade_system.infrastructure.brokers.fyers.client import FyersBroker',
-            'from trade_system.infrastructure.brokers.fyers.client import FyersBroker'
+            'from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker',
+            'from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker'
         )
         content = content.replace(
-            'from trade_system.config.settings import Settings',
-            'from trade_system.config import Settings'
+            'from trade_system.shared.config.settings import Settings',
+            'from trade_system.shared.config import Settings'
         )
         content = content.replace(
-            'from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE',
-            'from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE'
+            'from trade_system.domains.market_data.infrastructure.data.nse_universe import NSE_UNIVERSE',
+            'from trade_system.domains.market_data.infrastructure.data.nse_universe import NSE_UNIVERSE'
         )
 
         # Update broker instantiation
         if 'FyersBroker(' in content and 'get_broker_manager' not in content:
             # Add broker manager import
-            if 'from trade_system.infrastructure.brokers.factory import' not in content:
+            if 'from trade_system.domains.trading.infrastructure.brokers.factory import' not in content:
                 content = content.replace(
-                    'from trade_system.infrastructure.brokers.fyers.client import FyersBroker',
-                    'from trade_system.infrastructure.brokers.fyers.client import FyersBroker\nfrom trade_system.infrastructure.brokers.factory import get_broker_manager'
+                    'from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker',
+                    'from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker\nfrom trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager'
                 )
 
         if content != original:
@@ -80,9 +80,9 @@ This file redirects old imports to new locations while maintaining compatibility
 """
 
 # Re-export for backward compatibility
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-from trade_system.infrastructure.data.nse_universe import NSE_UNIVERSE
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+from trade_system.domains.market_data.infrastructure.data.nse_universe import NSE_UNIVERSE
 
 # Legacy aliases
 __all__ = [
@@ -169,10 +169,10 @@ def test_new_broker_system() -> bool:
     """Test the new broker system."""
     try:
         # Test imports
-        from trade_system.config import Settings
-        from trade_system.infrastructure.brokers.factory import get_broker_manager
-        from trade_system.infrastructure.brokers.fyers.client import FyersBroker
-        from trade_system.infrastructure.brokers.dhan.client import DhanBroker
+        from trade_system.shared.config import Settings
+        from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+        from trade_system.domains.trading.infrastructure.brokers.fyers.client import FyersBroker
+        from trade_system.domains.trading.infrastructure.brokers.dhan.client import DhanBroker
 
         # Test settings
         settings = Settings.load()
@@ -242,7 +242,7 @@ Next steps:
 4. Remove old trade_system/ directory once fully migrated
 
 Example usage with new system:
-    from trade_system.infrastructure.brokers.factory import get_broker_manager
+    from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
     
     manager = get_broker_manager()
     quotes = manager.get_quotes(["NSE:RELIANCE-EQ"])  # Auto failover!

@@ -8,9 +8,9 @@ root_path = Path(__file__).parent.parent
 if str(root_path / "src") not in sys.path:
     sys.path.insert(0, str(root_path / "src"))
 
-from trade_system.config import Settings
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.shared.config import Settings
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
 
 logging.basicConfig(level=logging.INFO)
 LOGGER = logging.getLogger(__name__)

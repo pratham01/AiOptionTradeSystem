@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from trade_system.application.backtesting.supertrend_yearly import SupertrendYearlyBacktester
+from trade_system.domains.analysis.application.backtesting.supertrend_yearly import SupertrendYearlyBacktester
 
 
 def test_yearly_summary_builder(tmp_path: Path):

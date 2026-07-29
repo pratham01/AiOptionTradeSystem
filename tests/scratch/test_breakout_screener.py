@@ -6,7 +6,7 @@ import logging
 sys.path.append(str(Path("src").resolve()))
 logging.basicConfig(level=logging.INFO)
 
-from trade_system.application.analysis.breakout_screener import BreakoutScreener
+from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
 
 def run_test():
     screener = BreakoutScreener()

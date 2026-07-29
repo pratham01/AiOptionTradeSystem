@@ -3,12 +3,12 @@ Script to scan the F&O universe for Supertrend 'touches' on 15m and Daily timefr
 """
 import asyncio
 import logging
-from trade_system.application.agent.supertrend_touch_agent import SupertrendTouchAgent
-from trade_system.infrastructure.brokers.legacy.fyers import FyersBroker
-from trade_system.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.config import Settings
+from trade_system.domains.advisory.application.agent.supertrend_touch_agent import SupertrendTouchAgent
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers import FyersBroker
+from trade_system.domains.trading.infrastructure.brokers.legacy.fyers_auth import FyersAuthService
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings
 from datetime import date
 
 async def run_st_touch_scan():

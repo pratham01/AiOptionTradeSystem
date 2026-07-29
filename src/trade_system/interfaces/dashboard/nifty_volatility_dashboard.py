@@ -8,12 +8,12 @@ from pathlib import Path
 import importlib
 
 # Force reload agent module to ensure Streamlit picks up changes without server restart
-import trade_system.application.agent.nifty_volatility_analyzer_agent
-importlib.reload(trade_system.application.agent.nifty_volatility_analyzer_agent)
-from trade_system.application.agent.nifty_volatility_analyzer_agent import NiftyVolatilityAnalyzerAgent
+import trade_system.domains.advisory.application.agent.nifty_volatility_analyzer_agent
+importlib.reload(trade_system.domains.advisory.application.agent.nifty_volatility_analyzer_agent)
+from trade_system.domains.advisory.application.agent.nifty_volatility_analyzer_agent import NiftyVolatilityAnalyzerAgent
 
-from trade_system.config import Settings
-from trade_system.infrastructure.database.connection import get_engine
+from trade_system.shared.config import Settings
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 
 # Layout
 st.markdown(
@@ -141,7 +141,7 @@ def load_vix_cached(start_date, end_date):
     cache_path = Path("data/india_vix_daily_cache.csv")
     if cache_path.exists():
         vix_df = pd.read_csv(cache_path)
-        vix_df["date"] = pd.to_datetime(vix_df["date"]).dt.date
+        vix_df["date"] = pd.to_datetime(vix_df["date"], format="mixed").dt.date
         return vix_df[(vix_df["date"] >= start_date) & (vix_df["date"] <= end_date)].copy()
     
     # Fallback to empty if not fetched yet
@@ -264,8 +264,8 @@ else:
             st.subheader("Distribution Analysis of Big Movements")
             
             # Prepare data
-            df_all["year"] = pd.to_datetime(df_all["timestamp"]).dt.year
-            df_filtered["year"] = pd.to_datetime(df_filtered["timestamp"]).dt.year
+            df_all["year"] = pd.to_datetime(df_all["timestamp"], format="mixed").dt.year
+            df_filtered["year"] = pd.to_datetime(df_filtered["timestamp"], format="mixed").dt.year
             
             # Yearly chart
             yearly_all = df_all.groupby("year").size().reset_index(name="total")
@@ -426,7 +426,7 @@ else:
                     if "date" in df_bd.columns:
                         bd_days = df_bd["date"].nunique()
                     else:
-                        df_bd["_date"] = pd.to_datetime(df_bd["timestamp"]).dt.date
+                        df_bd["_date"] = pd.to_datetime(df_bd["timestamp"], format="mixed").dt.date
                         bd_days = df_bd["_date"].nunique()
 
                     mc1, mc2, mc3, mc4, mc5 = st.columns(5)
@@ -555,7 +555,7 @@ else:
                     st.markdown("### 📅 Breakdown Signal Timeline")
 
                     df_bd_ts = df_bd.copy()
-                    df_bd_ts["month"] = pd.to_datetime(df_bd_ts["timestamp"]).dt.to_period("M").astype(str)
+                    df_bd_ts["month"] = pd.to_datetime(df_bd_ts["timestamp"], format="mixed").dt.to_period("M").astype(str)
 
                     monthly_signals = df_bd_ts.groupby(["month", "breakdown_signal_count"]).size().reset_index(name="count")
                     monthly_signals["conviction"] = monthly_signals["breakdown_signal_count"].map(
@@ -591,7 +591,7 @@ else:
 
                     # Get unique dates with breakdown signals
                     if "date" not in df_bd.columns:
-                        df_bd["date"] = pd.to_datetime(df_bd["timestamp"]).dt.date
+                        df_bd["date"] = pd.to_datetime(df_bd["timestamp"], format="mixed").dt.date
                     bd_dates = sorted(df_bd["date"].unique(), reverse=True)
                     bd_date_strings = [str(d) for d in bd_dates]
 
@@ -741,7 +741,7 @@ else:
                     )
 
                     df_bd_display = df_bd[df_bd["breakdown_signal_count"] >= min_signals].copy()
-                    df_bd_display["timestamp"] = pd.to_datetime(df_bd_display["timestamp"]).dt.strftime("%Y-%m-%d %H:%M")
+                    df_bd_display["timestamp"] = pd.to_datetime(df_bd_display["timestamp"], format="mixed").dt.strftime("%Y-%m-%d %H:%M")
                     df_bd_display.sort_values(by="timestamp", ascending=False, inplace=True)
 
                     grid_cols = [

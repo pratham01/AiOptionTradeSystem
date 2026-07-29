@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from trade_system.application.agent.candlestick_pattern_agent import CandlestickPatternAgent
+from trade_system.domains.advisory.application.agent.candlestick_pattern_agent import CandlestickPatternAgent
 
 def test_pattern_detection():
     agent = CandlestickPatternAgent()

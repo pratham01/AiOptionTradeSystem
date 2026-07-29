@@ -1,6 +1,6 @@
 from pathlib import Path
-from trade_system.infrastructure.notifications.telegram import TelegramNotifier
-from trade_system.config import Settings, WhatsappConfig
+from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared.config import Settings, WhatsappConfig
 
 class _DummyResponse:
     def __init__(self, status_code: int, text: str) -> None:
@@ -18,7 +18,7 @@ def test_telegram_notifier_sends_message_successfully(monkeypatch):
         calls.append(json)
         return _DummyResponse(200, "ok")
 
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.requests.post", fake_post)
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.requests.post", fake_post)
 
     assert notifier.send("test <b>alert</b>") is True
     assert calls[0]["parse_mode"] == "HTML"
@@ -35,7 +35,7 @@ def test_telegram_notifier_handles_network_error(monkeypatch):
     def fake_post(url, json=None, headers=None, timeout=10):
         return _DummyResponse(400, "Bad Request")
 
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.requests.post", fake_post)
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.requests.post", fake_post)
     assert notifier.send("test alert") is False
 
 def test_telegram_notifier_fallback_logging_and_whatsapp_success(monkeypatch, tmp_path):
@@ -52,9 +52,9 @@ def test_telegram_notifier_fallback_logging_and_whatsapp_success(monkeypatch, tm
             enabled=True
         )
     
-    monkeypatch.setattr("trade_system.config.Settings.load", lambda *args: MockSettings())
+    monkeypatch.setattr("trade_system.shared.config.Settings.load", lambda *args: MockSettings())
     # Override Path in telegram.py to point to our temp log file
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.Path", lambda p: fallback_log_file if "fallback" in str(p) else Path(p))
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.Path", lambda p: fallback_log_file if "fallback" in str(p) else Path(p))
     
     notifier = TelegramNotifier(token="test-token", chat_id="test-chat")
     
@@ -68,7 +68,7 @@ def test_telegram_notifier_fallback_logging_and_whatsapp_success(monkeypatch, tm
             return _DummyResponse(200, "ok")
         return _DummyResponse(404, "Not Found")
         
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.requests.post", fake_post)
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.requests.post", fake_post)
     
     # Send a message with HTML formatting
     assert notifier.send("Hello <b>world</b>! <br> Code: <code>print(123)</code>") is True
@@ -96,8 +96,8 @@ def test_telegram_notifier_fallback_when_whatsapp_disabled(monkeypatch, tmp_path
     class MockSettings:
         whatsapp = WhatsappConfig(enabled=False)
         
-    monkeypatch.setattr("trade_system.config.Settings.load", lambda *args: MockSettings())
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.Path", lambda p: fallback_log_file if "fallback" in str(p) else Path(p))
+    monkeypatch.setattr("trade_system.shared.config.Settings.load", lambda *args: MockSettings())
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.Path", lambda p: fallback_log_file if "fallback" in str(p) else Path(p))
     
     notifier = TelegramNotifier(token="test-token", chat_id="test-chat")
     
@@ -106,7 +106,7 @@ def test_telegram_notifier_fallback_when_whatsapp_disabled(monkeypatch, tmp_path
             return _DummyResponse(500, "Error")
         return _DummyResponse(404, "Not Found")
         
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.requests.post", fake_post)
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.requests.post", fake_post)
     
     assert notifier.send("Telegram down message") is False
     
@@ -124,7 +124,7 @@ def test_telegram_notifier_converts_markdown_to_html(monkeypatch):
         calls.append(json)
         return _DummyResponse(200, "ok")
 
-    monkeypatch.setattr("trade_system.infrastructure.notifications.telegram.requests.post", fake_post)
+    monkeypatch.setattr("trade_system.shared.notifications.telegram.requests.post", fake_post)
 
     # Message with bold, inline code, and pre-formatted block
     markdown_text = (

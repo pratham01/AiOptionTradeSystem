@@ -6,9 +6,9 @@ from datetime import datetime, date
 from sqlalchemy import text
 import logging
 
-from trade_system.infrastructure.database.connection import get_engine
-from trade_system.infrastructure.data.fo_universe import get_fo_universe
-from trade_system.application.indicators.volumetric_order_flow import VolumetricOrderFlowDetector
+from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
+from trade_system.domains.strategy.application.indicators.volumetric_order_flow import VolumetricOrderFlowDetector
 from trade_system.interfaces.live.helpers import resample_to_timeframe
 
 LOGGER = logging.getLogger(__name__)

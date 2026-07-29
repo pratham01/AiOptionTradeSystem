@@ -1,4 +1,4 @@
-from trade_system.application.advisory import TradeAdvisor, TradeContext, TradeProposal
+from trade_system.domains.advisory.application.advisory import TradeAdvisor, TradeContext, TradeProposal
 
 
 def test_trade_advisor_accepts_high_quality_trade() -> None:

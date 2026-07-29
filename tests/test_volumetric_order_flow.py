@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from trade_system.application.indicators.volumetric_order_flow import VolumetricOrderFlowDetector
+from trade_system.domains.strategy.application.indicators.volumetric_order_flow import VolumetricOrderFlowDetector
 
 def test_volumetric_order_flow_detector():
     # 1. Create a mock DataFrame with a clear breakout structure
