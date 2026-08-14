@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date, time as dt_time
@@ -125,7 +128,41 @@ def fetch_available_dates():
     except Exception as e:
         return []
 
+@st.cache_data(ttl=86400)
+def _fetch_historical_15m(target_date_str):
+    """Fetch immutable historical data (up to the day before target_date) and cache for 24 hours."""
+    query = text("""
+        SELECT symbol, timestamp, open, high, low, close, volume 
+        FROM ohlcv_15m 
+        WHERE timestamp >= date(:latest_date, '-10 days') 
+          AND timestamp < date(:latest_date)
+        ORDER BY symbol, timestamp ASC
+    """)
+    with get_engine().connect() as conn:
+        df = pd.read_sql(query, conn, params={"latest_date": target_date_str})
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601')
+    return df
+
 @st.cache_data(ttl=60)
+def _fetch_today_15m(target_date_str):
+    """Fetch only the target day's data, cached for 60 seconds (for live intraday updates)."""
+    query = text("""
+        SELECT symbol, timestamp, open, high, low, close, volume 
+        FROM ohlcv_15m 
+        WHERE timestamp >= date(:latest_date) 
+          AND timestamp < date(:latest_date, '+1 day')
+        ORDER BY symbol, timestamp ASC
+    """)
+    with get_engine().connect() as conn:
+        df = pd.read_sql(query, conn, params={"latest_date": target_date_str})
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601')
+    
+    # Get last candle timestamp
+    last_candle_ts = None
+    if not df.empty:
+        last_candle_ts = df[df['symbol'] != 'NSE:NIFTY50-INDEX']['timestamp'].max()
+    return df, last_candle_ts
+
 def fetch_target_date_and_data(selected_date_str=None):
     engine = get_engine()
     if selected_date_str is None:
@@ -142,30 +179,38 @@ def fetch_target_date_and_data(selected_date_str=None):
     if not selected_date_str:
         return None, pd.DataFrame(), None
         
-    start_time = f"{selected_date_str} 00:00:00"
-    end_time = f"{selected_date_str} 23:59:59"
-    query_max_ts = text("""
-        SELECT MAX(timestamp) 
-        FROM ohlcv_15m 
-        WHERE symbol != 'NSE:NIFTY50-INDEX' 
-          AND timestamp >= :start_time 
-          AND timestamp <= :end_time
-    """)
-    with engine.connect() as conn:
-        last_candle_ts = conn.execute(query_max_ts, {"start_time": start_time, "end_time": end_time}).scalar()
-        
-    # Fetch last 10 days of data around latest date to compute volume SMAs and previous closes
-    query = text("""
-        SELECT symbol, timestamp, open, high, low, close, volume 
-        FROM ohlcv_15m 
-        WHERE timestamp >= date(:latest_date, '-10 days') AND timestamp <= date(:latest_date, '+1 day')
-        ORDER BY symbol, timestamp ASC
-    """)
-    with engine.connect() as conn:
-        df = pd.read_sql(query, conn, params={"latest_date": selected_date_str})
-        
-    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed')
+    df_hist = _fetch_historical_15m(selected_date_str)
+    df_today, last_candle_ts = _fetch_today_15m(selected_date_str)
+    
+    df = pd.concat([df_hist, df_today], ignore_index=True)
     return selected_date_str, df, last_candle_ts
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_symbol_15m_cached(symbol: str, target_date_str: str) -> pd.DataFrame:
+    """Fetch 15m candles for a single symbol from Fyers API, cached for 60s."""
+    try:
+        from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager
+        from trade_system.shared.config import Settings
+        settings = Settings.load()
+        manager = get_broker_manager(settings)
+        fyers_broker_health = manager.brokers.get('fyers')
+        broker = fyers_broker_health.broker if fyers_broker_health else None
+        
+        if broker:
+            df_sym = broker.fetch_history(
+                symbol=symbol,
+                resolution="15",
+                range_from=target_date_str,
+                range_to=target_date_str,
+                date_format="1"
+            )
+            if df_sym is not None and not df_sym.empty:
+                df_sym['symbol'] = symbol
+                df_sym['timestamp'] = pd.to_datetime(df_sym['timestamp'], errors='coerce').dt.tz_localize(None)
+                return df_sym[['symbol', 'timestamp', 'close']]
+    except Exception as e:
+        logger.warning("Failed to fetch 15m history for %s: %s", symbol, e)
+    return pd.DataFrame()
 
 
 available_dates = fetch_available_dates()
@@ -230,7 +275,7 @@ else:
         latest_date_str = db_target_date.strftime("%Y-%m-%d")
         is_today = False
         
-    db_update_time = pd.to_datetime(last_candle_ts).strftime("%Y-%m-%d %H:%M:%S") if last_candle_ts else "N/A"
+    db_update_time = pd.to_datetime(last_candle_ts).strftime("%Y-%m-%d %H:%M:%S") if pd.notna(last_candle_ts) else "N/A"
     refresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     # Compact status bar
@@ -258,7 +303,9 @@ else:
         step = None  # Daily return (Today)
 
     # Filter data up to target_date
-    df_filtered = df[df['timestamp'].dt.date <= target_date]
+    df_filtered = df[df['timestamp'].dt.date <= target_date].copy()
+    df_filtered['trade_date'] = df_filtered['timestamp'].dt.date
+    df_filtered['trade_time'] = df_filtered['timestamp'].dt.time
     rows = []
     
     # Calculate performance for each symbol based on lookback
@@ -281,8 +328,8 @@ else:
         avg_vol_time_adj = 0
         vol_surge = 0.0
         
-        today_candles = grp_sorted[grp_sorted['timestamp'].dt.date == target_date]
-        prev_candles_all = grp_sorted[grp_sorted['timestamp'].dt.date < target_date]
+        today_candles = grp_sorted[grp_sorted['trade_date'] == target_date]
+        prev_candles_all = grp_sorted[grp_sorted['trade_date'] < target_date]
         
         # Today's volume: sum of intraday candle volumes (or live quote)
         if is_today and quotes and symbol in quotes:
@@ -293,7 +340,7 @@ else:
         # Determine the current time cutoff based on today's available candles or current time
         current_time_limit = None
         if not today_candles.empty:
-            current_time_limit = today_candles['timestamp'].dt.time.max()
+            current_time_limit = today_candles['trade_time'].max()
         elif is_today:
             current_time_limit = datetime.now().time()
             
@@ -301,10 +348,9 @@ else:
         if not prev_candles_all.empty and current_time_limit is not None:
             prev_candles_all = prev_candles_all.copy()
             # Filter historical candles to only include those up to the current time limit
-            prev_candles_filtered = prev_candles_all[prev_candles_all['timestamp'].dt.time <= current_time_limit].copy()
+            prev_candles_filtered = prev_candles_all[prev_candles_all['trade_time'] <= current_time_limit].copy()
             
             if not prev_candles_filtered.empty:
-                prev_candles_filtered['trade_date'] = prev_candles_filtered['timestamp'].dt.date
                 daily_vols = prev_candles_filtered.groupby('trade_date')['volume'].sum()
                 # Use a larger sample (10 days) for time-adjusted average to smooth out noise
                 last_10_days = daily_vols.sort_index().tail(10)
@@ -323,6 +369,8 @@ else:
                 # Daily return: use the exchange-reported change percentage directly
                 pchange = quote.change_percent
                 close_prev = quote.previous_close
+                if (pchange is None or pchange == 0.0) and close_prev > 0 and close_last > 0:
+                    pchange = ((close_last - close_prev) / close_prev) * 100
             else:
                 # Intraday return lookbacks: compare today's live LTP with today's database candles
                 if not today_candles.empty and len(today_candles) > 1:
@@ -337,6 +385,8 @@ else:
                     # Fallback: no intraday candles in DB yet — use daily change from live quote
                     pchange = quote.change_percent
                     close_prev = quote.previous_close
+                    if (pchange is None or pchange == 0.0) and close_prev > 0 and close_last > 0:
+                        pchange = ((close_last - close_prev) / close_prev) * 100
         else:
             # Historical date or fallback
             if step is not None:
@@ -380,6 +430,8 @@ else:
                     prev_close = quote.previous_close
                     # Always use daily change for symbols with no DB history
                     pchange = quote.change_percent
+                    if (pchange is None or pchange == 0.0) and prev_close > 0 and ltp > 0:
+                        pchange = ((ltp - prev_close) / prev_close) * 100
                     if prev_close > 0 and ltp > 0:
                         live_symbols_to_add.append({
                             "symbol": symbol,
@@ -417,7 +469,7 @@ else:
     # -----------------------------------------------------------------
     # Pre-compute Intraday VWAP (15m) & Daily RSI (14-Day) for symbols
     # -----------------------------------------------------------------
-    def _compute_vwap_rsi(df_all: pd.DataFrame, symbols: list, target_date) -> dict:
+    def _compute_vwap_rsi(df_all: pd.DataFrame, symbols: list, target_date, is_today: bool = False, quotes: dict = None) -> dict:
         """Returns {symbol: {vwap, vs_vwap, daily_rsi}} for all symbols in list."""
         result = {}
         tgt_df = df_all[df_all['timestamp'].dt.date == target_date]
@@ -432,7 +484,7 @@ else:
                 from trade_system.domains.market_data.infrastructure.database.connection import get_engine
                 from sqlalchemy import text
                 placeholders = ', '.join([f"'{s}'" for s in symbols])
-                # Fetch recent 50 daily candles per symbol to ensure sufficient data for EMA
+                # Fetch recent 250 daily candles per symbol to ensure sufficient data for EMA warmup (matches TradingView)
                 query_daily = text(f"""
                     SELECT symbol, timestamp, close 
                     FROM (
@@ -440,16 +492,33 @@ else:
                                row_number() over (partition by symbol order by timestamp desc) as rn
                         FROM ohlcv_daily 
                         WHERE symbol IN ({placeholders})
+                          AND date(timestamp) <= :tgt_date
                     )
-                    WHERE rn <= 50
+                    WHERE rn <= 250
                     ORDER BY symbol, timestamp ASC
                 """)
                 with get_engine().connect() as conn:
-                    daily_df = pd.read_sql(query_daily, conn)
+                    daily_df = pd.read_sql(query_daily, conn, params={"tgt_date": target_date.strftime("%Y-%m-%d")})
                 
                 if not daily_df.empty:
                     for sym, group in daily_df.groupby('symbol'):
                         closes = group['close']
+                        
+                        # Append the live LTP as the current forming daily candle (how TradingView computes live daily RSI)
+                        last_ltp = None
+                        if is_today and quotes and sym in quotes:
+                            last_ltp = quotes[sym].last_price or quotes[sym].close or quotes[sym].open
+                        
+                        if last_ltp is None:
+                            sym_tgt = tgt_df[tgt_df['symbol'] == sym]
+                            if not sym_tgt.empty:
+                                last_ltp = float(sym_tgt.iloc[-1]['close'])
+                        
+                        if last_ltp is not None:
+                            last_daily_date = pd.to_datetime(group.iloc[-1]['timestamp']).date()
+                            if last_daily_date < target_date:
+                                closes = pd.concat([closes, pd.Series([last_ltp])], ignore_index=True)
+
                         if len(closes) >= 15:
                             delta = closes.diff()
                             gain = delta.where(delta > 0, 0.0)
@@ -475,7 +544,7 @@ else:
             # 1. Intraday VWAP on target date 15m candles
             vwap_val = None
             vs_vwap = None
-            if not sym_df.empty and len(sym_df) >= 2:
+            if not sym_df.empty:
                 sym_df['tp'] = (sym_df['high'] + sym_df['low'] + sym_df['close']) / 3.0
                 cum_vol = sym_df['volume'].cumsum()
                 safe_cum_vol = cum_vol.replace(0, float('nan'))
@@ -494,60 +563,105 @@ else:
     top_gainers = merged_closes.sort_values(by='pChange', ascending=False).head(10)
     top_losers = merged_closes.sort_values(by='pChange', ascending=True).head(10)
 
-    def _compute_entry_times(prev_closes: dict, target_date) -> dict:
+    def _compute_entry_times(merged_df: pd.DataFrame, target_date) -> dict:
+        """Compute the earliest 15m timestamp at which each symbol first entered
+        the top-10 gainers or bottom-10 losers list.
+
+        To produce accurate rankings across the full F&O universe (~208 symbols),
+        this function:
+        1. Loads 15m intraday candles for symbols that have them (~82 symbols).
+        2. For the remaining symbols (available only via live quotes), it holds
+           their current ``pChange`` constant across all timestamps.
+        3. Ranks all symbols together at every 15m bar.
+        """
         try:
             from trade_system.domains.market_data.infrastructure.database.connection import get_engine
             from sqlalchemy import text
             query = text("""
                 SELECT symbol, timestamp, close
-                FROM ohlcv_5m
+                FROM ohlcv_15m
                 WHERE date(timestamp) = :tgt_date
             """)
             with get_engine().connect() as conn:
                 tgt_df = pd.read_sql(query, conn, params={"tgt_date": target_date.strftime("%Y-%m-%d")})
         except Exception:
             tgt_df = pd.DataFrame()
-            
-        if tgt_df.empty:
+
+        # Identify gainer and loser symbols from live quotes
+        top_gainers_syms = merged_df.sort_values(by='pChange', ascending=False).head(10)['symbol'].tolist()
+        top_losers_syms = merged_df.sort_values(by='pChange', ascending=True).head(10)['symbol'].tolist()
+        top_symbols = set(top_gainers_syms + top_losers_syms)
+
+        # Identify which of these top symbols are missing from the local 15m DB
+        db_syms = set(tgt_df['symbol'].unique()) if not tgt_df.empty else set()
+        missing_top_syms = top_symbols - db_syms - {s for s in top_symbols if 'INDEX' in s}
+
+        # Dynamically fetch 15m history from broker API for missing top symbols
+        if missing_top_syms:
+            today_str = target_date.strftime("%Y-%m-%d")
+            fetched_dfs = []
+            for sym in missing_top_syms:
+                df_sym = _fetch_symbol_15m_cached(sym, today_str)
+                if not df_sym.empty:
+                    fetched_dfs.append(df_sym)
+            if fetched_dfs:
+                new_data = pd.concat(fetched_dfs, ignore_index=True)
+                if tgt_df.empty:
+                    tgt_df = new_data
+                else:
+                    tgt_df = pd.concat([tgt_df, new_data], ignore_index=True)
+
+        if tgt_df.empty or merged_df.empty:
             return {}
-            
-        tgt_df['timestamp'] = pd.to_datetime(tgt_df['timestamp'], format='mixed')
-        
-        # Fast way to compute % change for all symbols at all timestamps
-        pivot_closes = tgt_df.pivot_table(index='timestamp', columns='symbol', values='close')
-        pivot_closes = pivot_closes.ffill()
-        
-        entry_times = {}
+
+        tgt_df['timestamp'] = pd.to_datetime(tgt_df['timestamp'], errors='coerce')
+
+        # Build a prev_closes series from merged_df
+        prev_closes = merged_df.set_index('symbol')['close_prev'].to_dict()
         prev_series = pd.Series(prev_closes)
-        
-        symbols_to_keep = pivot_closes.columns.intersection(prev_series.index)
-        pivot_closes = pivot_closes[symbols_to_keep]
-        prev_series = prev_series[symbols_to_keep]
-        
-        if pivot_closes.empty:
+
+        # Pivot 15m candles: rows = timestamps, columns = symbols, values = close
+        pivot_closes = tgt_df.pivot_table(index='timestamp', columns='symbol', values='close')
+        pivot_closes = pivot_closes.sort_index().ffill()
+
+        # Compute pChange for DB symbols at every timestamp
+        db_syms = pivot_closes.columns.intersection(prev_series.index)
+        if db_syms.empty:
             return {}
-            
-        # Compute percentage change
-        pchange_df = ((pivot_closes - prev_series) / prev_series) * 100
-        
-        # Rank gainers/losers
+
+        pchange_db = ((pivot_closes[db_syms] - prev_series[db_syms]) / prev_series[db_syms]) * 100
+
+        # For non-DB symbols, use their current pChange (constant across all bars)
+        all_syms_in_merged = set(merged_df['symbol'].tolist())
+        non_db_syms = all_syms_in_merged - set(db_syms) - {s for s in all_syms_in_merged if 'INDEX' in s}
+        if non_db_syms:
+            pchange_map = merged_df.set_index('symbol')['pChange'].to_dict()
+            non_db_pchange = pd.DataFrame(
+                {sym: pchange_map.get(sym, 0.0) for sym in non_db_syms},
+                index=pchange_db.index,
+            )
+            pchange_df = pd.concat([pchange_db, non_db_pchange], axis=1)
+        else:
+            pchange_df = pchange_db
+
+        # Rank across ALL symbols at each timestamp
         gainer_ranks = pchange_df.rank(axis=1, ascending=False, method='min')
-        loser_ranks = pchange_df.rank(axis=1, ascending=True, method='min')
-        
-        for sym in symbols_to_keep:
+        loser_ranks  = pchange_df.rank(axis=1, ascending=True,  method='min')
+
+        entry_times = {}
+        for sym in pchange_df.columns:
             g_times = gainer_ranks.index[gainer_ranks[sym] <= 10]
             l_times = loser_ranks.index[loser_ranks[sym] <= 10]
-            
-            g_entry = g_times[0].strftime("%H:%M") if len(g_times) > 0 else "—"
-            l_entry = l_times[0].strftime("%H:%M") if len(l_times) > 0 else "—"
-            
+
+            g_entry = g_times.min().strftime("%H:%M") if len(g_times) > 0 else "—"
+            l_entry = l_times.min().strftime("%H:%M") if len(l_times) > 0 else "—"
+
             entry_times[sym] = {"gainer_entry": g_entry, "loser_entry": l_entry}
-            
+
         return entry_times
 
     if not merged_closes.empty:
-        prev_closes_dict = merged_closes.set_index('symbol')['close_prev'].to_dict()
-        entry_times_dict = _compute_entry_times(prev_closes_dict, target_date)
+        entry_times_dict = _compute_entry_times(merged_closes, target_date)
     else:
         entry_times_dict = {}
 
@@ -623,7 +737,7 @@ else:
     raw_near_bo, raw_near_bd = _compute_near_breakout_breakdown(df, merged_closes, target_date)
 
     _gl_symbols = list(top_gainers['symbol'].values) + list(top_losers['symbol'].values) + [x['symbol'] for x in raw_near_bo] + [x['symbol'] for x in raw_near_bd]
-    _indicators = _compute_vwap_rsi(df, list(set(_gl_symbols)), target_date)
+    _indicators = _compute_vwap_rsi(df, list(set(_gl_symbols)), target_date, is_today=is_today, quotes=quotes)
 
     gainers_data = []
     for idx, row in top_gainers.iterrows():
@@ -905,7 +1019,6 @@ else:
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    on_select="rerun",
                     selection_mode="single-row",
                     key="gainer_leaderboard"
                 )
@@ -924,7 +1037,6 @@ else:
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    on_select="rerun",
                     selection_mode="single-row",
                     key="loser_leaderboard"
                 )
@@ -1071,7 +1183,7 @@ else:
         import inspect
         sig = inspect.signature(st.plotly_chart)
         if "on_select" in sig.parameters:
-            st.plotly_chart(fig, use_container_width=True, key="plotly_sector_chart", on_select="rerun")
+            st.plotly_chart(fig, use_container_width=True, key="plotly_sector_chart")
         else:
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1229,7 +1341,7 @@ else:
                 try:
                     with engine.connect() as conn:
                         df_daily = pd.read_sql(query_daily, conn, params={"target_date": target_date.isoformat()})
-                    df_daily['timestamp'] = pd.to_datetime(df_daily['timestamp'], format='mixed')
+                    df_daily['timestamp'] = pd.to_datetime(df_daily['timestamp'], format='ISO8601')
                     daily_groups = {sym: grp.sort_values('timestamp') for sym, grp in df_daily.groupby('symbol')}
                 except Exception as e:
                     st.warning(f"Failed to fetch daily candles: {e}")
@@ -1457,7 +1569,7 @@ else:
     # ---- TAB 6: Intraday Edge Finder ----
     with tab_edge:
         st.subheader("⚡ Multi-Layer Edge Finder")
-        st.caption("Confluence-based scoring system analyzing 7 layers (Sector, Relative Strength, VWAP, Volume/CVD, Timing, Supertrend, and Compression) to find high-probability setups.")
+        st.caption("Confluence-based scoring system analyzing 11 layers (Sector, Relative Strength, VWAP, Volume/CVD, Timing, Supertrend, Compression, Daily Trend/Regime, Key Levels, OBV Divergence, and Candle Quality) to find high-probability setups.")
         
         def get_approx_strike(ltp):
             if ltp <= 0:
@@ -1503,7 +1615,7 @@ else:
             show_triggered_only = st.checkbox("Show Triggered Entries Only", value=False, key="edge_triggered_only_cb")
 
         # 2. Scanning and Scoring
-        with st.spinner(f"Analyzing 7 confluence layers for {selected_horizon} setups..."):
+        with st.spinner(f"Analyzing 11 confluence layers for {selected_horizon} setups..."):
             try:
                 scorer = IntradayEdgeScorer(horizon=horizon_code)
                 if horizon_code == "INTRADAY":
@@ -1732,7 +1844,6 @@ else:
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    on_select="rerun",
                     selection_mode="single-row",
                     key="edge_finder_table"
                 )
@@ -1789,7 +1900,7 @@ else:
                 if df_cycle.empty or len(df_cycle) < 30:
                     st.warning("Insufficient daily historical candles in database to run cycle analysis.")
                 else:
-                    df_cycle['timestamp'] = pd.to_datetime(df_cycle['timestamp'], format='mixed')
+                    df_cycle['timestamp'] = pd.to_datetime(df_cycle['timestamp'], format='ISO8601')
                     
                     # 1. Hurst Swing Cycle Calculations
                     df_c = df_cycle.copy().sort_values("timestamp").reset_index(drop=True)

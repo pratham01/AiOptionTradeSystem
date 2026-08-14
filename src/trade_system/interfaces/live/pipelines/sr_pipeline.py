@@ -264,11 +264,10 @@ class SrPipeline:
                 continue
             self._last_zone_alert_time[symbol][zone_name] = now_dt
             direction = "above" if price > zone_price else "at/below"
-            self.notifier.send(
-                f"📍 <b>{short_sym} — Zone Proximity</b>\n"
-                f"Zone: <b>{zone_name}</b> @ ₹{zone_price:.2f}\n"
-                f"Price: ₹{price:.2f} ({direction})\n"
-                f"Time: {now_dt.strftime('%H:%M')}"
+            # Log only — Telegram proximity alerts disabled per user preference
+            LOGGER.info(
+                "[%s] Zone proximity: %s @ ₹%.2f | Price: ₹%.2f (%s)",
+                short_sym, zone_name, zone_price, price, direction
             )
 
     # ------------------------------------------------------------------

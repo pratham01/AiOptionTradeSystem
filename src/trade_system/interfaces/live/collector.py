@@ -378,12 +378,15 @@ class LiveMarketDataService:
                 if self._parse_clock(self.settings.market_start) <= now.time() < self._parse_clock(self.settings.market_end):
                     if not self.ws_running:
                         self.start()
-                elif self.ws_running and now.time() >= self._parse_clock(self.settings.market_end):
-                    self.stop()
-                    self._send_eod_summary(today)
-                    self.notifier.send(
-                        "🔴 <b>Trading Bot Stopped</b>\n\nMarket closed at 15:30. Monitoring stopped for the day."
-                    )
+                elif now.time() >= self._parse_clock(self.settings.market_end):
+                    if self.ws_running:
+                        self.stop()
+                        self._send_eod_summary(today)
+                        self.notifier.send(
+                            "🔴 <b>Trading Bot Stopped</b>\n\nMarket closed at 15:30. Monitoring stopped for the day."
+                        )
+                    LOGGER.info("Market is closed for the day. Exiting live bot process to prevent memory leaks.")
+                    break
             time.sleep(5)
 
     def _ensure_broker_session(self) -> None:
@@ -450,6 +453,8 @@ class LiveMarketDataService:
         self.ws_running = False
         self.ws = None
         self.db_worker.stop()
+        if hasattr(self, 'scheduler') and self.scheduler and self.scheduler.running:
+            self.scheduler.shutdown(wait=False)
         self._live_state.set_bot_running(False)
         self._live_state.flush(force=True)
 

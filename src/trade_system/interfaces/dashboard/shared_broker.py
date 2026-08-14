@@ -22,6 +22,11 @@ def get_cached_broker():
     Cached for 120 seconds to avoid repeated auth calls.
     All dashboard pages should import and use this function instead of
     defining their own get_broker().
+    
+    Token resolution order:
+    1. FyersAuthService.get_valid_token() (checks cache, env, then TOTP).
+    2. Fallback: run the standalone TOTP script directly.
+    3. Last resort: use the raw env token even if stale (historical data still works).
     """
     try:
         settings = Settings.load()
@@ -29,7 +34,17 @@ def get_cached_broker():
         token = auth_service.get_valid_token()
         
         if not token:
-            LOGGER.warning("Fyers token could not be retrieved.")
+            # Fallback: try running the TOTP script directly
+            LOGGER.warning("FyersAuthService returned no token. Trying standalone TOTP script...")
+            token = _run_totp_script_fallback(settings)
+        
+        if not token:
+            # Last resort: use whatever is in the env (may be stale but allows DB queries)
+            LOGGER.warning("All token refresh methods failed. Using raw env token as last resort.")
+            token = settings.fyers_access_token
+            
+        if not token:
+            LOGGER.error("No Fyers token available from any source.")
             return None
         
         broker = FyersBroker(
@@ -46,17 +61,47 @@ def get_cached_broker():
                 if new_token:
                     broker.access_token = new_token
                     if not broker.authenticate():
-                        return None
+                        LOGGER.warning("Broker auth failed after forced refresh. Proceeding with existing token.")
                 else:
-                    return None
+                    LOGGER.warning("Forced token refresh returned None. Proceeding with existing token.")
         except Exception as e:
-            LOGGER.error(f"Fyers authentication error: {e}")
-            return None
+            LOGGER.warning(f"Fyers authentication error (proceeding anyway): {e}")
         
         return broker
     except Exception as e:
         LOGGER.error(f"Fyers broker creation failed: {e}")
         return None
+
+
+def _run_totp_script_fallback(settings) -> str | None:
+    """Run the standalone TOTP auth script as a subprocess fallback."""
+    import subprocess, sys, json
+    from pathlib import Path
+    
+    script_path = Path(__file__).resolve().parents[4] / "scripts" / "authenticate_fyers_totp.py"
+    if not script_path.exists():
+        LOGGER.warning("TOTP script not found at %s", script_path)
+        return None
+    
+    try:
+        root_path = Path(__file__).resolve().parents[4]
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            cwd=str(root_path),
+            capture_output=True,
+            text=True,
+            timeout=180,  # Allow up to 3 minutes for retries
+        )
+        if result.returncode == 0:
+            # Re-read the cached token that the script wrote
+            token_path = settings.fyers.token_path
+            if token_path.exists():
+                payload = json.loads(token_path.read_text())
+                return payload.get("access_token")
+    except Exception as e:
+        LOGGER.warning("TOTP script fallback failed: %s", e)
+    
+    return None
 
 @st.cache_data(ttl=5)
 def fetch_live_quotes(symbols):

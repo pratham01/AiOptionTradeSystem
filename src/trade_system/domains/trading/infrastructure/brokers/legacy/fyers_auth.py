@@ -24,98 +24,121 @@ class FyersAuthenticator:
         message = f"{client_id_prefix}-{app_type}:{secret_key}"
         return hashlib.sha256(message.encode()).hexdigest()
 
-    def generate_access_token(self) -> str:
+    def generate_access_token(self, max_retries: int = 3) -> str:
         """
         Generates a new Fyers access token using TOTP and Pin.
         Returns the full access token string.
+
+        Includes retry logic with exponential backoff to handle Fyers
+        429 rate-limits on the login OTP endpoint.
         """
+        import time as _time
+
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                return self._generate_access_token_once()
+            except requests.exceptions.HTTPError as exc:
+                last_exc = exc
+                if exc.response is not None and exc.response.status_code == 429:
+                    backoff = 30 * (2 ** (attempt - 1))  # 30s, 60s, 120s
+                    logger.warning(
+                        "Fyers login OTP rate-limited (429). Retry %d/%d in %ds.",
+                        attempt, max_retries, backoff,
+                    )
+                    _time.sleep(backoff)
+                    continue
+                raise
+            except Exception:
+                raise
+
+        logger.error("All %d TOTP refresh attempts exhausted.", max_retries)
+        raise last_exc  # type: ignore[misc]
+
+    def _generate_access_token_once(self) -> str:
+        """Single-shot token generation (no retries)."""
         logger.info("Starting automated Fyers token generation...")
-        
-        try:
-            # 1. Send Login OTP (Internal step for Fyers)
-            payload_step1 = {"fy_id": self.settings.fyers.user_id, "app_id": "2"}
-            res1 = requests.post(f"{self.base_url_vagator}/send_login_otp", json=payload_step1)
-            res1.raise_for_status()
-            request_key = res1.json()["request_key"]
 
-            # 2. Verify TOTP
-            if pyotp is None:
-                raise RuntimeError("pyotp is required for automated token refresh.")
-            
-            totp_gen = pyotp.TOTP(self.settings.fyers.totp_secret)
-            totp = totp_gen.now()
-            
-            payload_step2 = {"request_key": request_key, "otp": totp}
-            res2 = requests.post(f"{self.base_url_vagator}/verify_otp", json=payload_step2)
-            if res2.status_code != 200:
-                logger.error(f"TOTP verification failed (HTTP {res2.status_code}): {res2.text}")
-                logger.error(f"Used User ID: {self.settings.fyers.user_id}")
-                res2.raise_for_status()
-            
-            request_key = res2.json()["request_key"]
+        # 1. Send Login OTP (Internal step for Fyers)
+        payload_step1 = {"fy_id": self.settings.fyers.user_id, "app_id": "2"}
+        res1 = requests.post(f"{self.base_url_vagator}/send_login_otp", json=payload_step1)
+        res1.raise_for_status()
+        request_key = res1.json()["request_key"]
 
-            # 3. Verify PIN
-            payload_step3 = {
-                "request_key": request_key,
-                "identity_type": "pin",
-                "identifier": self.settings.fyers.pin
-            }
-            res3 = requests.post(f"{self.base_url_vagator}/verify_pin", json=payload_step3)
-            res3.raise_for_status()
-            internal_access_token = res3.json()["data"]["access_token"]
+        # 2. Verify TOTP
+        if pyotp is None:
+            raise RuntimeError("pyotp is required for automated token refresh.")
 
-            # 4. Get Auth Code
-            # Extract APP_ID prefix (e.g., ALHT0QX10K from ALHT0QX10K-100)
-            client_id_parts = self.settings.fyers.client_id.split('-')
-            app_id_prefix = client_id_parts[0]
-            app_type = client_id_parts[1] if len(client_id_parts) > 1 else "100"
+        totp_gen = pyotp.TOTP(self.settings.fyers.totp_secret)
+        totp = totp_gen.now()
 
-            payload_step4 = {
-                "fyers_id": self.settings.fyers.user_id,
-                "app_id": app_id_prefix,
-                "redirect_uri": self.settings.fyers.redirect_uri,
-                "appType": app_type,
-                "code_challenge": "",
-                "state": "sample_state",
-                "scope": "",
-                "nonce": "",
-                "response_type": "code",
-                "create_cookie": True
-            }
-            headers = {'Authorization': f'Bearer {internal_access_token}'}
-            res4 = requests.post(f"{self.base_url_api}/token", json=payload_step4, headers=headers)
-            
-            # Fyers returns 308 for this specific call to redirect
-            if res4.status_code != 308:
-                logger.error(f"Auth code step failed: {res4.text}")
-                res4.raise_for_status()
+        payload_step2 = {"request_key": request_key, "otp": totp}
+        res2 = requests.post(f"{self.base_url_vagator}/verify_otp", json=payload_step2)
+        if res2.status_code != 200:
+            logger.error(f"TOTP verification failed (HTTP {res2.status_code}): {res2.text}")
+            logger.error(f"Used User ID: {self.settings.fyers.user_id}")
+            res2.raise_for_status()
 
-            url = res4.json()["Url"]
-            auth_code = parse.parse_qs(parse.urlparse(url).query)['auth_code'][0]
+        request_key = res2.json()["request_key"]
 
-            # 5. Validate Auth Code to get final API Access Token
-            app_id_hash = self._sha256_hash(app_id_prefix, app_type, self.settings.fyers.secret_key)
-            payload_step5 = {
-                "grant_type": "authorization_code",
-                "appIdHash": app_id_hash,
-                "code": auth_code,
-            }
-            res5 = requests.post(f"{self.base_url_api}/validate-authcode", json=payload_step5)
-            res5.raise_for_status()
-            
-            final_token = res5.json()["access_token"]
-            
-            # Fyers V3 access token format is usually "CLIENT_ID:TOKEN"
-            # But the SDK handles just the token part if initialized correctly
-            # Based on totp_auth.py, it constructs it as APP_ID-APP_TYPE:TOKEN
-            full_access_token = f"{app_id_prefix}-{app_type}:{final_token}"
-            
-            logger.info("Successfully generated new Fyers access token.")
-            return full_access_token
+        # 3. Verify PIN
+        payload_step3 = {
+            "request_key": request_key,
+            "identity_type": "pin",
+            "identifier": self.settings.fyers.pin
+        }
+        res3 = requests.post(f"{self.base_url_vagator}/verify_pin", json=payload_step3)
+        res3.raise_for_status()
+        internal_access_token = res3.json()["data"]["access_token"]
 
-        except Exception as e:
-            logger.error(f"Failed to generate Fyers token: {e}")
-            raise
+        # 4. Get Auth Code
+        # Extract APP_ID prefix (e.g., ALHT0QX10K from ALHT0QX10K-100)
+        client_id_parts = self.settings.fyers.client_id.split('-')
+        app_id_prefix = client_id_parts[0]
+        app_type = client_id_parts[1] if len(client_id_parts) > 1 else "100"
+
+        payload_step4 = {
+            "fyers_id": self.settings.fyers.user_id,
+            "app_id": app_id_prefix,
+            "redirect_uri": self.settings.fyers.redirect_uri,
+            "appType": app_type,
+            "code_challenge": "",
+            "state": "sample_state",
+            "scope": "",
+            "nonce": "",
+            "response_type": "code",
+            "create_cookie": True
+        }
+        headers = {'Authorization': f'Bearer {internal_access_token}'}
+        res4 = requests.post(f"{self.base_url_api}/token", json=payload_step4, headers=headers)
+
+        # Fyers returns 308 for this specific call to redirect
+        if res4.status_code != 308:
+            logger.error(f"Auth code step failed: {res4.text}")
+            res4.raise_for_status()
+
+        url = res4.json()["Url"]
+        auth_code = parse.parse_qs(parse.urlparse(url).query)['auth_code'][0]
+
+        # 5. Validate Auth Code to get final API Access Token
+        app_id_hash = self._sha256_hash(app_id_prefix, app_type, self.settings.fyers.secret_key)
+        payload_step5 = {
+            "grant_type": "authorization_code",
+            "appIdHash": app_id_hash,
+            "code": auth_code,
+        }
+        res5 = requests.post(f"{self.base_url_api}/validate-authcode", json=payload_step5)
+        res5.raise_for_status()
+
+        final_token = res5.json()["access_token"]
+
+        # Fyers V3 access token format is usually "CLIENT_ID:TOKEN"
+        # But the SDK handles just the token part if initialized correctly
+        # Based on totp_auth.py, it constructs it as APP_ID-APP_TYPE:TOKEN
+        full_access_token = f"{app_id_prefix}-{app_type}:{final_token}"
+
+        logger.info("Successfully generated new Fyers access token.")
+        return full_access_token
 
     def update_env_file(self, new_token: str, env_path: str = ".env"):
         """Updates the FYERS_ACCESS_TOKEN in the .env file."""

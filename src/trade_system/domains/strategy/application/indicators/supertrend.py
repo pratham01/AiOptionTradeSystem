@@ -28,8 +28,9 @@ class SupertrendIndicator(BaseIndicator):
             time_series = df['timestamp']
         
         if time_series is not None and len(time_series) > 1:
-            max_gap = time_series.diff().max()
-            if max_gap > pd.Timedelta(minutes=45):
+            gaps = time_series.groupby(time_series.dt.date).diff()
+            max_gap = gaps.max()
+            if not pd.isna(max_gap) and max_gap > pd.Timedelta(minutes=45):
                 logger.error(f"CRITICAL: Data gap of {max_gap} detected! Suppressing Supertrend calculation to prevent corrupted signals.")
                 return pd.DataFrame() # Return empty to prevent false signals
         # ---------------------------------
