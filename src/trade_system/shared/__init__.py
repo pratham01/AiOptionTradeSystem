@@ -27,6 +27,20 @@ from trade_system.domains.trading.domain.ports.broker import Broker, DataBroker,
 from trade_system.shared.ports.notifier import Notifier
 from trade_system.shared.ports.weights import WeightsProvider
 
+from trade_system.shared.exceptions import (
+    TradeSystemError,
+    BrokerError,
+    BrokerAuthError,
+    BrokerSessionExpiredError,
+    BrokerRateLimitError,
+    MarketDataError,
+    DataGapError,
+    DataSanityError,
+    StrategyError,
+    NotificationError,
+    AgentError,
+)
+
 __all__ = [
     "EventBus",
     "MarketEvent",
@@ -55,4 +69,15 @@ __all__ = [
     "TradingBroker",
     "Notifier",
     "WeightsProvider",
+    "TradeSystemError",
+    "BrokerError",
+    "BrokerAuthError",
+    "BrokerSessionExpiredError",
+    "BrokerRateLimitError",
+    "MarketDataError",
+    "DataGapError",
+    "DataSanityError",
+    "StrategyError",
+    "NotificationError",
+    "AgentError",
 ]

@@ -44,6 +44,24 @@ def create_live_market_service(settings: Settings | None = None) -> LiveMarketDa
     )
 
 
+def create_live_orchestrator(settings: Settings | None = None):
+    """Creates the modern modular LiveMarketDataOrchestrator with separate Index and FO collectors."""
+    from trade_system.interfaces.live.collectors.orchestrator import LiveMarketDataOrchestrator
+
+    settings = settings or Settings.load()
+    settings.ensure_directories()
+    auth_service = FyersAuthService(settings)
+    token = auth_service.get_valid_token()
+
+    broker = FyersBrokerClient(
+        client_id=settings.fyers.client_id,
+        access_token=token,
+        user_id=settings.fyers.user_id,
+        authenticator=auth_service.authenticator,
+    )
+    return LiveMarketDataOrchestrator(broker=broker, settings=settings)
+
+
 def run_live_trading_bot() -> int:
     settings = Settings.load()
     configure_logging(settings.log_level)
@@ -87,4 +105,5 @@ def run_live_trading_bot() -> int:
         service.shutdown = True
         return 1
     return 0
+
 

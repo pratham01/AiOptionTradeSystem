@@ -1,0 +1,105 @@
+# Telegram Alert Configuration & Message Templates for Trade System
+version: "2.0"
+
+# Global default settings
+defaults:
+  parse_mode: "HTML"
+  cooldown_seconds: 60
+  enable_fo_alerts: false      # Prevent flooding alert channel with 200+ FO stocks unless enabled
+  enable_index_alerts: true
+
+# Strategy-specific alert templates and channel routing
+strategies:
+  supertrend_flip:
+    enabled: true
+    channel: "main"
+    cooldown_seconds: 120
+    template: |
+      {color} <b>{symbol_short} {time}</b>
+      Direction changed to <b>{direction}</b> ({timeframe}m)
+      15m Trend: <b>{trend_15m}</b>
+      Close: ₹{close:.2f}
+      Supertrend: ₹{supertrend:.2f}
+      Confluence: <b>{confluence}</b>
+      Action: <b>{action}</b>{strikes_block}
+
+  supertrend_confirmed:
+    enabled: true
+    channel: "confirmed"
+    cooldown_seconds: 180
+    template: |
+      {color} <b>⚡ ST FLIP — {symbol_short} {time}</b>
+      Timeframe: <b>{timeframe}m Supertrend</b>
+      New Direction: <b>{direction_verbose}</b>
+      15m Trend Alignment: <b>{trend_15m}</b>
+      Close: ₹{close:.2f}  |  ST Level: ₹{supertrend:.2f}
+      Confluence: <b>{confluence}</b>
+      Suggested Action: <b>{action}</b>{strikes_block}
+
+  orb_breakout:
+    enabled: true
+    channel: "main"
+    cooldown_seconds: 300
+    template: |
+      🚀 <b>ORB BREAKOUT — {symbol_short} {time}</b>
+      Range: ₹{orb_low:.2f} – ₹{orb_high:.2f} (15m ORB)
+      Breakout Price: ₹{price:.2f} ({direction})
+      Volume Surge: <b>{volume_surge:.1f}x</b>
+      VWAP Status: <b>{vwap_status}</b>
+      Action: <b>{action}</b>
+
+  gamma_blast:
+    enabled: true
+    channel: "main"
+    cooldown_seconds: 180
+    template: |
+      ⚡ <b>0DTE GAMMA BLAST — {symbol_short}</b>
+      Strike: <b>{strike_name}</b> @ ₹{option_ltp:.2f}
+      Underlying: ₹{spot_price:.2f}
+      Gamma Momentum: <b>{momentum_score:.1f}/100</b>
+      Suggested Entry: ₹{entry:.2f} | SL: ₹{stop_loss:.2f} | TGT: ₹{target:.2f}
+      Action: <b>{action}</b>
+
+  sniper_reversal:
+    enabled: true
+    channel: "main"
+    cooldown_seconds: 300
+    template: |
+      🎯 <b>SNIPER REVERSAL — {symbol_short} {time}</b>
+      Zone: <b>{zone_name}</b> @ ₹{zone_level:.2f}
+      Exhaustion Wick: <b>{wick_pct:.0%}</b>
+      Price: ₹{price:.2f} ({direction})
+      Action: <b>{action}</b>
+
+  intraday_edge:
+    enabled: true
+    channel: "main"
+    cooldown_seconds: 600
+    min_score: 75.0
+    template: |
+      🏆 <b>HIGH CONFLUENCE EDGE — {symbol_short}</b>
+      Edge Score: <b>{final_score:.1f}/100</b> ({direction})
+      Sector Momentum: <b>{sector}</b> ({sector_rank})
+      Key Trigger: <b>{trigger_status}</b>
+      Entry: ₹{entry:.2f} | SL: ₹{stop_loss:.2f} | TGT: ₹{target:.2f}
+
+  premarket_report:
+    enabled: true
+    channel: "main"
+    template: |
+      📊 <b>Premarket Report — {symbol_short}</b>
+
+      {summary}
+      {zone_info}
+
+      🧭 <b>Current Trend:</b> {trend_icon}
+
+  eod_summary:
+    enabled: true
+    channel: "main"
+    template: |
+      🏁 <b>EOD Session Summary — {date}</b>
+
+      📈 Total Signals: <b>{total_signals}</b>
+      🎯 Target Hits: <b>{target_hits}</b> | 🛑 Stop Losses: <b>{stop_losses}</b>
+      💰 Day PnL: <b>{day_pnl:+.2f} pts</b>

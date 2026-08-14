@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import requests
 try:
@@ -174,10 +176,30 @@ class FyersAuthenticator:
         logger.info(f"Updated {target_path} with new access token.")
 
 
+import threading
+
+
 class FyersAuthService:
+    """Thread-safe Singleton authentication service for Fyers broker."""
+    _instance: FyersAuthService | None = None
+    _lock = threading.Lock()
+
+    def __new__(cls, settings: Settings) -> FyersAuthService:
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
+
     def __init__(self, settings: Settings) -> None:
+        if getattr(self, "_initialized", False):
+            self.settings = settings
+            return
         self.settings = settings
         self.authenticator = FyersAuthenticator(settings)
+        self._token_lock = threading.Lock()
+        self._cached_in_memory_token: str | None = None
+        self._initialized = True
 
     def _is_token_from_today(self, token: str) -> bool:
         if not token:
@@ -203,34 +225,41 @@ class FyersAuthService:
 
     def get_valid_token(self, force_refresh: bool = False) -> str | None:
         """
-        Retrieves a valid token. 
-        Checks cache first, then environment, and finally triggers TOTP if needed.
+        Retrieves a valid token. Thread-safe with cache synchronization.
+        Checks in-memory cache, then disk cache, then env, and finally triggers TOTP with lock.
         """
-        # 1. Try Cache File first (always prefer the shared token on disk if valid)
-        token = None
-        if not force_refresh:
-            token = self.read_cached_token()
-            if token and not self._is_token_from_today(token):
-                token = None
-            
-        # 2. Try Memory/Config (loaded from env)
-        if not token:
-            env_token = self.settings.fyers.access_token
-            if env_token and self._is_token_from_today(env_token):
-                token = env_token
-            
-        # 3. Trigger TOTP only if absolutely required
-        if not token or force_refresh:
-            logger.info("Shared Auth: No valid token found or token expired. Triggering once-per-day TOTP flow.")
-            try:
-                token = self.authenticate_totp()
-                # Update .env so other processes pick it up
-                self.authenticator.update_env_file(token)
-            except Exception as e:
-                logger.error(f"Shared Auth: TOTP generation failed: {e}")
-                return None
-                
-        return token
+        with self._token_lock:
+            # 0. Check in-memory cache
+            if not force_refresh and self._cached_in_memory_token:
+                if self._is_token_from_today(self._cached_in_memory_token):
+                    return self._cached_in_memory_token
+
+            # 1. Try Cache File first (shared token on disk)
+            token = None
+            if not force_refresh:
+                token = self.read_cached_token()
+                if token and not self._is_token_from_today(token):
+                    token = None
+
+            # 2. Try Memory/Config (loaded from env)
+            if not token:
+                env_token = self.settings.fyers.access_token
+                if env_token and self._is_token_from_today(env_token):
+                    token = env_token
+
+            # 3. Trigger TOTP only if absolutely required
+            if not token or force_refresh:
+                logger.info("Shared Auth Singleton: No valid token found or token expired. Triggering once-per-day TOTP flow.")
+                try:
+                    token = self.authenticate_totp()
+                    # Update .env so other processes pick it up
+                    self.authenticator.update_env_file(token)
+                except Exception as e:
+                    logger.error(f"Shared Auth Singleton: TOTP generation failed: {e}")
+                    return None
+
+            self._cached_in_memory_token = token
+            return token
 
     def read_cached_token(self) -> str | None:
         path = self.settings.fyers.token_path
@@ -240,7 +269,6 @@ class FyersAuthService:
                 token = payload.get("access_token")
                 
                 # Basic sanity check: Is the token from today?
-                # Fyers tokens expire daily at midnight.
                 mtime = datetime.fromtimestamp(path.stat().st_mtime)
                 if mtime.date() != date.today():
                     logger.info("Shared Auth: Cached token is from a previous day. Expiring.")
@@ -254,6 +282,7 @@ class FyersAuthService:
     def authenticate_totp(self) -> str:
         token = self.authenticator.generate_access_token()
         self._cache_token(token, source="totp")
+        self._cached_in_memory_token = token
         return token
 
     def authenticate_browser(self, auth_code: str | None = None, *, open_browser: bool = True) -> str:

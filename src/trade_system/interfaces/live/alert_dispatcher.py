@@ -1,18 +1,12 @@
-"""
-AlertDispatcher — Single-responsibility module for all Telegram alert formatting and delivery.
-
-Extracted from LiveMarketDataService (collector.py).
-Principle: No alert logic should live inside the data or signal pipeline.
-All Telegram message construction and sending passes through this class.
-"""
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict
 
 from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared.notifications.templates import TelegramTemplateManager
 
 LOGGER = logging.getLogger("AlertDispatcher")
 
@@ -20,21 +14,19 @@ LOGGER = logging.getLogger("AlertDispatcher")
 @dataclass
 class AlertConfig:
     """Debounce and routing configuration."""
-    # Minimum seconds between repeated alerts for the same symbol/type
     debounce_seconds: int = 300
-    # Whether to also send to the confirmed (secondary) channel
     send_to_confirmed_channel: bool = False
 
 
 class AlertDispatcher:
     """
-    Centralised alert dispatcher. All Telegram messages go through here.
+    Centralised alert dispatcher. All Telegram messages pass through here.
 
     Features:
-    - Per-alert-type debounce to prevent spam
-    - Dual-channel routing (main notifier + confirmed notifier)
-    - Structured alert types for auditability
-    - Graceful error handling (alert failure never crashes the main pipeline)
+    - Integrated with TelegramTemplateManager for configurable message templates
+    - Per-strategy and per-symbol cooldown tracking
+    - Multi-channel routing (main channel vs confirmed channel)
+    - Exception isolation (alert failures never crash the trading pipeline)
     """
 
     def __init__(
@@ -42,15 +34,48 @@ class AlertDispatcher:
         notifier: TelegramNotifier,
         confirmed_notifier: TelegramNotifier | None = None,
         config: AlertConfig | None = None,
+        template_manager: TelegramTemplateManager | None = None,
     ) -> None:
         self._notifier = notifier
         self._confirmed_notifier = confirmed_notifier or notifier
         self._config = config or AlertConfig()
-        # {alert_key -> last_sent datetime}
+        self._template_manager = template_manager or TelegramTemplateManager()
         self._last_sent: dict[str, datetime] = {}
 
     # ─────────────────────────────────────────────────────────────────────────
-    # PUBLIC SEND METHODS (typed by alert category)
+    # STRATEGY TEMPLATE-BASED ALERTS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def dispatch_strategy_alert(
+        self,
+        strategy_name: str,
+        symbol: str,
+        context: Dict[str, Any],
+        is_index: bool = True,
+    ) -> bool:
+        """
+        Format and dispatch a strategy alert using configurable templates.
+        Enforces enable/disable toggles, cooldowns, and channel routing.
+        """
+        if not self._template_manager.is_strategy_enabled(strategy_name, is_index=is_index):
+            LOGGER.debug("Alert for %s (%s) is disabled by config.", strategy_name, symbol)
+            return False
+
+        if self._template_manager.should_debounce(strategy_name, symbol):
+            LOGGER.debug("Alert for %s (%s) debounced.", strategy_name, symbol)
+            return False
+
+        try:
+            message = self._template_manager.format_message(strategy_name, context)
+            channel = self._template_manager.get_channel(strategy_name)
+            self._deliver(message, channel)
+            return True
+        except Exception as exc:
+            LOGGER.error("Failed to format/dispatch %s alert for %s: %s", strategy_name, symbol, exc)
+            return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PUBLIC SEND METHODS (typed convenience methods)
     # ─────────────────────────────────────────────────────────────────────────
 
     def send_market_status(self, message: str) -> None:
@@ -58,7 +83,7 @@ class AlertDispatcher:
         self._send("market_status", message, channel="main")
 
     def send_supertrend_flip(self, symbol: str, message: str) -> None:
-        """ST Flip alert — sent to the confirmed (STFlip) Telegram channel."""
+        """ST Flip alert — sent to the confirmed Telegram channel."""
         self._send(f"st_flip_{symbol}", message, channel="confirmed", debounce=False)
 
     def send_supertrend_touch(self, symbol: str, message: str) -> None:
@@ -102,9 +127,6 @@ class AlertDispatcher:
     # ─────────────────────────────────────────────────────────────────────────
 
     def _send(self, key: str, message: str, channel: str = "main", debounce: bool = True) -> None:
-        """
-        Core internal method. Applies debounce and routes to the right channel.
-        """
         if debounce:
             last = self._last_sent.get(key)
             if last:
@@ -120,14 +142,12 @@ class AlertDispatcher:
         self._deliver(message, channel)
 
     def _deliver(self, message: str, channel: str) -> None:
-        """Actually send the message, with error isolation."""
         notifier = self._confirmed_notifier if channel == "confirmed" else self._notifier
         try:
             notifier.send(message)
         except Exception as exc:
-            # CRITICAL: Alert failures must never crash the trading pipeline
             LOGGER.error("Failed to deliver Telegram alert: %s", exc)
 
     def reset_debounce(self, key: str) -> None:
-        """Manually clear debounce state for a specific alert key."""
         self._last_sent.pop(key, None)
+
