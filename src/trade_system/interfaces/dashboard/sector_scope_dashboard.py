@@ -471,6 +471,9 @@ else:
     # -----------------------------------------------------------------
     def _compute_vwap_rsi(df_all: pd.DataFrame, symbols: list, target_date, is_today: bool = False, quotes: dict = None) -> dict:
         """Returns {symbol: {vwap, vs_vwap, daily_rsi}} for all symbols in list."""
+        def _clean_sym(s: str) -> str:
+            return s.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").replace("-INDEX", "")
+
         result = {}
         tgt_df = df_all[df_all['timestamp'].dt.date == target_date]
         if tgt_df.empty and not df_all.empty:
@@ -483,7 +486,16 @@ else:
             try:
                 from trade_system.domains.market_data.infrastructure.database.connection import get_engine
                 from sqlalchemy import text
-                placeholders = ', '.join([f"'{s}'" for s in symbols])
+                
+                expanded_syms = set()
+                for s in symbols:
+                    expanded_syms.add(s)
+                    c = _clean_sym(s)
+                    expanded_syms.add(f"NSE:{c}-EQ")
+                    expanded_syms.add(f"BSE:{c}-INDEX")
+                    expanded_syms.add(f"NSE:{c}-INDEX")
+
+                placeholders = ', '.join([f"'{s}'" for s in expanded_syms])
                 # Fetch recent 250 daily candles per symbol to ensure sufficient data for EMA warmup (matches TradingView)
                 query_daily = text(f"""
                     SELECT symbol, timestamp, close 
@@ -503,14 +515,19 @@ else:
                 if not daily_df.empty:
                     for sym, group in daily_df.groupby('symbol'):
                         closes = group['close']
+                        clean = _clean_sym(sym)
                         
                         # Append the live LTP as the current forming daily candle (how TradingView computes live daily RSI)
                         last_ltp = None
-                        if is_today and quotes and sym in quotes:
-                            last_ltp = quotes[sym].last_price or quotes[sym].close or quotes[sym].open
+                        if is_today and quotes:
+                            q = quotes.get(sym) or quotes.get(clean) or quotes.get(f"NSE:{clean}-EQ")
+                            if q:
+                                last_ltp = q.last_price or q.close or q.open
                         
                         if last_ltp is None:
                             sym_tgt = tgt_df[tgt_df['symbol'] == sym]
+                            if sym_tgt.empty:
+                                sym_tgt = tgt_df[tgt_df['symbol'].apply(_clean_sym) == clean]
                             if not sym_tgt.empty:
                                 last_ltp = float(sym_tgt.iloc[-1]['close'])
                         
@@ -530,33 +547,75 @@ else:
                             val = rsi.iloc[-1]
                             if pd.notna(val):
                                 rsi_dict[sym] = round(val, 1)
+                                rsi_dict[clean] = round(val, 1)
+                                rsi_dict[f"NSE:{clean}-EQ"] = round(val, 1)
             except Exception as e:
                 pass
 
+        # Build fast lookup map for df_all and tgt_df by cleaned symbol
+        df_all_cleaned = df_all.copy()
+        df_all_cleaned['_clean'] = df_all_cleaned['symbol'].apply(_clean_sym)
+        tgt_df_cleaned = tgt_df.copy()
+        tgt_df_cleaned['_clean'] = tgt_df_cleaned['symbol'].apply(_clean_sym)
+
         for sym in symbols:
-            sym_df_full = df_all[df_all['symbol'] == sym].sort_values('timestamp').copy()
-            sym_df = tgt_df[tgt_df['symbol'] == sym].sort_values('timestamp').copy()
+            clean = _clean_sym(sym)
+            sym_df_full = df_all_cleaned[df_all_cleaned['_clean'] == clean].sort_values('timestamp')
+            sym_df = tgt_df_cleaned[tgt_df_cleaned['_clean'] == clean].sort_values('timestamp')
 
-            if sym_df_full.empty:
-                result[sym] = {"vwap": None, "vs_vwap": None, "daily_rsi": None}
-                continue
-
-            # 1. Intraday VWAP on target date 15m candles
             vwap_val = None
             vs_vwap = None
+            close_last = None
+
+            quote_obj = None
+            if quotes:
+                quote_obj = quotes.get(sym) or quotes.get(clean) or quotes.get(f"NSE:{clean}-EQ")
+
             if not sym_df.empty:
+                sym_df = sym_df.copy()
                 sym_df['tp'] = (sym_df['high'] + sym_df['low'] + sym_df['close']) / 3.0
-                cum_vol = sym_df['volume'].cumsum()
-                safe_cum_vol = cum_vol.replace(0, float('nan'))
-                vwap_series = (sym_df['tp'] * sym_df['volume']).cumsum() / safe_cum_vol
-                vwap_val = float(vwap_series.iloc[-1]) if not vwap_series.dropna().empty else None
+                vol_sum = sym_df['volume'].sum()
+                if vol_sum > 0:
+                    cum_vol = sym_df['volume'].cumsum()
+                    safe_cum_vol = cum_vol.replace(0, float('nan'))
+                    vwap_series = (sym_df['tp'] * sym_df['volume']).cumsum() / safe_cum_vol
+                    vwap_val = float(vwap_series.dropna().iloc[-1]) if not vwap_series.dropna().empty else float(sym_df['tp'].iloc[-1])
+                else:
+                    vwap_val = float(sym_df['tp'].iloc[-1])
                 close_last = float(sym_df['close'].iloc[-1])
-                vs_vwap = ((close_last - vwap_val) / vwap_val * 100) if vwap_val and vwap_val > 0 else None
 
-            # 2. Daily RSI (14-Day) from pre-calculated dictionary
-            daily_rsi_val = rsi_dict.get(sym)
+            # Fallback for live quotes if target date bars not in DB
+            if vwap_val is None and quote_obj:
+                q_ltp = quote_obj.last_price or quote_obj.close
+                q_open = quote_obj.open or q_ltp
+                q_high = quote_obj.high or q_ltp
+                q_low = quote_obj.low or q_ltp
+                if q_high and q_low and q_ltp:
+                    vwap_val = round(float(q_high + q_low + q_ltp) / 3.0, 2)
+                    close_last = float(q_ltp)
 
-            result[sym] = {"vwap": vwap_val, "vs_vwap": vs_vwap, "daily_rsi": daily_rsi_val}
+            # Fallback to historical full dataframe if still None
+            if vwap_val is None and not sym_df_full.empty:
+                sym_df_full = sym_df_full.copy()
+                sym_df_full['tp'] = (sym_df_full['high'] + sym_df_full['low'] + sym_df_full['close']) / 3.0
+                vwap_val = float(sym_df_full['tp'].iloc[-1])
+                close_last = float(sym_df_full['close'].iloc[-1])
+
+            if quote_obj and (quote_obj.last_price or quote_obj.close):
+                close_last = float(quote_obj.last_price or quote_obj.close)
+
+            if vwap_val is not None and close_last is not None and vwap_val > 0:
+                vs_vwap = ((close_last - vwap_val) / vwap_val * 100)
+            elif vwap_val is not None:
+                vs_vwap = 0.0
+
+            daily_rsi_val = rsi_dict.get(sym) or rsi_dict.get(clean) or rsi_dict.get(f"NSE:{clean}-EQ")
+
+            entry = {"vwap": vwap_val, "vs_vwap": vs_vwap, "daily_rsi": daily_rsi_val}
+            result[sym] = entry
+            result[clean] = entry
+            result[f"NSE:{clean}-EQ"] = entry
+
         return result
 
     # Pre-calculate global leaderboards
@@ -736,8 +795,8 @@ else:
 
     raw_near_bo, raw_near_bd = _compute_near_breakout_breakdown(df, merged_closes, target_date)
 
-    _gl_symbols = list(top_gainers['symbol'].values) + list(top_losers['symbol'].values) + [x['symbol'] for x in raw_near_bo] + [x['symbol'] for x in raw_near_bd]
-    _indicators = _compute_vwap_rsi(df, list(set(_gl_symbols)), target_date, is_today=is_today, quotes=quotes)
+    _all_scope_symbols = list(merged_closes['symbol'].unique()) if 'symbol' in merged_closes.columns else list(set(_gl_symbols))
+    _indicators = _compute_vwap_rsi(df, _all_scope_symbols, target_date, is_today=is_today, quotes=quotes)
 
     gainers_data = []
     for idx, row in top_gainers.iterrows():
@@ -752,7 +811,7 @@ else:
             vs_label = f"🔴 {vs:.1f}x"
         else:
             vs_label = "⚪ N/A"
-        ind = _indicators.get(row['symbol'], {})
+        ind = _indicators.get(row['symbol']) or _indicators.get(sym_clean) or {}
         rsi_v = ind.get('daily_rsi')
         vwap_v = ind.get('vwap')
         vs_vwap = ind.get('vs_vwap')
@@ -765,7 +824,7 @@ else:
             rsi_label = f"🧊 {rsi_v:.0f}"
         else:
             rsi_label = f"{rsi_v:.0f}"
-        vwap_v = ind.get('vwap')
+        
         if vs_vwap is None:
             vwap_label = "—"
         elif vs_vwap > 0:
@@ -800,8 +859,9 @@ else:
             vs_label = f"🔴 {vs:.1f}x"
         else:
             vs_label = "⚪ N/A"
-        ind = _indicators.get(row['symbol'], {})
+        ind = _indicators.get(row['symbol']) or _indicators.get(sym_clean) or {}
         rsi_v = ind.get('daily_rsi')
+        vwap_v = ind.get('vwap')
         vs_vwap = ind.get('vs_vwap')
         if rsi_v is None:
             rsi_label = "—"
@@ -811,7 +871,7 @@ else:
             rsi_label = f"🧊 {rsi_v:.0f}"
         else:
             rsi_label = f"{rsi_v:.0f}"
-        vwap_v = ind.get('vwap')
+        
         if vs_vwap is None:
             vwap_label = "—"
         elif vs_vwap > 0:
@@ -839,7 +899,7 @@ else:
         sym_clean = item['symbol'].replace("NSE:", "").replace("-EQ", "")
         vs = item.get('vol_surge', 0)
         vs_label = f"🟢 {vs:.1f}x" if vs >= 1.5 else (f"🟡 {vs:.1f}x" if vs >= 1.0 else (f"🔴 {vs:.1f}x" if vs > 0 else "⚪ N/A"))
-        ind = _indicators.get(item['symbol'], {})
+        ind = _indicators.get(item['symbol']) or _indicators.get(sym_clean) or {}
         rsi_v = ind.get('daily_rsi')
         vs_vwap = ind.get('vs_vwap')
         rsi_label = f"🔥 {rsi_v:.0f}" if rsi_v and rsi_v >= 70 else (f"🧊 {rsi_v:.0f}" if rsi_v and rsi_v <= 30 else (f"{rsi_v:.0f}" if rsi_v else "—"))
@@ -861,7 +921,7 @@ else:
         sym_clean = item['symbol'].replace("NSE:", "").replace("-EQ", "")
         vs = item.get('vol_surge', 0)
         vs_label = f"🟢 {vs:.1f}x" if vs >= 1.5 else (f"🟡 {vs:.1f}x" if vs >= 1.0 else (f"🔴 {vs:.1f}x" if vs > 0 else "⚪ N/A"))
-        ind = _indicators.get(item['symbol'], {})
+        ind = _indicators.get(item['symbol']) or _indicators.get(sym_clean) or {}
         rsi_v = ind.get('daily_rsi')
         vs_vwap = ind.get('vs_vwap')
         rsi_label = f"🔥 {rsi_v:.0f}" if rsi_v and rsi_v >= 70 else (f"🧊 {rsi_v:.0f}" if rsi_v and rsi_v <= 30 else (f"{rsi_v:.0f}" if rsi_v else "—"))
@@ -1117,7 +1177,8 @@ else:
                 rsi_labels = []
                 vwap_labels = []
                 for sym in sector_stocks_df['symbol']:
-                    ind = _indicators.get(sym, {})
+                    clean_s = sym.replace("NSE:", "").replace("-EQ", "")
+                    ind = _indicators.get(sym) or _indicators.get(clean_s) or {}
                     rsi_v = ind.get('daily_rsi')
                     vs_vwap = ind.get('vs_vwap')
                     if rsi_v is None:
