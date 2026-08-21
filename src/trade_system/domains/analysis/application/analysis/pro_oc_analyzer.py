@@ -16,6 +16,7 @@ Key analytics:
 """
 
 import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -528,6 +529,262 @@ def generate_pro_summary(
         )
 
     return "\n\n".join(lines) if lines else "Insufficient data to generate pro-trader summary."
+
+
+# ---------------------------------------------------------------------------
+#  9. Dealer Net Gamma Exposure (GEX) & Gamma Flip Level
+# ---------------------------------------------------------------------------
+
+def compute_gex_profile(
+    df: pd.DataFrame,
+    spot_price: float,
+    strike_step: int = 50,
+    n_strikes: int = 12,
+) -> Dict[str, Any]:
+    """
+    Calculate Dealer Net Gamma Exposure (GEX) per strike and overall Market Regime.
+
+    Dealer Position Assumptions:
+    - Retail buys Calls → Dealer is Short Calls → Dealer Net Gamma = - (Gamma * Call OI * 100 * Spot)
+    - Retail buys Puts → Dealer is Long Puts / Short Puts depending on model, standard GEX convention:
+      - Call GEX = + (Gamma * Call OI * LotSize * Spot)
+      - Put GEX  = - (Gamma * Put OI * LotSize * Spot)  (because dealers are long puts when retail buys puts)
+
+    Total Net GEX > 0 → Long Gamma Regime: Market Makers buy dips & sell rallies → Volatility Dampened (Mean Reverting)
+    Total Net GEX < 0 → Short Gamma Regime: Market Makers sell dips & buy rallies → Volatility Acceleration (Trending / Volatile)
+
+    Gamma Flip Level: The strike price where cumulative / per-strike net GEX crosses 0.
+    """
+    if df.empty or spot_price is None or spot_price <= 0:
+        return {
+            "gex_by_strike": [],
+            "total_net_gex": 0.0,
+            "gamma_regime": "NEUTRAL",
+            "gamma_flip_level": spot_price,
+            "description": "Insufficient data to calculate Gamma Exposure."
+        }
+
+    atm = _round_to_strike(spot_price, strike_step)
+    nearby = df[df["strike"].apply(lambda s: abs(s - atm) <= n_strikes * strike_step)].copy()
+
+    # Determine lot size based on spot price heuristic (Nifty=25/50/75, Banknifty=15, etc)
+    lot_size = 25 if spot_price > 15000 and spot_price < 30000 else (15 if spot_price >= 40000 else 50)
+
+    gex_list = []
+    total_net_gex = 0.0
+    strikes = sorted(nearby["strike"].unique())
+
+    for s in strikes:
+        ce_row = nearby[(nearby["strike"] == s) & (nearby["option_type"] == "CE")]
+        pe_row = nearby[(nearby["strike"] == s) & (nearby["option_type"] == "PE")]
+
+        ce_oi = float(ce_row["oi"].iloc[0]) if not ce_row.empty and pd.notna(ce_row["oi"].iloc[0]) else 0.0
+        pe_oi = float(pe_row["oi"].iloc[0]) if not pe_row.empty and pd.notna(pe_row["oi"].iloc[0]) else 0.0
+
+        ce_gamma = float(ce_row["gamma"].iloc[0]) if not ce_row.empty and pd.notna(ce_row["gamma"].iloc[0]) else 0.0
+        pe_gamma = float(pe_row["gamma"].iloc[0]) if not pe_row.empty and pd.notna(pe_row["gamma"].iloc[0]) else 0.0
+
+        # Standard Black-Scholes GEX formula in Millions
+        # Call GEX (Positive for dealer) = Gamma * Call_OI * Lot_Size * Spot^2 / 100
+        # Put GEX (Negative for dealer) = - Gamma * Put_OI * Lot_Size * Spot^2 / 100
+        spot_scale = (spot_price / 100.0)
+        call_gex = ce_gamma * ce_oi * lot_size * spot_scale
+        put_gex = - (pe_gamma * pe_oi * lot_size * spot_scale)
+        net_gex = call_gex + put_gex
+
+        total_net_gex += net_gex
+
+        gex_list.append({
+            "strike": float(s),
+            "call_gex": round(call_gex, 2),
+            "put_gex": round(put_gex, 2),
+            "net_gex": round(net_gex, 2),
+            "is_atm": abs(s - atm) < strike_step
+        })
+
+    # Find Gamma Flip Level (strike where Net GEX flips sign or lowest GEX point)
+    gamma_flip_level = atm
+    if len(gex_list) > 1:
+        # Find zero crossing or min net gex strike
+        prev_gex = gex_list[0]["net_gex"]
+        for item in gex_list[1:]:
+            if (prev_gex < 0 and item["net_gex"] >= 0) or (prev_gex >= 0 and item["net_gex"] < 0):
+                gamma_flip_level = item["strike"]
+                break
+            prev_gex = item["net_gex"]
+
+    # Classify Regime
+    if total_net_gex > 50.0:
+        gamma_regime = "LONG GAMMA (VOLATILITY DAMPENED / RANGEBOUND)"
+        desc = f"Market is in LONG GAMMA regime (+{total_net_gex:.1f} M GEX). Dealers act as buffers, buying dips and selling rallies. Expect rangebound/pinned action near ₹{atm:.0f}."
+    elif total_net_gex < -50.0:
+        gamma_regime = "SHORT GAMMA (HIGH VOLATILITY / TREND ACCELERATION)"
+        desc = f"Market is in SHORT GAMMA regime ({total_net_gex:.1f} M GEX). Dealers must hedge in the direction of the trend. Breaks below ₹{gamma_flip_level:.0f} will accelerate market declines rapidly."
+    else:
+        gamma_regime = "NEUTRAL / TRANSITIONAL GAMMA"
+        desc = f"Market is near the Gamma Flip transition level (₹{gamma_flip_level:.0f}). Watch for momentum expansion if price breaks out."
+
+    return {
+        "gex_by_strike": gex_list,
+        "total_net_gex": round(total_net_gex, 2),
+        "gamma_regime": gamma_regime,
+        "gamma_flip_level": float(gamma_flip_level),
+        "description": desc
+    }
+
+
+# ---------------------------------------------------------------------------
+#  10. Institutional Big Money / Large Lot Position Tracker
+# ---------------------------------------------------------------------------
+
+def compute_institutional_big_money(
+    current_df: pd.DataFrame,
+    first_df: Optional[pd.DataFrame],
+    spot_price: float,
+    strike_step: int = 50,
+) -> Dict[str, Any]:
+    """
+    Track Institutional Big Lot / High Notional Activity.
+    Filters out retail noise to isolate strikes where high institutional exposure is building up.
+    """
+    if current_df.empty or spot_price is None:
+        return {"big_lot_strikes": [], "institutional_bias": "NEUTRAL", "total_notional_flow": 0.0}
+
+    atm = _round_to_strike(spot_price, strike_step)
+    df = _merge_with_first(current_df, first_df, atm, strike_step, n_strikes=10)
+
+    lot_size = 25 if spot_price > 15000 and spot_price < 30000 else (15 if spot_price >= 40000 else 50)
+
+    big_lots = []
+    bullish_notional = 0.0
+    bearish_notional = 0.0
+
+    for _, row in df.iterrows():
+        oi_chg = row["oi_change_day"]
+        ltp = float(row["ltp"])
+        opt = row["option_type"]
+        strike = float(row["strike"])
+        ltp_chg = float(row["ltp_change_day"])
+
+        # Notional Exposure Flow in Lakhs (INR 100,000)
+        # Notional Value = abs(oi_chg) * Lot_Size * Strike / 100,000
+        notional_flow_lakhs = (abs(oi_chg) * lot_size * strike) / 100_000.0
+        premium_flow_lakhs = (abs(oi_chg) * lot_size * ltp) / 100_000.0
+
+        # Buildup logic
+        if oi_chg > 0 and ltp_chg > 0:
+            action = "Call Buying" if opt == "CE" else "Put Buying"
+            bias = "BULLISH" if opt == "CE" else "BEARISH"
+        elif oi_chg > 0 and ltp_chg <= 0:
+            action = "Call Writing" if opt == "CE" else "Put Writing"
+            bias = "BEARISH" if opt == "CE" else "BULLISH"
+        elif oi_chg < 0 and ltp_chg < 0:
+            action = "Call Unwinding" if opt == "CE" else "Put Unwinding"
+            bias = "BEARISH" if opt == "CE" else "BULLISH"
+        else:
+            action = "Call Covering" if opt == "CE" else "Put Covering"
+            bias = "BULLISH" if opt == "CE" else "BEARISH"
+
+        if bias == "BULLISH":
+            bullish_notional += notional_flow_lakhs
+        elif bias == "BEARISH":
+            bearish_notional += notional_flow_lakhs
+
+        # Include strikes with substantial intraday capital commitment (> ₹50 Lakhs Notional)
+        if notional_flow_lakhs >= 50.0 or abs(oi_chg) >= 1000:
+            big_lots.append({
+                "strike": strike,
+                "option_type": opt,
+                "oi": int(row["oi"]),
+                "oi_change": int(oi_chg),
+                "ltp": ltp,
+                "action": action,
+                "bias": bias,
+                "notional_flow_lakhs": round(notional_flow_lakhs, 1),
+                "premium_flow_lakhs": round(premium_flow_lakhs, 1),
+            })
+
+    # Sort big lots by highest notional flow
+    big_lots = sorted(big_lots, key=lambda x: x["notional_flow_lakhs"], reverse=True)
+
+    if bullish_notional > bearish_notional * 1.3:
+        institutional_bias = "INSTITUTIONAL BULLISH ACCUMULATION"
+    elif bearish_notional > bullish_notional * 1.3:
+        institutional_bias = "INSTITUTIONAL BEARISH DISTRIBUTION"
+    else:
+        institutional_bias = "BALANCED INSTITUTIONAL FLOW"
+
+    return {
+        "big_lot_strikes": big_lots,
+        "institutional_bias": institutional_bias,
+        "bullish_notional_lakhs": round(bullish_notional, 1),
+        "bearish_notional_lakhs": round(bearish_notional, 1),
+        "total_notional_flow_lakhs": round(bullish_notional + bearish_notional, 1),
+    }
+
+
+# ---------------------------------------------------------------------------
+#  11. Institutional Wall Shift Tracking
+# ---------------------------------------------------------------------------
+
+def compute_wall_shifts(
+    snapshots: List[Tuple[datetime, pd.DataFrame]],
+    spot_price: float,
+    strike_step: int = 50,
+) -> Dict[str, Any]:
+    """
+    Track how Call Wall (Resistance) and Put Wall (Support) have shifted across intraday snapshots.
+    - Call Wall moving UP (e.g. 24400 → 24500) = Bullish Roll-up (Resistance receding)
+    - Put Wall moving DOWN (e.g. 24200 → 24000) = Bearish Step-down (Support breaking)
+    """
+    if not snapshots or spot_price is None:
+        return {"wall_history": [], "call_wall_shift": "STABLE", "put_wall_shift": "STABLE"}
+
+    history = []
+    for ts_item, oc_item in snapshots:
+        if oc_item.empty:
+            continue
+        ce_max = oc_item[oc_item["option_type"] == "CE"].nlargest(1, "oi")
+        pe_max = oc_item[oc_item["option_type"] == "PE"].nlargest(1, "oi")
+
+        call_wall = float(ce_max.iloc[0]["strike"]) if not ce_max.empty else 0.0
+        put_wall = float(pe_max.iloc[0]["strike"]) if not pe_max.empty else 0.0
+
+        history.append({
+            "timestamp": ts_item.strftime("%H:%M:%S") if isinstance(ts_item, datetime) else str(ts_item),
+            "call_wall": call_wall,
+            "put_wall": put_wall,
+        })
+
+    if len(history) < 2:
+        return {"wall_history": history, "call_wall_shift": "STABLE", "put_wall_shift": "STABLE"}
+
+    first_call_wall = history[0]["call_wall"]
+    latest_call_wall = history[-1]["call_wall"]
+    first_put_wall = history[0]["put_wall"]
+    latest_put_wall = history[-1]["put_wall"]
+
+    if latest_call_wall > first_call_wall:
+        call_shift = "BULLISH ROLL-UP (Resistance moved UP)"
+    elif latest_call_wall < first_call_wall:
+        call_shift = "BEARISH STEP-DOWN (Resistance pressed DOWN)"
+    else:
+        call_shift = "STABLE (Resistance holding firm)"
+
+    if latest_put_wall > first_put_wall:
+        put_shift = "BULLISH STEP-UP (Support moved UP)"
+    elif latest_put_wall < first_put_wall:
+        put_shift = "BEARISH ROLL-DOWN (Support weakened DOWN)"
+    else:
+        put_shift = "STABLE (Support holding firm)"
+
+    return {
+        "wall_history": history,
+        "call_wall_shift": call_shift,
+        "put_wall_shift": put_shift,
+        "initial_range": f"₹{first_put_wall:.0f} - ₹{first_call_wall:.0f}",
+        "current_range": f"₹{latest_put_wall:.0f} - ₹{latest_call_wall:.0f}",
+    }
 
 
 # ---------------------------------------------------------------------------

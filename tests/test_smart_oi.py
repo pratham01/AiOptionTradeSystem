@@ -82,17 +82,28 @@ def run_tests():
         else:
             print("⚠️ No signal strikes passed the filter criteria.")
 
-        # 4. Test Confluence & Divergence detection
-        print("\n--- Test 4: Confluence & Divergence Detection ---")
-        if not ohlcv_df.empty:
-            confluence = analyzer.detect_confluence_divergence(analysis["signal"], ohlcv_df)
-            print(f" • Status: {confluence['status']}")
-            print(f" • Price Trend: {confluence['price_trend']}")
-            print(f" • Volume Expansion: {confluence['volume_expansion']}")
-            print(f" • VWAP Level: ₹{confluence['vwap']:.2f}")
-            print(f" • Swarm Narrative: {confluence['narrative']}")
-        else:
-            print("⚠️ Skipped confluence detection due to missing OHLCV data.")
+        # 5. Test Market Direction Analysis & Trade Setup Generation
+        print("\n--- Test 5: Market Direction & Trade Setup Generation ---")
+        trade_setups = analyzer.generate_trade_setups(current_df, prev_df, ohlcv_df, spot_price=spot_price)
+        dir_analysis = trade_setups["directional_analysis"]
+        intra_setup = trade_setups["intraday_setup"]
+        swing_setup = trade_setups["swing_setup"]
+
+        print(f" • Intraday Direction: {dir_analysis['intraday_direction']} (Score: {dir_analysis['intraday_score']}/100)")
+        print(f" • Swing Direction: {dir_analysis['swing_direction']} (Score: {dir_analysis['swing_score']}/100)")
+        print(f" • Gamma Regime: {dir_analysis['gamma_regime']}")
+        print(f" • Gamma Flip Level: ₹{dir_analysis['gamma_flip_level']:,.0f}")
+        print(f" • Wall Shift Status: {dir_analysis['wall_shift_status']}")
+        
+        print(f"\n⚡ INTRADAY BLUEPRINT ({intra_setup['type']}):")
+        print(f"   Contract: {intra_setup['option_contract']}")
+        print(f"   Entry: {intra_setup['entry_zone']} | SL: {intra_setup['stop_loss']} | T1: {intra_setup['target_1']}")
+        print(f"   Rationale: {intra_setup['rationale']}")
+
+        print(f"\n🌊 SWING BLUEPRINT ({swing_setup['type']}):")
+        print(f"   Strategy: {swing_setup['recommended_strategy']}")
+        print(f"   Entry: {swing_setup['entry_zone']} | SL: {swing_setup['stop_loss']} | Target: {swing_setup['target']}")
+        print(f"   Rationale: {swing_setup['rationale']}")
 
     print("\n🎉 Verification tests completed successfully!")
 

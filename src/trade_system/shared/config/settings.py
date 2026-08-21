@@ -228,90 +228,104 @@ class Settings:
         return self.st_confirmed_telegram.chat_id
 
     @classmethod
-    def load(cls, env_file: str = ".env") -> "Settings":
-        """Load settings from environment file."""
+    def load(cls, env_file: str = ".env", secrets_provider=None) -> "Settings":
+        """Load settings from environment file and optional secrets provider.
+
+        Args:
+            env_file: Path to .env file for environment variable loading.
+            secrets_provider: Optional SecretsProvider instance. If None, uses
+                the default provider based on SECRETS_PROVIDER env var.
+        """
         load_dotenv(env_file, override=True)
 
-        # Parse broker settings
+        # Initialize secrets provider for sensitive values
+        if secrets_provider is None:
+            from trade_system.shared.config.secrets_provider import get_secrets_provider
+            secrets_provider = get_secrets_provider()
+
+        def _secret(key: str, default: str = "") -> str:
+            """Resolve a value from secrets provider, falling back to os.getenv."""
+            return secrets_provider.get_secret(key, default) if secrets_provider else os.getenv(key, default)
+
+
+        # Parse broker settings — sensitive fields use _secret()
         fyers_config = FyersConfig(
-            client_id=os.getenv("FYERS_CLIENT_ID", ""),
-            user_id=os.getenv("FYERS_USER_ID", ""),
-            secret_key=os.getenv("FYERS_SECRET_KEY", ""),
+            client_id=_secret("FYERS_CLIENT_ID"),
+            user_id=_secret("FYERS_USER_ID"),
+            secret_key=_secret("FYERS_SECRET_KEY"),
             redirect_uri=os.getenv(
                 "FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html"
             ),
-            pin=os.getenv("FYERS_PIN", ""),
-            totp_secret=os.getenv("FYERS_TOTP_SECRET", ""),
-            access_token=os.getenv("FYERS_ACCESS_TOKEN", ""),
+            pin=_secret("FYERS_PIN"),
+            totp_secret=_secret("FYERS_TOTP_SECRET"),
+            access_token=_secret("FYERS_ACCESS_TOKEN"),
             token_path=_parse_path(os.getenv("FYERS_TOKEN_PATH"), ".secrets/fyers_token.json"),
             enabled=_parse_bool(os.getenv("FYERS_ENABLED"), True),
             priority=int(os.getenv("FYERS_PRIORITY", "1")),
         )
 
         dhan_config = DhanConfig(
-            client_id=os.getenv("DHAN_CLIENT_ID", ""),
-            api_key=os.getenv("DHAN_API_KEY", ""),
-            access_token=os.getenv("DHAN_ACCESS_TOKEN", ""),
+            client_id=_secret("DHAN_CLIENT_ID"),
+            api_key=_secret("DHAN_API_KEY"),
+            access_token=_secret("DHAN_ACCESS_TOKEN"),
             token_path=_parse_path(os.getenv("DHAN_TOKEN_PATH"), ".secrets/dhan_token.json"),
             enabled=_parse_bool(os.getenv("DHAN_ENABLED"), False),
             priority=int(os.getenv("DHAN_PRIORITY", "2")),
         )
 
-        # Parse telegram settings
+        # Parse telegram settings — tokens are sensitive
+        tg_token = _secret("TELEGRAM_BOT_TOKEN")
+        tg_chat = _secret("TELEGRAM_CHAT_ID")
         telegram_config = TelegramConfig(
-            bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
-            enabled=bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")),
+            bot_token=tg_token,
+            chat_id=tg_chat,
+            enabled=bool(tg_token and tg_chat),
         )
 
+        st_token = _secret("ST_CONFIRMED_TELEGRAM_BOT_TOKEN")
+        st_chat = _secret("ST_CONFIRMED_TELEGRAM_CHAT_ID")
         st_telegram_config = TelegramConfig(
-            bot_token=os.getenv("ST_CONFIRMED_TELEGRAM_BOT_TOKEN", ""),
-            chat_id=os.getenv("ST_CONFIRMED_TELEGRAM_CHAT_ID", ""),
-            enabled=bool(
-                os.getenv("ST_CONFIRMED_TELEGRAM_BOT_TOKEN")
-                and os.getenv("ST_CONFIRMED_TELEGRAM_CHAT_ID")
-            ),
+            bot_token=st_token,
+            chat_id=st_chat,
+            enabled=bool(st_token and st_chat),
         )
 
+        tg_token = _secret("TELEGRAM_TOP_GAINER_TOKEN")
+        tg_chat = _secret("TELEGRAM_TOP_GAINER_CHAT_ID")
         top_gainer_telegram_config = TelegramConfig(
-            bot_token=os.getenv("TELEGRAM_TOP_GAINER_TOKEN", ""),
-            chat_id=os.getenv("TELEGRAM_TOP_GAINER_CHAT_ID", ""),
-            enabled=bool(
-                os.getenv("TELEGRAM_TOP_GAINER_TOKEN")
-                and os.getenv("TELEGRAM_TOP_GAINER_CHAT_ID")
-            ),
+            bot_token=tg_token,
+            chat_id=tg_chat,
+            enabled=bool(tg_token and tg_chat),
         )
 
+        ts_token = _secret("TELEGRAM_TOP_SECTOR_TOKEN")
+        ts_chat = _secret("TELEGRAM_TOP_SECTORS_CHAT_ID")
         top_sectors_telegram_config = TelegramConfig(
-            bot_token=os.getenv("TELEGRAM_TOP_SECTOR_TOKEN", ""),
-            chat_id=os.getenv("TELEGRAM_TOP_SECTORS_CHAT_ID", ""),
-            enabled=bool(
-                os.getenv("TELEGRAM_TOP_SECTOR_TOKEN")
-                and os.getenv("TELEGRAM_TOP_SECTORS_CHAT_ID")
-            ),
+            bot_token=ts_token,
+            chat_id=ts_chat,
+            enabled=bool(ts_token and ts_chat),
         )
 
         whatsapp_config = WhatsappConfig(
-            phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""),
-            access_token=os.getenv("WHATSAPP_ACCESS_TOKEN", ""),
-            to_number=os.getenv("WHATSAPP_TO_NUMBER", ""),
+            phone_number_id=_secret("WHATSAPP_PHONE_NUMBER_ID"),
+            access_token=_secret("WHATSAPP_ACCESS_TOKEN"),
+            to_number=_secret("WHATSAPP_TO_NUMBER"),
             enabled=_parse_bool(os.getenv("WHATSAPP_ENABLED"), False),
         )
 
         # Parse LLM settings
-        # Preference: Gemini 1.5 Pro (The requested "Brain"), but respect LLM_PROVIDER if explicitly set
         llm_provider = os.getenv("LLM_PROVIDER")
         if not llm_provider:
-             llm_provider = "gemini" if os.getenv("GOOGLE_API_KEY") else "openai"
-             
+             llm_provider = "gemini" if _secret("GOOGLE_API_KEY") else "openai"
+
         llm_model = os.getenv("LLM_MODEL")
         if not llm_model:
              llm_model = "gemini-1.5-pro" if llm_provider == "gemini" else "gpt-4o-mini"
-             
+
         llm_config = LlmConfig(
             provider=llm_provider,
             model=llm_model,
-            api_key=os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY", ""),
+            api_key=_secret("LLM_API_KEY") or _secret("OPENAI_API_KEY") or _secret("GOOGLE_API_KEY"),
             base_url=os.getenv("LLM_BASE_URL"),
             timeout=int(os.getenv("LLM_TIMEOUT", "120")),
         )

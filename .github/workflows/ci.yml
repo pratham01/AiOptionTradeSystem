@@ -7,27 +7,58 @@ on:
     branches: [ main, master ]
 
 jobs:
-  test-and-lint:
+  lint:
+    name: Lint (Ruff)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e ".[all]"
-        
-    - name: Check typing with mypy
-      run: mypy src/trade_system tests || true # Allowing failures initially
-        
-    - name: Lint with ruff
-      run: ruff check src/trade_system tests || true # Allowing failures initially
-        
-    - name: Run tests
-      run: pytest tests/ --maxfail=3 --disable-warnings -v || true # Allowing failures initially
+    - run: pip install ruff
+    - run: ruff check src/trade_system tests
+
+  type-check:
+    name: Type Check (MyPy)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    - run: pip install -e ".[all]"
+    - run: mypy src/trade_system --ignore-missing-imports
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    - run: pip install -e ".[all]"
+    - run: pytest tests/ -v --tb=short --maxfail=5 -x
+
+  security:
+    name: Security Scan (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - run: pip install bandit
+    - run: bandit -r src/trade_system -ll -ii --skip B101
+
+  docker-build:
+    name: Docker Build
+    needs: [lint, type-check, test, security]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build Docker image
+      run: docker build -t trade-system:${{ github.sha }} .
+    - name: Verify image runs
+      run: docker run --rm trade-system:${{ github.sha }} python -c "import trade_system; print('OK')"

@@ -77,6 +77,13 @@ from trade_system.interfaces.live.pipelines.orb_pipeline import OrbPipeline
 from trade_system.interfaces.live.pipelines.sr_pipeline import SrPipeline
 from trade_system.interfaces.live.pipelines.gamma_pipeline import GammaPipeline
 
+# ---------------------------------------------------------------------------
+# Observability: metrics, health checks, health HTTP server
+# ---------------------------------------------------------------------------
+from trade_system.shared.observability.metrics import METRICS
+from trade_system.shared.observability.health import HEALTH_CHECKER
+from trade_system.interfaces.live.health_server import start_health_server
+
 
 LOGGER = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -420,6 +427,15 @@ class LiveMarketDataService:
 
     def start(self) -> None:
         self._ensure_broker_session()
+
+        # Start health probe HTTP server (port 9090) for Docker/K8s
+        start_health_server(port=9090)
+        HEALTH_CHECKER.register_check("websocket", lambda: {
+            "status": "healthy" if self.ws_running else "unhealthy",
+            "connected": self.ws_running,
+        })
+        METRICS.set_gauge("active_symbols_count", len(self.symbols))
+
         from fyers_apiv3.FyersWebsocket import data_ws
 
         self.ws = data_ws.FyersDataSocket(
@@ -460,8 +476,12 @@ class LiveMarketDataService:
 
     def on_open(self) -> None:
         LOGGER.info("Websocket connected. Subscribing to %s", self.symbols)
-        self.ws.subscribe(symbols=self.symbols, data_type="SymbolUpdate")
-        self.ws.keep_running()
+        if self.ws is not None:
+            try:
+                self.ws.subscribe(symbols=self.symbols, data_type="SymbolUpdate")
+                self.ws.keep_running()
+            except Exception as e:
+                LOGGER.error("Failed to subscribe in on_open: %s", e)
 
     def on_message(self, message) -> None:
         payload = message if isinstance(message, list) else [message]
@@ -489,6 +509,7 @@ class LiveMarketDataService:
                 "volume": float(cumulative_volume),
             }
             self._process_tick(symbol, tick)
+            METRICS.increment("ticks_processed_total")
 
     def on_close(self, message) -> None:
         LOGGER.warning("Websocket closed: %s", message)
@@ -497,6 +518,7 @@ class LiveMarketDataService:
 
     def on_error(self, message) -> None:
         LOGGER.error("Websocket error: %s", message)
+        METRICS.increment("ws_errors_total")
         msg_str = str(message).lower()
         # Detect fatal token errors and request a refresh on the next cycle
         if "token" in msg_str or "-99" in msg_str or "-300" in msg_str:

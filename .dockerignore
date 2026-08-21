@@ -1,33 +1,57 @@
-# Git
+# Version control
 .git
+.github
 .gitignore
 
-# Secrets (never include in image)
-.env
-.secrets/
-
-# Python cache
-__pycache__/
+# Python caches
+__pycache__
 *.pyc
 *.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
+.mypy_cache
+.pytest_cache
+.ruff_cache
+*.egg-info
 
-# Large data files (mount as volumes at runtime)
-data/fo_historical/
-data/option_chain_data/
-reports/
-scratch/
+# Secrets — NEVER include in Docker image
+.env
+.env.*
+.secrets/
+.secrets.enc
 
-# Logs
-*.log
+# Database files — mounted as volumes, not baked into image
+*.db
+data/
+
+# Logs — mounted as volumes
 logs/
+*.log
 
-# Dev files
-*.ipynb
-.pre-commit-config.yaml
-docs/
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
-# macOS
+# OS files
 .DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg
+
+# Test / dev files
+tests/
+scratch/
+docs/
+reports/
+bb_backtest_validation.html
+temp_test.txt
+market_data/
+
+# Docker
+docker-compose*.yml
+Dockerfile
+.dockerignore

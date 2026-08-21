@@ -232,6 +232,107 @@ def determine_option_buyer_signal(
     return buyer_verdict, buyer_desc, buyer_color
 
 
+def render_institutional_direction_pulse(dir_analysis: dict):
+    """Render the top-level Institutional Market Direction & Gamma Pulse Meter."""
+    intra_dir = dir_analysis.get("intraday_direction", "NEUTRAL")
+    intra_score = dir_analysis.get("intraday_score", 0)
+    swing_dir = dir_analysis.get("swing_direction", "NEUTRAL")
+    swing_score = dir_analysis.get("swing_score", 0)
+    gex_regime = dir_analysis.get("gamma_regime", "NEUTRAL")
+    gex_flip = dir_analysis.get("gamma_flip_level", 0.0)
+    inst_bias = dir_analysis.get("institutional_bias", "NEUTRAL")
+    wall_status = dir_analysis.get("wall_shift_status", "")
+
+    intra_color = "#00d084" if "BULLISH" in intra_dir else ("#ff4d6d" if "BEARISH" in intra_dir else "#ffb703")
+    swing_color = "#00d084" if "BULLISH" in swing_dir else ("#ff4d6d" if "BEARISH" in swing_dir else "#00b4d8")
+    gex_color = "#ff4d6d" if "SHORT GAMMA" in gex_regime else ("#00d084" if "LONG GAMMA" in gex_regime else "#ffb703")
+
+    st.markdown(f"""
+    <div style="background:#161b22; padding:18px 22px; border-radius:12px; border:1px solid #30363d; margin-bottom:20px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <div style="font-size:1.1rem; font-weight:bold; color:#f0f6fc;">🏛️ Institutional Market Direction & Smart Money Pulse</div>
+            <div style="font-size:0.85rem; color:#8b949e; background:#21262d; padding:4px 10px; border-radius:6px;">{inst_bias}</div>
+        </div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px;">
+            <div style="background:#1e2130; padding:14px; border-radius:8px; border-left:5px solid {intra_color};">
+                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Intraday Directional Score</div>
+                <div style="font-size:1.4rem; font-weight:bold; color:{intra_color};">{intra_dir}</div>
+                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Score: <b>{intra_score:+d}</b> / 100</div>
+            </div>
+            <div style="background:#1e2130; padding:14px; border-radius:8px; border-left:5px solid {swing_color};">
+                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Swing Multi-Session Bias</div>
+                <div style="font-size:1.4rem; font-weight:bold; color:{swing_color};">{swing_dir}</div>
+                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Score: <b>{swing_score:+d}</b> / 100</div>
+            </div>
+            <div style="background:#1e2130; padding:14px; border-radius:8px; border-left:5px solid {gex_color};">
+                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Dealer Gamma Regime</div>
+                <div style="font-size:1.05rem; font-weight:bold; color:{gex_color};">{gex_regime}</div>
+                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Gamma Flip Level: <b>₹{gex_flip:,.0f}</b></div>
+            </div>
+        </div>
+        <div style="margin-top:10px; font-size:0.8rem; color:#8b949e;">
+            📊 <b>Wall Shifts:</b> {wall_status}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_trade_setups_panel(setups_dict: dict):
+    """Render Actionable Intraday & Swing Trade Setup Cards."""
+    intra = setups_dict.get("intraday_setup", {})
+    swing = setups_dict.get("swing_setup", {})
+
+    st.subheader("🎯 Actionable Trade Setups: Intraday & Swing")
+    st.caption("AI-generated trade blueprints derived from Institutional Smart OI flow, Gamma regimes, and Technical confluence.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(f"""
+        <div style="background:#1e2130; padding:18px; border-radius:12px; border-top:5px solid {intra.get('status_color', '#8b949e')}; border-left:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:15px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:0.8rem; color:#8b949e; font-weight:600; text-transform:uppercase;">⚡ Intraday Trade Blueprint</span>
+                <span style="font-size:0.8rem; background:#21262d; color:{intra.get('status_color')}; font-weight:bold; padding:2px 8px; border-radius:4px;">Conviction {intra.get('conviction_score')}</span>
+            </div>
+            <div style="font-size:1.3rem; font-weight:bold; color:{intra.get('status_color')}; margin-bottom:6px;">{intra.get('type')} ({intra.get('direction')})</div>
+            <div style="background:#161b22; padding:10px; border-radius:6px; font-size:0.85rem; color:#f0f6fc; margin-bottom:10px;">
+                <b>Recommended Contract:</b> <span style="color:#ffb703; font-weight:bold;">{intra.get('option_contract')}</span><br>
+                <b>Trigger:</b> {intra.get('actionable_trigger')}
+            </div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; font-size:0.8rem; text-align:center; margin-bottom:10px;">
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Entry Zone</span><br><b style="color:#f0f6fc;">{intra.get('entry_zone')}</b></div>
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Stop Loss</span><br><b style="color:#ff4d6d;">{intra.get('stop_loss')}</b></div>
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Target 1</span><br><b style="color:#00d084;">{intra.get('target_1')}</b></div>
+            </div>
+            <div style="font-size:0.8rem; color:#c9d1d9; line-height:1.4;">
+                💡 <b>Rationale:</b> {intra.get('rationale')}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col2:
+        st.markdown(f"""
+        <div style="background:#1e2130; padding:18px; border-radius:12px; border-top:5px solid {swing.get('status_color', '#8b949e')}; border-left:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:15px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span style="font-size:0.8rem; color:#8b949e; font-weight:600; text-transform:uppercase;">🌊 Swing Trade Blueprint ({swing.get('timeframe')})</span>
+                <span style="font-size:0.8rem; background:#21262d; color:{swing.get('status_color')}; font-weight:bold; padding:2px 8px; border-radius:4px;">Conviction {swing.get('conviction_score')}</span>
+            </div>
+            <div style="font-size:1.3rem; font-weight:bold; color:{swing.get('status_color')}; margin-bottom:6px;">{swing.get('type')}</div>
+            <div style="background:#161b22; padding:10px; border-radius:6px; font-size:0.85rem; color:#f0f6fc; margin-bottom:10px;">
+                <b>Strategy:</b> <span style="color:#00e6ff; font-weight:bold;">{swing.get('recommended_strategy')}</span>
+            </div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; font-size:0.8rem; text-align:center; margin-bottom:10px;">
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Entry Zone</span><br><b style="color:#f0f6fc;">{swing.get('entry_zone')}</b></div>
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Stop Loss</span><br><b style="color:#ff4d6d;">{swing.get('stop_loss')}</b></div>
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Target</span><br><b style="color:#00d084;">{swing.get('target')}</b></div>
+            </div>
+            <div style="font-size:0.8rem; color:#c9d1d9; line-height:1.4;">
+                💡 <b>Rationale:</b> {swing.get('rationale')}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
 def render_verdict_card(buyer_verdict: str, buyer_desc: str, buyer_color: str):
     """Render the Actionable Option Buyer Verdict card."""
     st.markdown(f"""
@@ -836,6 +937,79 @@ def render_tab_pro_trader(
                 }
             )
 
+    # ── Big Money Notional Tracker Table ──
+    st.markdown("### 💼 Big Money / Large Lot Position Tracker")
+    st.caption("Filters out retail lottery tickets to isolate strikes with substantial capital commitment (> ₹50 Lakhs Notional Exposure).")
+
+    big_money_data = pro_oc_analyzer.compute_institutional_big_money(latest_oc, first_oc, spot_price, analyzer.strike_step)
+    big_lots = big_money_data.get("big_lot_strikes", [])
+
+    if big_lots:
+        big_df = pd.DataFrame(big_lots)
+        big_df = big_df.rename(columns={
+            "strike": "Strike Price",
+            "option_type": "Type",
+            "oi": "Total OI",
+            "oi_change": "Daily OI Change",
+            "ltp": "LTP (₹)",
+            "action": "Institutional Action",
+            "bias": "Direction Bias",
+            "notional_flow_lakhs": "Notional Exposure (₹ Lakhs)",
+            "premium_flow_lakhs": "Premium Flow (₹ Lakhs)",
+        })
+        st.dataframe(
+            big_df[["Strike Price", "Type", "LTP (₹)", "Daily OI Change", "Institutional Action", "Direction Bias", "Notional Exposure (₹ Lakhs)", "Premium Flow (₹ Lakhs)"]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Strike Price": st.column_config.NumberColumn("Strike Price", format="₹%d"),
+                "LTP (₹)": st.column_config.NumberColumn("LTP", format="₹%.2f"),
+                "Daily OI Change": st.column_config.NumberColumn("OI Change", format="%+d"),
+                "Notional Exposure (₹ Lakhs)": st.column_config.NumberColumn("Notional Exposure", format="₹%.1f L"),
+                "Premium Flow (₹ Lakhs)": st.column_config.NumberColumn("Premium Flow", format="₹%.1f L"),
+            }
+        )
+    else:
+        st.info("No single strike reached > ₹50 Lakhs intraday notional exposure threshold yet.")
+
+    # ── Dealer Net GEX Profile Chart ──
+    st.markdown("### ⚡ Dealer Net Gamma Exposure (GEX) & Gamma Flip Level")
+    st.caption("Dealer Net Gamma reveals whether market makers are dampening volatility (Long Gamma) or accelerating trends (Short Gamma).")
+
+    gex_data = pro_oc_analyzer.compute_gex_profile(latest_oc, spot_price, analyzer.strike_step)
+    gex_list = gex_data.get("gex_by_strike", [])
+    if gex_list:
+        gex_df = pd.DataFrame(gex_list)
+        gex_df["color"] = gex_df["net_gex"].apply(lambda x: "#00d084" if x >= 0 else "#ff4d6d")
+
+        fig_gex = go.Figure()
+        fig_gex.add_trace(go.Bar(
+            x=gex_df["strike"],
+            y=gex_df["net_gex"],
+            marker_color=gex_df["color"],
+            name="Net GEX (M)",
+            hovertemplate="Strike: ₹%{x:,.0f}<br>Net GEX: %{y:.2f} M<extra></extra>"
+        ))
+
+        gex_flip = gex_data.get("gamma_flip_level", spot_price)
+        fig_gex.add_vline(
+            x=gex_flip,
+            line_dash="dash",
+            line_color="#ffb703",
+            annotation_text=f"Gamma Flip ₹{gex_flip:,.0f}",
+            annotation_position="top"
+        )
+
+        fig_gex.update_layout(
+            title=f"Net Dealer GEX Profile | Regime: {gex_data.get('gamma_regime')}",
+            xaxis_title="Strike Price",
+            yaxis_title="Dealer Net GEX (M INR)",
+            template="plotly_dark",
+            height=380,
+            margin=dict(l=20, r=20, t=50, b=20),
+        )
+        st.plotly_chart(fig_gex, use_container_width=True, key="dealer_gex_profile_chart")
+
     st.markdown("---")
     st.markdown("### 🧠 Pro Trader Actionable Insight")
     pro_narrative = pro_oc_analyzer.generate_pro_summary(
@@ -1107,6 +1281,20 @@ def run_dashboard():
         confluence_data = analyzer.detect_confluence_divergence(
             signal, snap_price_df if not snap_price_df.empty else price_df
         )
+
+    # Run Market Direction & Actionable Trade Setup Generator
+    trade_setups = analyzer.generate_trade_setups(
+        latest_oc, prev_oc, price_df, spot_price=spot_price
+    )
+    dir_analysis = trade_setups["directional_analysis"]
+
+    # --- 0. INSTITUTIONAL DIRECTION & SMART MONEY PULSE ---
+    render_institutional_direction_pulse(dir_analysis)
+
+    # --- 0.5 ACTIONABLE TRADE SETUPS (INTRADAY & SWING) ---
+    render_trade_setups_panel(trade_setups)
+
+    st.markdown("---")
 
     # --- 1. CURRENT SMART OI VERDICT & OPTION BUYER'S PANEL ---
     st.subheader("🚀 Option Buyer's Gamma & Short Covering Panel")

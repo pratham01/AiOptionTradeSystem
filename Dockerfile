@@ -45,11 +45,22 @@ ENV PYTHONPATH=/app/src
 # Copy application code
 COPY . /app/
 
-# Create required directories with correct permissions
-RUN mkdir -p /app/logs /app/data /app/data/option_chain_data
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser -d /app appuser
 
-# Expose Streamlit port
-EXPOSE 8502
+# Create required directories with correct permissions
+RUN mkdir -p /app/logs /app/data /app/data/option_chain_data /app/data/backups \
+    && chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose ports: Streamlit (8502) + Health probe (9090)
+EXPOSE 8502 9090
+
+# Health check — verifies the process is alive and responsive
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:9090/health || exit 1
 
 # Default command (overridden by docker-compose)
 CMD ["python", "scripts/run_live_trading.py"]
