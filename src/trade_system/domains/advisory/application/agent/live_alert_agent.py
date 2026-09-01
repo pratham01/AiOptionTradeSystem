@@ -160,9 +160,15 @@ class LiveAlertAgent:
         self._try_execute_trade(symbol, 1 if direction == "CALL" else -1, price, sl, "GAP_AND_GO")
 
     def alert_orb(self, symbol: str, direction: str, price: float, sl: float):
-        """High-priority alert for 15-minute Opening Range Breakout."""
+        """High-priority alert for 15-minute Opening Range Breakout (Index only)."""
+        is_index = "INDEX" in symbol.upper()
+        if not is_index:
+            LOGGER.debug(f"Telegram ORB alert suppressed for FO stock {symbol}")
+            self._try_execute_trade(symbol, 1 if direction == "CALL" else -1, price, sl, "ORB")
+            return
+
         if getattr(self.settings, "enable_orb_telegram_alerts", True):
-            short_sym = symbol.split(':')[-1].replace('-EQ', '')
+            short_sym = symbol.split(':')[-1].replace('-INDEX', '')
             icon = "💥" if direction == "CALL" else "🌪️"
             message = (
                 f"{icon} <b>15M ORB BREAKOUT: {short_sym}</b>\n"

@@ -67,22 +67,17 @@ def run_live_trading_bot() -> int:
     configure_logging(settings.log_level)
     service = create_live_market_service(settings)
 
-    # ── Startup Data Backfill ──────────────────────────────────────────────────
-    # Backfill any missing historical data before the live stream starts.
-    # This ensures the dashboard always has recent data even if the bot was offline.
+    # ── Startup Data Sanity & Gap Healing ──────────────────────────────────────
+    # Validate data integrity and automatically heal any missing historical data
+    # across all F&O universe stocks and indices before starting live computations.
     try:
-        from trade_system.interfaces.live.data_sync_service import DataSyncService
-        LOGGER.info("Running startup data backfill (filling gaps in DB)...")
-        sync_svc = DataSyncService(broker=service.broker, settings=settings)
-        health = sync_svc.get_data_health_report()
-        needs_sync = any(not v["is_current"] for v in health.values())
-        if needs_sync:
-            totals = sync_svc.backfill_all(resolutions=["15", "D"])
-            LOGGER.info("Startup backfill complete: %s", totals)
-        else:
-            LOGGER.info("DB is current — skipping backfill")
+        from trade_system.domains.market_data.application.data_sanity_manager import DataSanityManager
+        LOGGER.info("Running pre-flight Data Sanity & Gap Healing for Indices and F&O stocks...")
+        sanity_mgr = DataSanityManager(broker=service.broker, settings=settings)
+        sanity_report = sanity_mgr.ensure_data_sanity_and_heal(resolutions=["15", "D"])
+        LOGGER.info("Pre-flight Data Sanity result: %s", sanity_report.summary())
     except Exception as _sync_err:
-        LOGGER.warning("Startup backfill failed (non-fatal): %s", _sync_err)
+        LOGGER.warning("Startup data sanity check failed (non-fatal): %s", _sync_err)
     # ─────────────────────────────────────────────────────────────────────────
 
     LOGGER.info(

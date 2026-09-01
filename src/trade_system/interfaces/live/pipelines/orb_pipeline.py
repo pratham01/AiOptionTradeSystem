@@ -85,7 +85,9 @@ class OrbPipeline:
         minute_data: dict[str, pd.DataFrame],
         current_date: date,
     ) -> None:
-        """Check whether the ORB range can be locked on this bar."""
+        """Check whether the ORB range can be locked on this bar (index only)."""
+        if not self._is_index(symbol):
+            return
         self.register_symbol(symbol)
         if self._candle[symbol] is not None:
             return  # Already locked today
@@ -108,19 +110,22 @@ class OrbPipeline:
             "close": float(first_15["close"].iloc[-1]),
         }
         self._candle[symbol] = candle
-        short_sym = self._short(symbol)
         LOGGER.info(
             "ORB locked for %s — High=%.2f Low=%.2f",
             symbol, candle["high"], candle["low"],
         )
+        self._send_reference_card(symbol, candle)
 
+    def _send_reference_card(self, symbol: str, candle: dict) -> None:
+        """Send the reference card (ORB locked) to both Telegram channels."""
+        if not self._is_index(symbol):
+            return
+        short_sym = self._short(symbol)
         ref_msg = (
-            f"📐 <b>Opening Range Set — {short_sym}</b>\n"
-            f"<i>First 15-min candle (9:15 – 9:29)</i>\n"
-            f"Open:  ₹{candle['open']:.2f}\n"
-            f"🔺 High: ₹{candle['high']:.2f}\n"
-            f"🔻 Low:  ₹{candle['low']:.2f}\n"
-            f"Range: ₹{candle['high'] - candle['low']:.2f} pts\n"
+            f"ℹ️ <b>15-Min ORB Candle Locked — {short_sym}</b>\n"
+            f"High : ₹{candle['high']:.2f}\n"
+            f"Low  : ₹{candle['low']:.2f}\n"
+            f"Range: {candle['high'] - candle['low']:.2f} pts\n\n"
             f"<i>Alerts will fire on breakout above ₹{candle['high']:.2f} "
             f"or breakdown below ₹{candle['low']:.2f}</i>"
         )
@@ -132,7 +137,9 @@ class OrbPipeline:
     # ------------------------------------------------------------------
 
     def on_tick(self, symbol: str, price: float, tick_time: datetime) -> None:
-        """Fire directional breakout alert when price crosses ORB boundaries."""
+        """Fire directional breakout alert when price crosses ORB boundaries (index only)."""
+        if not self._is_index(symbol):
+            return
         self.register_symbol(symbol)
         candle = self._candle.get(symbol)
         if not candle:
@@ -177,6 +184,10 @@ class OrbPipeline:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_index(symbol: str) -> bool:
+        return "INDEX" in symbol.upper()
 
     @staticmethod
     def _short(symbol: str) -> str:

@@ -93,6 +93,7 @@ class EdgeScore:
     target_1: float = 0.0
     target_2: float = 0.0
     entry_status: str = "WAITING"    # "TRIGGERED", "APPROACHING", "WAITING"
+    entry_time: str = "—"            # e.g. "09:45", "10:30", "—"
     atr: float = 0.0
 
     @property

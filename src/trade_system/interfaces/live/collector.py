@@ -582,14 +582,12 @@ class LiveMarketDataService:
         self.last_initialized_date = current_date
 
         try:
-            LOGGER.info("Running DataHealer to auto-correct any missing/corrupt data from the last 2 days...")
-            from trade_system.domains.market_data.application.data_healer import DataHealer
-            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
-            healer = DataHealer(get_engine(), self.broker)
-            # Quick heal: backfill any missing 15m/daily bars from the last 2 days
-            healer.heal(lookback_days=2, heal_15m=True, heal_daily=True, remove_corrupt=True)
+            LOGGER.info("Running DataSanityManager to preserve data sanity and auto-heal missing historical data for FO & Indices...")
+            from trade_system.domains.market_data.application.data_sanity_manager import DataSanityManager
+            sanity_mgr = DataSanityManager(broker=self.broker, settings=self.settings)
+            sanity_mgr.ensure_data_sanity_and_heal(resolutions=["15", "D"], lookback_days=5)
         except Exception as e:
-            LOGGER.error(f"Failed to run DataHealer: {e}", exc_info=True)
+            LOGGER.error(f"Failed to run DataSanityManager: {e}", exc_info=True)
 
         for symbol in self.symbols:
             try:
@@ -1471,7 +1469,9 @@ class LiveMarketDataService:
         self.confirmed_notifier.send(ref_msg)
 
     def _maybe_alert_first_15min_break(self, symbol: str, price: float, tick_time: datetime) -> None:
-        """Fire a Telegram alert when price crosses the first 15-min candle high or low."""
+        """Fire a Telegram alert when price crosses the first 15-min candle high or low (index-only)."""
+        if not self._is_index(symbol):
+            return
         candle = self.first_15min_candle.get(symbol)
         if not candle:
             return
@@ -1941,7 +1941,7 @@ class LiveMarketDataService:
                 for sugg in morning_setups:
                     if "GAP_AND_GO" in sugg.tags:
                         self.alert_agent.alert_gap_and_go(symbol, sugg.direction.value, sugg.entry_zone_high, sugg.stop_loss)
-                    elif "ORB" in sugg.tags:
+                    elif "ORB" in sugg.tags and "INDEX" in symbol.upper():
                         self.alert_agent.alert_orb(symbol, sugg.direction.value, sugg.entry_zone_high, sugg.stop_loss)
             except Exception as e:
                 LOGGER.error(f"Early morning scan failed for {symbol}: {e}")
@@ -2455,14 +2455,10 @@ class LiveMarketDataService:
         for b in breakouts:
             sym = b['symbol']
             
-            # For FO stocks (non-indices), only alert if volume surge is > 2.0
+            # Suppress all FO stocks (non-indices) from Telegram ORB alerts
             if "-INDEX" not in sym:
-                vol_sma = b.get('vol_sma', 0.0)
-                vol = b.get('volume', 0.0)
-                if vol_sma > 0:
-                    surge = vol / vol_sma
-                    if surge <= 2.0:
-                        continue
+                LOGGER.debug("Telegram ORB message suppressed for FO stock %s", sym)
+                continue
                         
             if sym in self.last_breakout_alerts:
                 if (now - self.last_breakout_alerts[sym]).total_seconds() < 3600:
@@ -2488,8 +2484,8 @@ class LiveMarketDataService:
                     ""
                 ]
                 for b in chunk:
-                    clean_sym = b['symbol'].replace("NSE:", "").replace("-EQ", "")
-                    lines.append(f"{icon} <b>{clean_sym}</b> ({b['sector']})")
+                    clean_sym = b['symbol'].replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
+                    lines.append(f"{icon} <b>{clean_sym}</b> ({b.get('sector', 'INDEX')})")
                     if b.get('direction', 'LONG') == 'LONG':
                         lines.append(f"Breakout Spot: ₹{b['close']:.2f} (Above ORB: ₹{b['orb_high']:.2f})")
                     else:
@@ -2500,11 +2496,11 @@ class LiveMarketDataService:
                 self.notifier.send("\n".join(lines))
         
         if long_alerts:
-            send_chunked(long_alerts, "[LIVE SECTOR BREAKOUT — LONG]", "📈")
+            send_chunked(long_alerts, "[LIVE INDEX BREAKOUT — LONG]", "📈")
         if short_alerts:
-            send_chunked(short_alerts, "[LIVE SECTOR BREAKDOWN — SHORT]", "📉")
+            send_chunked(short_alerts, "[LIVE INDEX BREAKDOWN — SHORT]", "📉")
             
-        LOGGER.info(f"Sent Live Breakout/Breakdown alerts for {len(alerts_to_send)} symbols.")
+        LOGGER.info(f"Sent Live Breakout/Breakdown alerts for {len(alerts_to_send)} index symbols.")
 
     # ── Intraday Option Edge Pipeline ──────────────────────────────────────────
 

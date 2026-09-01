@@ -19,20 +19,22 @@ class SupertrendIndicator(BaseIndicator):
         df.columns = [col.lower() for col in df.columns]
 
         # --- DATA CONTINUITY SAFEGUARD ---
-        # Detect if there are massive gaps (e.g., > 45 mins) in the intraday time-series.
-        # This prevents GIGO (Garbage-In Garbage-Out) calculation corruption.
+        # Detect if there are massive gaps within the same trading session for intraday data.
         time_series = None
         if isinstance(df.index, pd.DatetimeIndex):
             time_series = df.index.to_series()
         elif 'timestamp' in df.columns and pd.api.types.is_datetime64_any_dtype(df['timestamp']):
             time_series = df['timestamp']
         
-        if time_series is not None and len(time_series) > 1:
-            gaps = time_series.groupby(time_series.dt.date).diff()
-            max_gap = gaps.max()
-            if not pd.isna(max_gap) and max_gap > pd.Timedelta(minutes=45):
-                logger.error(f"CRITICAL: Data gap of {max_gap} detected! Suppressing Supertrend calculation to prevent corrupted signals.")
-                return pd.DataFrame() # Return empty to prevent false signals
+        if time_series is not None and len(time_series) > 5:
+            step_deltas = time_series.diff().dropna()
+            # Only apply intra-day gap check if this is an intraday dataset (median step < 6 hours)
+            if not step_deltas.empty and step_deltas.median() < pd.Timedelta(hours=6):
+                gaps = time_series.groupby(time_series.dt.date).diff()
+                max_gap = gaps.max()
+                if not pd.isna(max_gap) and max_gap > pd.Timedelta(hours=2):
+                    logger.error(f"CRITICAL: Intraday data gap of {max_gap} detected! Suppressing Supertrend calculation.")
+                    return pd.DataFrame()
         # ---------------------------------
 
         # Calculate True Range (TR)

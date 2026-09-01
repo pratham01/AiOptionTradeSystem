@@ -730,13 +730,106 @@ with left_col:
         st.markdown("---")
 
     st.subheader("📡 Multi-Agent Parallel Verdicts")
-    tab_nifty, tab_fo, tab_chat, tab_synthesis, tab_optimizer = st.tabs(["📊 NIFTY Master", "💎 Stock Momentum", "💬 Swarm Chat", "🧠 AI Swarm Synthesis", "📉 Option Buyer EOD Optimizer"])
+    tab_nifty, tab_fo, tab_smc, tab_chat, tab_synthesis, tab_optimizer = st.tabs(["📊 NIFTY Master", "💎 Stock Momentum", "🏛️ Smart Money (SMC)", "💬 Swarm Chat", "🧠 AI Swarm Synthesis", "📉 Option Buyer EOD Optimizer"])
 
     with tab_nifty:
         _render_trade_cards(nifty_trades)
 
     with tab_fo:
         _render_trade_cards(fo_trades)
+
+    with tab_smc:
+        st.markdown("### 🏛️ Institutional Smart Money & Fair Value Gap (FVG) Studio")
+        st.caption("Post-Market Institutional Fair Value Gaps (BISI/SIBI), Consequent Encroachment (50% CE), Order Blocks, and Wyckoff Schematics on Daily timeframe.")
+
+        scan_mode = st.radio("Institutional Strategy Engine", ["⚡ Fair Value Gap (FVG & 50% CE)", "🏛️ Full Smart Money Concepts (SMC)", "📈 Wyckoff & VSA Accumulation"], horizontal=True)
+
+        smc_col1, smc_col2, smc_col3 = st.columns([1, 1, 1.5])
+        with smc_col1:
+            smc_dir = st.selectbox("Direction Filter", ["both", "bullish", "bearish"], key="smc_dash_dir")
+        with smc_col2:
+            smc_score = st.slider("Min Confluence Score", 50, 95, 65, key="smc_dash_score")
+        with smc_col3:
+            smc_top_n = st.number_input("Max Setups to Show", 5, 50, 15, key="smc_dash_top_n")
+
+        if st.button(f"🔍 Scan F&O Universe ({scan_mode.split()[1]})", key="run_inst_scan_dash_btn", type="primary", use_container_width=True):
+            with st.spinner(f"Scanning 212 F&O universe stocks and indices with {scan_mode}..."):
+                try:
+                    if "Fair Value Gap" in scan_mode:
+                        from trade_system.domains.advisory.application.agent.fvg_agent import FvgDailyScannerAgent
+                        fvg_agent = FvgDailyScannerAgent(min_score=float(smc_score))
+                        st.session_state.inst_setups = fvg_agent.scan_universe(direction=smc_dir, min_score=float(smc_score))
+                        st.session_state.inst_scan_type = "FVG"
+                    elif "Wyckoff" in scan_mode:
+                        from trade_system.domains.advisory.application.agent.wyckoff_agent import WyckoffDailyScannerAgent
+                        wyck_agent = WyckoffDailyScannerAgent(min_score=float(smc_score))
+                        st.session_state.inst_setups = wyck_agent.scan_universe(direction=smc_dir, min_score=float(smc_score))
+                        st.session_state.inst_scan_type = "WYCKOFF"
+                    else:
+                        from trade_system.domains.advisory.application.agent.smc_daily_agent import SmcDailyScannerAgent
+                        smc_agent = SmcDailyScannerAgent(min_score=float(smc_score))
+                        st.session_state.inst_setups = smc_agent.scan_universe(direction=smc_dir, min_score=float(smc_score))
+                        st.session_state.inst_scan_type = "SMC"
+                except Exception as e:
+                    st.error(f"Scan failed: {e}")
+
+        if "inst_setups" in st.session_state and st.session_state.inst_setups:
+            setups = st.session_state.inst_setups
+            scan_type = st.session_state.get("inst_scan_type", "SMC")
+            st.success(f"🎯 Found {len(setups)} High-Conviction {scan_type} Setups on Daily Timeframe")
+
+            # Table Overview
+            table_rows = []
+            for s in setups[:int(smc_top_n)]:
+                row_dict = {
+                    "Symbol": s.symbol.replace("NSE:", "").replace("-EQ", ""),
+                    "Action": "🟢 BUY CALL" if s.direction == 1 else "🔴 BUY PUT",
+                    "Score": s.confluence_score,
+                    "Spot/Entry": s.entry_price,
+                    "Stop Loss": s.stop_loss,
+                    "Target 1": s.target_1,
+                    "RRR": f"1:{s.risk_reward_ratio:.1f}",
+                    "Type": getattr(s, "setup_type", getattr(s, "pattern_type", "SETUP")),
+                }
+                if hasattr(s, "consequent_encroachment"):
+                    row_dict["50% CE"] = s.consequent_encroachment
+                table_rows.append(row_dict)
+
+            st.dataframe(
+                pd.DataFrame(table_rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100),
+                    "Spot/Entry": st.column_config.NumberColumn("Entry", format="₹%.2f"),
+                    "Stop Loss": st.column_config.NumberColumn("Stop Loss", format="₹%.2f"),
+                    "Target 1": st.column_config.NumberColumn("Target 1", format="₹%.2f"),
+                    "50% CE": st.column_config.NumberColumn("50% CE", format="₹%.2f"),
+                }
+            )
+
+            st.markdown("---")
+            st.markdown("#### 🔍 Setup Deep-Dives")
+            for idx, s in enumerate(setups[:int(smc_top_n)], 1):
+                sym_clean = s.symbol.replace("NSE:", "").replace("-EQ", "")
+                setup_title = getattr(s, "setup_type", getattr(s, "pattern_type", "SETUP"))
+                badge = f"🟢 BUY CALL [{setup_title}]" if s.direction == 1 else f"🔴 BUY PUT [{setup_title}]"
+                with st.expander(f"#{idx} | {sym_clean} — {badge} (Score: {s.confluence_score:.0f}/100)"):
+                    c_a, c_b, c_c, c_d = st.columns(4)
+                    c_a.metric("Entry Zone", f"₹{s.entry_price:.2f}")
+                    c_b.metric("Stop Loss", f"₹{s.stop_loss:.2f}", delta=f"-{abs(s.entry_price - s.stop_loss):.2f}", delta_color="inverse")
+                    c_c.metric("Target 1", f"₹{s.target_1:.2f}", delta=f"+{abs(s.target_1 - s.entry_price):.2f}")
+                    c_d.metric("Risk:Reward", f"1:{s.risk_reward_ratio:.1f}")
+
+                    if hasattr(s, "fvg_bottom") and hasattr(s, "fvg_top"):
+                        st.markdown(f"**Imbalance Zone:** ₹{s.fvg_bottom:.2f} ➔ ₹{s.fvg_top:.2f} | **50% CE Midpoint:** ₹{s.consequent_encroachment:.2f}")
+
+                    st.markdown("**Institutional Confluence Factors:**")
+                    for r in getattr(s, "reasons", []):
+                        st.markdown(f"- {r}")
+
+        else:
+            st.info("Select an institutional engine above and click scan to view active setups on the daily chart.")
 
     with tab_synthesis:
         synthesis_data = load_latest_synthesis()

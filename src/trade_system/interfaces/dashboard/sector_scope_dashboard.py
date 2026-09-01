@@ -3,7 +3,8 @@ import pandas as pd
 import numpy as np
 import logging
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
+logger = LOGGER
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, date, time as dt_time
@@ -23,6 +24,7 @@ importlib.reload(trade_system.domains.analysis.application.analysis.smart_entry_
 
 from trade_system.domains.analysis.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
 from trade_system.domains.analysis.application.analysis.smart_entry_trigger import SmartEntryTrigger
+from trade_system.domains.analysis.application.analysis.reversal_scanner import DailyReversalScanner, DailyReversalSetup
 from trade_system.shared.notifications.telegram import TelegramNotifier
 from trade_system.shared.config import Settings
 
@@ -140,7 +142,7 @@ def _fetch_historical_15m(target_date_str):
     """)
     with get_engine().connect() as conn:
         df = pd.read_sql(query, conn, params={"latest_date": target_date_str})
-    df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601')
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', errors='coerce')
     return df
 
 @st.cache_data(ttl=60)
@@ -155,7 +157,7 @@ def _fetch_today_15m(target_date_str):
     """)
     with get_engine().connect() as conn:
         df = pd.read_sql(query, conn, params={"latest_date": target_date_str})
-    df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601')
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', errors='coerce')
     
     # Get last candle timestamp
     last_candle_ts = None
@@ -1008,56 +1010,140 @@ else:
         st.session_state['selected_sector_drill'] = target_sector
 
     # -------------------------------------------------------------
-    # 3. SECTOR CARDS — Compact 6-column Grid
+    # 3. SECTOR BOARD & RIGHT-SIDE CONSTITUENT STOCKS
     # -------------------------------------------------------------
-    st.markdown("""
-    <div class="section-header">
-        <h3>🏆 Sector Board</h3>
-        <span class="badge">CLICK TO DRILL DOWN</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    n_sectors = len(sector_perf)
-    cols_per_row = 6
-    sector_rows_list = list(sector_perf.iterrows())
+    active_sector = st.session_state.get('selected_sector_drill') or (options[0] if options else None)
     
-    for row_start in range(0, n_sectors, cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col_idx in range(cols_per_row):
-            item_idx = row_start + col_idx
-            if item_idx >= n_sectors:
-                break
-            _, row = sector_rows_list[item_idx]
-            with cols[col_idx]:
-                is_positive = row['pChange'] >= 0
-                bar_color = "#22c55e" if is_positive else "#ef4444"
-                bar_width = min(abs(row['pChange']) / max_change * 100, 100)
-                arrow = "▲" if is_positive else "▼"
+    col_board, col_stocks = st.columns([1.1, 0.9], gap="medium")
+
+    with col_board:
+        st.markdown("""
+        <div class="section-header" style="margin-bottom: 6px;">
+            <h3>🏆 Sector Board</h3>
+            <span class="badge">CLICK TO VIEW CONSTITUENTS</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        n_sectors = len(sector_perf)
+        cols_per_row = 3
+        sector_rows_list = list(sector_perf.iterrows())
+        
+        for row_start in range(0, n_sectors, cols_per_row):
+            cols = st.columns(cols_per_row)
+            for col_idx in range(cols_per_row):
+                item_idx = row_start + col_idx
+                if item_idx >= n_sectors:
+                    break
+                _, row = sector_rows_list[item_idx]
+                with cols[col_idx]:
+                    is_positive = row['pChange'] >= 0
+                    bar_color = "#22c55e" if is_positive else "#ef4444"
+                    bar_width = min(abs(row['pChange']) / max_change * 100, 100)
+                    arrow = "▲" if is_positive else "▼"
+                    is_selected = (row['sector'] == active_sector)
+                    
+                    if st.button(
+                        f"{row['sector']} {arrow}{row['pChange']:+.1f}%",
+                        key=f"sector_card_{row['sector']}",
+                        use_container_width=True,
+                        type="primary" if is_selected else "secondary"
+                    ):
+                        st.session_state['selected_sector_drill'] = row['sector']
+                        st.session_state['clicked_stock_sector'] = row['sector']
+                        st.rerun()
+                    
+                    st.markdown(f'<div style="height:2px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin-bottom:4px;"><div style="height:100%;width:{bar_width}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
+
+    with col_stocks:
+        if active_sector:
+            sector_stocks_df = merged_closes[merged_closes['sector'] == active_sector].copy()
+            if not sector_stocks_df.empty:
+                sector_stocks_df['Symbol'] = sector_stocks_df['symbol'].str.replace("NSE:", "").str.replace("-EQ", "")
+                sector_stocks_df = sector_stocks_df.sort_values('pChange', ascending=False)
+                sector_avg = sector_stocks_df['pChange'].mean()
                 
-                if st.button(
-                    f"{row['sector']} {arrow}{row['pChange']:+.1f}%",
-                    key=f"sector_card_{row['sector']}",
+                st.markdown(f"""
+                <div style="background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(124, 58, 237, 0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 0.98rem; font-weight: 700; color: #f8fafc;">📋 {active_sector} Stocks</span>
+                        <span style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-size: 0.7rem; padding: 1px 7px; border-radius: 9999px; font-weight: 600;">{len(sector_stocks_df)} Stocks</span>
+                    </div>
+                    <span style="color: {'#22c55e' if sector_avg >= 0 else '#ef4444'}; font-weight: 700; font-size: 0.85rem;">Avg: {sector_avg:+.2f}%</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Build vol surge & indicator labels for drill-down
+                def _vol_surge_label(vs):
+                    if vs >= 1.5:
+                        return f"🟢 {vs:.1f}x"
+                    elif vs >= 1.0:
+                        return f"🟡 {vs:.1f}x"
+                    elif vs > 0:
+                        return f"🔴 {vs:.1f}x"
+                    return "⚪ N/A"
+
+                sector_stocks_df['Vol Surge'] = sector_stocks_df['vol_surge'].apply(_vol_surge_label)
+
+                # Map Daily RSI & vs VWAP indicators
+                rsi_labels = []
+                vwap_labels = []
+                for sym in sector_stocks_df['symbol']:
+                    clean_s = sym.replace("NSE:", "").replace("-EQ", "")
+                    ind = _indicators.get(sym) or _indicators.get(clean_s) or {}
+                    rsi_v = ind.get('daily_rsi')
+                    vs_vwap = ind.get('vs_vwap')
+                    if rsi_v is None:
+                        rsi_labels.append("—")
+                    elif rsi_v >= 70:
+                        rsi_labels.append(f"🔥 {rsi_v:.0f}")
+                    elif rsi_v <= 30:
+                        rsi_labels.append(f"🧊 {rsi_v:.0f}")
+                    else:
+                        rsi_labels.append(f"{rsi_v:.0f}")
+
+                    if vs_vwap is None:
+                        vwap_labels.append("—")
+                    elif vs_vwap > 0:
+                        vwap_labels.append(f"↑ {vs_vwap:+.1f}%")
+                    else:
+                        vwap_labels.append(f"↓ {vs_vwap:+.1f}%")
+
+                sector_stocks_df['Daily RSI'] = rsi_labels
+                sector_stocks_df['vs VWAP'] = vwap_labels
+
+                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
+                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
+                
+                st.dataframe(
+                    display_df.style.format({
+                        "LTP (₹)": "₹{:.2f}",
+                        "Change %": "{:+.2f}%"
+                    }).map(
+                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
+                        subset=["Change %"]
+                    ),
                     use_container_width=True,
-                    type="secondary" if row['sector'] != st.session_state.get('selected_sector_drill') else "primary"
-                ):
-                    st.session_state['selected_sector_drill'] = row['sector']
-                    st.session_state['clicked_stock_sector'] = row['sector']
-                    st.rerun()
-                
-                st.markdown(f'<div style="height:2px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;"><div style="height:100%;width:{bar_width}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
+                    hide_index=True,
+                    height=345
+                )
+            else:
+                st.info(f"No stock data available for {active_sector}.")
+        else:
+            st.info("Select a sector from the board on the left.")
 
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
 
     # -------------------------------------------------------------
-    # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Drill-Down
+    # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Reversals | Edge | Drill-Down | Squeeze | Cycle
     # -------------------------------------------------------------
-    tab_leaderboard, tab_chart, tab_scanner, tab_drilldown, tab_compression, tab_edge, tab_cycle = st.tabs([
+    tab_leaderboard, tab_chart, tab_scanner, tab_reversal, tab_edge, tab_drilldown, tab_compression, tab_cycle = st.tabs([
         "📊 Gainers & Losers",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
+        "🔄 Daily Reversal Radar",
+        "⚡ Intraday Edge Finder",
         "🔎 Sector Drill-Down",
         "📦 Volatility Squeeze",
-        "⚡ Intraday Edge Finder",
         "📅 Off-Market Cycle Analyst"
     ])
 
@@ -1144,77 +1230,6 @@ else:
             else:
                 st.info("No stocks currently within 0.75% of intraday breakdown level.")
 
-        if st.session_state.get('clicked_stock_sector'):
-            clicked_sector = st.session_state['clicked_stock_sector']
-            sector_stocks_df = merged_closes[merged_closes['sector'] == clicked_sector].copy()
-            if not sector_stocks_df.empty:
-                sector_stocks_df['Symbol'] = sector_stocks_df['symbol'].str.replace("NSE:", "").str.replace("-EQ", "")
-                sector_stocks_df = sector_stocks_df.sort_values('pChange', ascending=False)
-                sector_avg = sector_stocks_df['pChange'].mean()
-                
-                st.markdown(f"""
-                <div class="drill-panel">
-                    <div class="drill-panel-header">
-                        <h3>📋 {clicked_sector} — All Stocks</h3>
-                        <span class="drill-stock-count">{len(sector_stocks_df)} stocks • Avg: {sector_avg:+.2f}%</span>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Build vol surge & indicator labels for drill-down
-                def _vol_surge_label(vs):
-                    if vs >= 1.5:
-                        return f"🟢 {vs:.1f}x"
-                    elif vs >= 1.0:
-                        return f"🟡 {vs:.1f}x"
-                    elif vs > 0:
-                        return f"🔴 {vs:.1f}x"
-                    return "⚪ N/A"
-
-                sector_stocks_df['Vol Surge'] = sector_stocks_df['vol_surge'].apply(_vol_surge_label)
-
-                # Map Daily RSI & vs VWAP indicators
-                rsi_labels = []
-                vwap_labels = []
-                for sym in sector_stocks_df['symbol']:
-                    clean_s = sym.replace("NSE:", "").replace("-EQ", "")
-                    ind = _indicators.get(sym) or _indicators.get(clean_s) or {}
-                    rsi_v = ind.get('daily_rsi')
-                    vs_vwap = ind.get('vs_vwap')
-                    if rsi_v is None:
-                        rsi_labels.append("—")
-                    elif rsi_v >= 70:
-                        rsi_labels.append(f"🔥 {rsi_v:.0f}")
-                    elif rsi_v <= 30:
-                        rsi_labels.append(f"🧊 {rsi_v:.0f}")
-                    else:
-                        rsi_labels.append(f"{rsi_v:.0f}")
-
-                    if vs_vwap is None:
-                        vwap_labels.append("—")
-                    elif vs_vwap > 0:
-                        vwap_labels.append(f"↑ {vs_vwap:+.1f}%")
-                    else:
-                        vwap_labels.append(f"↓ {vs_vwap:+.1f}%")
-
-                sector_stocks_df['Daily RSI'] = rsi_labels
-                sector_stocks_df['vs VWAP'] = vwap_labels
-
-                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
-                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
-                st.dataframe(
-                    display_df.style.format({
-                        "LTP (₹)": "₹{:.2f}",
-                        "Change %": "{:+.2f}%"
-                    }).map(
-                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
-                        subset=["Change %"]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=min(300, len(sector_stocks_df) * 35 + 38)
-                )
-
     # ---- TAB 2: Sector Chart ----
     with tab_chart:
         fig = go.Figure()
@@ -1275,13 +1290,25 @@ else:
                 
             selected_strategies = st.multiselect(
                 "🎯 Strategy Selection",
-                options=["ORB Breakout", "Consolidation Breakout", "Gap Fill", "Mean Reversion", "VWAP Pullback", "Momentum Mover", "Previous Day High/Low"],
-                default=["ORB Breakout", "Consolidation Breakout", "Gap Fill", "Mean Reversion", "VWAP Pullback"],
+                options=[
+                    "ORB Breakout",
+                    "Daily Supertrend Touch",
+                    "Daily Supertrend Flip",
+                    "Consolidation Breakout",
+                    "Gap Fill",
+                    "Mean Reversion",
+                    "VWAP Pullback",
+                    "Momentum Mover",
+                    "Previous Day High/Low"
+                ],
+                default=["ORB Breakout", "Daily Supertrend Touch", "Daily Supertrend Flip", "Consolidation Breakout", "VWAP Pullback"],
                 help="Filter the scanner results by one or more trading strategies"
             )
         
         strategy_map = {
             "ORB Breakout": ["ORB_BREAKOUT"],
+            "Daily Supertrend Touch": ["DAILY_ST_TOUCH"],
+            "Daily Supertrend Flip": ["DAILY_ST_FLIP"],
             "Consolidation Breakout": ["CONSOLIDATION_BREAKOUT"],
             "Gap Fill": ["GAP_FILL"],
             "Mean Reversion": ["MEAN_REVERSION"],
@@ -1320,6 +1347,8 @@ else:
                 
                 type_badges = {
                     "ORB_BREAKOUT": "📊 ORB",
+                    "DAILY_ST_TOUCH": "🎯 ST Touch",
+                    "DAILY_ST_FLIP": "🔄 ST Flip",
                     "CONSOLIDATION_BREAKOUT": "📦 Cons",
                     "GAP_FILL": "🔄 GapFill",
                     "MEAN_REVERSION": "🎯 Rev",
@@ -1334,6 +1363,10 @@ else:
                 ref_level = a.get('orb_high') if a.get('direction') == "LONG" else a.get('orb_low')
                 if a.get('alert_type') == 'ORB_BREAKOUT':
                     ref_str = f"ORB: {ref_level:.2f}" if ref_level else "—"
+                elif a.get('alert_type') == 'DAILY_ST_TOUCH':
+                    ref_str = f"ST: ₹{a.get('supertrend_level', 0.0):.1f}"
+                elif a.get('alert_type') == 'DAILY_ST_FLIP':
+                    ref_str = f"ST Flip: ₹{a.get('supertrend_level', 0.0):.1f}"
                 elif a.get('alert_type') == 'CONSOLIDATION_BREAKOUT':
                     ref_str = f"R/S: {a.get('resistance', 0.0):.1f}/{a.get('support', 0.0):.1f}"
                 elif a.get('alert_type') == 'GAP_FILL':
@@ -1349,7 +1382,15 @@ else:
                 if a.get('is_52w_high'): tags.append("52W🔥")
                 if a.get('is_weekly_high'): tags.append("Wk📈")
                 if a.get('touches_daily_st'): tags.append("ST🎯")
-                trigger_time_str = a['trigger_time'].strftime("%H:%M") if 'trigger_time' in a and pd.notna(a['trigger_time']) else "15:15"
+                
+                t_val = a.get('trigger_time')
+                if pd.notna(t_val) and hasattr(t_val, 'strftime'):
+                    trigger_time_str = t_val.strftime("%H:%M")
+                elif pd.notna(t_val) and str(t_val) not in ('', 'None', 'nan'):
+                    trigger_time_str = str(t_val).split()[-1][:5]
+                else:
+                    trigger_time_str = "—"
+
                 alert_rows.append({
                     "Time": trigger_time_str, "Symbol": clean_sym, "Sector": a['sector'],
                     "Type": type_badge, "Dir": direction_badge,
@@ -1361,7 +1402,469 @@ else:
         else:
             st.info("No active alerts found for the selected strategies and filters.")
 
-    # ---- TAB 4: Sector Drill-Down ----
+        # ── Dedicated Daily Supertrend Radar for F&O Universe ──────────────────
+        st.markdown("---")
+        with st.expander("🎯 Daily Supertrend Radar & Direction Flips (Full F&O Universe)", expanded=True):
+            st.caption("Scans the entire F&O universe on the Daily timeframe (Period=10, Multiplier=2) for stocks touching the Supertrend line (Pullback Zone) or flipping direction (Trend Reversal).")
+            
+            try:
+                engine = get_engine()
+                with engine.connect() as conn:
+                    df_daily_st = pd.read_sql(
+                        text("""
+                            SELECT symbol, timestamp, open, high, low, close, volume 
+                            FROM ohlcv_daily 
+                            WHERE timestamp >= date(:t_date, '-120 days') AND timestamp <= :t_date
+                            ORDER BY symbol, timestamp ASC
+                        """),
+                        conn,
+                        params={"t_date": target_date.isoformat()}
+                    )
+                
+                if not df_daily_st.empty:
+                    from trade_system.domains.strategy.application.indicators import calculate_supertrend
+                    df_daily_st['timestamp'] = pd.to_datetime(df_daily_st['timestamp'], format='mixed')
+                    
+                    st_records = []
+                    total_bull = 0
+                    total_bear = 0
+                    total_touch = 0
+                    total_flip = 0
+
+                    for sym, grp in df_daily_st.groupby('symbol'):
+                        if len(grp) < 10:
+                            continue
+                        clean_sym = sym.replace("NSE:", "").replace("-EQ", "")
+                        st_calc = calculate_supertrend(grp, period=10, multiplier=2)
+                        if st_calc.empty:
+                            continue
+                        
+                        last_bar = st_calc.iloc[-1]
+                        prev_bar = st_calc.iloc[-2] if len(st_calc) >= 2 else last_bar
+                        
+                        ltp = float(last_bar['close'])
+                        low = float(last_bar['low'])
+                        high = float(last_bar['high'])
+                        st_val = float(last_bar['supertrend'])
+                        curr_dir = int(last_bar['supertrend_direction'])
+                        prev_dir = int(prev_bar['supertrend_direction'])
+                        atr_val = float(last_bar.get('atr', 0.0))
+                        
+                        prev_close = float(prev_bar['close']) if prev_bar is not None else ltp
+                        chg_pct = ((ltp - prev_close) / prev_close) * 100 if prev_close > 0 else 0.0
+                        dist_pct = ((ltp - st_val) / st_val) * 100
+                        
+                        if curr_dir == 1:
+                            total_bull += 1
+                        else:
+                            total_bear += 1
+                            
+                        # Touch check
+                        is_touch = False
+                        if curr_dir == 1 and low <= st_val * 1.01 and ltp >= st_val * 0.99:
+                            is_touch = True
+                            total_touch += 1
+                        elif curr_dir == -1 and high >= st_val * 0.99 and ltp <= st_val * 1.01:
+                            is_touch = True
+                            total_touch += 1
+                            
+                        # Flip check
+                        is_flip = (curr_dir != prev_dir)
+                        if is_flip:
+                            total_flip += 1
+                            
+                        # Setup label
+                        if is_flip and curr_dir == 1:
+                            setup_type = "🔄 Bullish Flip (New Buy)"
+                        elif is_flip and curr_dir == -1:
+                            setup_type = "🔄 Bearish Flip (New Sell)"
+                        elif is_touch and curr_dir == 1:
+                            setup_type = "🎯 At Support (Bullish Pullback)"
+                        elif is_touch and curr_dir == -1:
+                            setup_type = "🎯 At Resistance (Bearish Pullback)"
+                        elif curr_dir == 1:
+                            setup_type = "🟢 Bullish Trend Active"
+                        else:
+                            setup_type = "🔴 Bearish Trend Active"
+
+                        st_records.append({
+                            "Symbol": clean_sym,
+                            "Sector": fo_universe.get(sym, "OTHER") if 'fo_universe' in locals() or 'fo_universe' in globals() else "F&O",
+                            "Direction": "🟢 BULLISH" if curr_dir == 1 else "🔴 BEARISH",
+                            "LTP (₹)": ltp,
+                            "Chg %": chg_pct,
+                            "Supertrend (₹)": st_val,
+                            "Dist to ST %": dist_pct,
+                            "Setup": setup_type,
+                            "is_touch": is_touch,
+                            "is_flip": is_flip,
+                            "curr_dir": curr_dir,
+                            "_symbol": sym
+                        })
+                    
+                    # Top KPI Metrics
+                    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                    kpi1.metric("🟢 Bullish ST Stocks", f"{total_bull}", f"{(total_bull / len(st_records) * 100):.0f}% of Universe" if st_records else "")
+                    kpi2.metric("🔴 Bearish ST Stocks", f"{total_bear}", f"{(total_bear / len(st_records) * 100):.0f}% of Universe" if st_records else "")
+                    kpi3.metric("🎯 Touching Supertrend", f"{total_touch}", "Pullback Opportunities")
+                    kpi4.metric("🔄 Direction Flips Today", f"{total_flip}", "Trend Reversals")
+                    
+                    # Filter controls
+                    f_col1, f_col2 = st.columns([2, 1])
+                    with f_col1:
+                        st_filter_mode = st.radio(
+                            "Filter Radar",
+                            options=["All Setups", "🎯 Touching ST (Pullbacks)", "🔄 Direction Flips Today", "🟢 Bullish Only", "🔴 Bearish Only"],
+                            horizontal=True,
+                            key="st_radar_filter_mode"
+                        )
+                    with f_col2:
+                        sort_by_dist = st.checkbox("Sort by Closest to Supertrend", value=True)
+
+                    df_radar = pd.DataFrame(st_records)
+                    if not df_radar.empty:
+                        if st_filter_mode == "🎯 Touching ST (Pullbacks)":
+                            df_radar = df_radar[df_radar["is_touch"] == True]
+                        elif st_filter_mode == "🔄 Direction Flips Today":
+                            df_radar = df_radar[df_radar["is_flip"] == True]
+                        elif st_filter_mode == "🟢 Bullish Only":
+                            df_radar = df_radar[df_radar["curr_dir"] == 1]
+                        elif st_filter_mode == "🔴 Bearish Only":
+                            df_radar = df_radar[df_radar["curr_dir"] == -1]
+
+                        if sort_by_dist:
+                            df_radar = df_radar.sort_values(by="Dist to ST %", key=lambda x: abs(x), ascending=True)
+                        else:
+                            df_radar = df_radar.sort_values(by="Chg %", ascending=False)
+
+                        display_cols = ["Symbol", "Sector", "Direction", "LTP (₹)", "Chg %", "Supertrend (₹)", "Dist to ST %", "Setup"]
+                        st.dataframe(
+                            df_radar[display_cols].style.format({
+                                "LTP (₹)": "{:.2f}",
+                                "Chg %": "{:+.2f}%",
+                                "Supertrend (₹)": "{:.2f}",
+                                "Dist to ST %": "{:+.2f}%"
+                            }).map(
+                                lambda v: "color: #22c55e; font-weight:700" if "BULLISH" in str(v) else "color: #ef4444; font-weight:700" if "BEARISH" in str(v) else "",
+                                subset=["Direction"]
+                            ).map(
+                                lambda v: "background-color: rgba(34, 197, 94, 0.2); font-weight:700; color:#22c55e;" if "Bullish Flip" in str(v) else "background-color: rgba(239, 68, 68, 0.2); font-weight:700; color:#ef4444;" if "Bearish Flip" in str(v) else "background-color: rgba(59, 130, 246, 0.2); font-weight:700; color:#60a5fa;" if "At Support" in str(v) else "background-color: rgba(245, 158, 11, 0.2); font-weight:700; color:#fbbf24;" if "At Resistance" in str(v) else "",
+                                subset=["Setup"]
+                            ),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
+                        # Interactive Stock Inspector
+                        selected_st_sym = st.selectbox(
+                            "📈 View Daily Supertrend Chart for Stock:",
+                            options=df_radar["_symbol"].tolist(),
+                            format_func=lambda x: f"{x.replace('NSE:', '').replace('-EQ', '')} (ST: ₹{df_radar[df_radar['_symbol'] == x]['Supertrend (₹)'].iloc[0]:.1f})",
+                            key="st_radar_stock_select"
+                        )
+
+                        if selected_st_sym:
+                            stk_df = df_daily_st[df_daily_st["symbol"] == selected_st_sym].sort_values("timestamp")
+                            if len(stk_df) >= 10:
+                                stk_calc = calculate_supertrend(stk_df, period=10, multiplier=2)
+                                
+                                import plotly.graph_objects as go
+                                fig_st = go.Figure()
+                                fig_st.add_trace(go.Candlestick(
+                                    x=stk_calc["timestamp"],
+                                    open=stk_calc["open"],
+                                    high=stk_calc["high"],
+                                    low=stk_calc["low"],
+                                    close=stk_calc["close"],
+                                    name="Daily Candles"
+                                ))
+                                fig_st.add_trace(go.Scatter(
+                                    x=stk_calc["timestamp"],
+                                    y=stk_calc["supertrend"],
+                                    mode="lines",
+                                    line=dict(color="#22c55e", width=2, dash="dot"),
+                                    name="Daily Supertrend (10, 2)"
+                                ))
+
+                                fig_st.update_layout(
+                                    title=f"<b>{selected_st_sym.replace('NSE:', '').replace('-EQ', '')}</b> — Daily Supertrend Support/Resistance",
+                                    template="plotly_dark",
+                                    xaxis_rangeslider_visible=False,
+                                    height=420,
+                                    margin=dict(l=20, r=20, t=40, b=20),
+                                )
+                                st.plotly_chart(fig_st, use_container_width=True)
+                else:
+                    st.info("No daily candle data found for the selected date.")
+            except Exception as st_err:
+                st.error(f"Error loading Supertrend Radar: {st_err}")
+
+    # ---- TAB 4: Daily Reversal Radar ----
+    with tab_reversal:
+        st.markdown("""
+        <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
+            <h3>🔄 Daily Reversal Probability Radar</h3>
+            <span class="badge" style="background: rgba(234, 179, 8, 0.2); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.35);">
+                INSTITUTIONAL MEAN REVERSIONS • 5-LAYER CONFLUENCE
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        with st.expander("ℹ️ How are Daily Reversal Probabilities calculated?", expanded=False):
+            st.markdown("""
+            **Institutional Techniques Used to Quantify Daily Reversals (0–100% Score):**
+            1. **RSI Divergence (+25 pts)**: Price makes a Lower Low (Bullish) or Higher High (Bearish) while RSI(14) diverges in extreme overbought/oversold territory.
+            2. **Forensic Candlestick Rejections (+25 pts)**: Hammer, Shooting Star, Bullish/Bearish Engulfing, or Piercing line with $\ge 50\%$ rejection wick.
+            3. **Bollinger Band Mean Reversion (+20 pts)**: Statistical deviation ($\pm 2.0\sigma$) outside bands snapping back inside.
+            4. **Volume Climax & Absorption (+15 pts)**: Volume surge $\ge 1.3\times$ 20-day SMA confirming institutional absorption.
+            5. **Liquidity Sweeps / Turtle Soup (+15 pts)**: False breakdown/breakout sweeping 20-day stop runs and closing back inside range.
+            """)
+
+        try:
+            reversal_scanner = DailyReversalScanner(min_probability=40)
+            reversal_setups = reversal_scanner.scan(target_date=target_date, min_probability=40)
+
+            # Reversal Filters
+            col_rev_f1, col_rev_f2, col_rev_f3 = st.columns([1, 1, 1])
+            with col_rev_f1:
+                rev_dir_filter = st.selectbox(
+                    "Filter Direction",
+                    ["All", "🟢 Bullish Only (Calls / Long)", "🔴 Bearish Only (Puts / Short)"],
+                    key="rev_dir_filter_tab"
+                )
+            with col_rev_f2:
+                rev_conf_filter = st.selectbox(
+                    "Min Confidence",
+                    ["All (≥40%)", "⚡ High & Very High (≥65%)", "🔥 Very High Only (≥80%)"],
+                    key="rev_conf_filter_tab"
+                )
+            with col_rev_f3:
+                rev_sector_filter = st.selectbox(
+                    "Filter Sector",
+                    ["All Sectors"] + options,
+                    key="rev_sector_filter_tab"
+                )
+
+            filtered_reversals = list(reversal_setups)
+            if rev_dir_filter == "🟢 Bullish Only (Calls / Long)":
+                filtered_reversals = [s for s in filtered_reversals if s.direction == "CALL"]
+            elif rev_dir_filter == "🔴 Bearish Only (Puts / Short)":
+                filtered_reversals = [s for s in filtered_reversals if s.direction == "PUT"]
+
+            if rev_conf_filter == "⚡ High & Very High (≥65%)":
+                filtered_reversals = [s for s in filtered_reversals if s.probability >= 65]
+            elif rev_conf_filter == "🔥 Very High Only (≥80%)":
+                filtered_reversals = [s for s in filtered_reversals if s.probability >= 80]
+
+            if rev_sector_filter != "All Sectors":
+                filtered_reversals = [s for s in filtered_reversals if s.sector == rev_sector_filter]
+
+            # Top KPIs
+            n_total_rev = len(reversal_setups)
+            n_bull_rev = sum(1 for s in reversal_setups if s.direction == "CALL")
+            n_bear_rev = sum(1 for s in reversal_setups if s.direction == "PUT")
+            n_high_conf = sum(1 for s in reversal_setups if s.probability >= 65)
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total Reversal Candidates", f"{n_total_rev}", help="Stocks showing multi-layer daily reversal confluence")
+            k2.metric("🟢 Bullish Calls", f"{n_bull_rev}", delta=f"{n_bull_rev/n_total_rev*100:.0f}% of pool" if n_total_rev > 0 else "0%")
+            k3.metric("🔴 Bearish Puts", f"{n_bear_rev}", delta=f"{n_bear_rev/n_total_rev*100:.0f}% of pool" if n_total_rev > 0 else "0%", delta_color="inverse")
+            k4.metric("🔥 High Conviction (≥65%)", f"{n_high_conf}")
+
+            if filtered_reversals:
+                # Spotlight Top 3 Setups
+                st.markdown("#### 🌟 Top Conviction Reversal Spotlights")
+                top_spotlights = filtered_reversals[:3]
+                spotlight_cols = st.columns(len(top_spotlights))
+
+                for idx, setup in enumerate(top_spotlights):
+                    clean_sym = setup.symbol.replace("NSE:", "").replace("-EQ", "")
+                    is_bull = (setup.direction == "CALL")
+                    theme_color = "#22c55e" if is_bull else "#ef4444"
+                    dir_badge = "🟢 BUY CALL / LONG" if is_bull else "🔴 BUY PUT / SHORT"
+                    
+                    with spotlight_cols[idx]:
+                        confluence_chips = "".join([
+                            f'<span style="background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.12); color:#cbd5e1; font-size:0.7rem; padding:2px 6px; border-radius:4px; margin-right:4px; display:inline-block; margin-bottom:4px;">{c}</span>'
+                            for c in setup.confluences
+                        ])
+                        
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(145deg, #131426, #1e1b4b); border: 1px solid {theme_color}55; border-radius: 12px; padding: 14px; margin-bottom: 12px; box-shadow: 0 4px 14px rgba(0,0,0,0.3);">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                <span style="font-size:1.15rem; font-weight:800; color:#ffffff;">{clean_sym}</span>
+                                <span style="background:{theme_color}22; color:{theme_color}; border:1px solid {theme_color}44; font-size:0.75rem; font-weight:700; padding:2px 8px; border-radius:8px;">{setup.probability}% PROBABILITY</span>
+                            </div>
+                            <div style="font-size:0.8rem; color:#94a3b8; margin-bottom:8px;">Sector: <b style="color:#e2e8f0;">{setup.sector}</b> • {dir_badge}</div>
+                            <div style="margin-bottom:8px;">{confluence_chips}</div>
+                            <hr style="margin:8px 0; border-color:rgba(255,255,255,0.08);"/>
+                            <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:3px;">
+                                <span style="color:#94a3b8;">LTP:</span>
+                                <span style="color:#ffffff; font-weight:700;">₹{setup.ltp:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:3px;">
+                                <span style="color:#94a3b8;">Stop Loss:</span>
+                                <span style="color:#ef4444; font-weight:700;">₹{setup.stop_loss:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:3px;">
+                                <span style="color:#94a3b8;">Target 1:</span>
+                                <span style="color:#22c55e; font-weight:700;">₹{setup.target_1:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.82rem; margin-bottom:3px;">
+                                <span style="color:#94a3b8;">Target 2:</span>
+                                <span style="color:#22c55e; font-weight:700;">₹{setup.target_2:,.2f}</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; font-size:0.82rem;">
+                                <span style="color:#94a3b8;">Risk-Reward:</span>
+                                <span style="color:#eab308; font-weight:700;">{setup.risk_reward:.2f}R</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        if st.button(f"📢 Alert {clean_sym}", key=f"rev_tab_alert_{setup.symbol}"):
+                            try:
+                                settings = Settings.load()
+                                notifier = TelegramNotifier(settings.telegram.bot_token, settings.telegram.chat_id)
+                                alert_msg = (
+                                    f"🔄 <b>DAILY REVERSAL ALERT: {clean_sym}</b> 🔄\n\n"
+                                    f"Direction: <b>{dir_badge}</b>\n"
+                                    f"Reversal Probability: <b>{setup.probability}% ({setup.confidence})</b>\n"
+                                    f"Sector: <b>{setup.sector}</b>\n"
+                                    f"LTP: ₹{setup.ltp:,.2f}\n\n"
+                                    f"📐 <b>Levels:</b>\n"
+                                    f"• Entry: ₹{setup.ltp:,.2f}\n"
+                                    f"• Stop Loss: ₹{setup.stop_loss:,.2f}\n"
+                                    f"• Target 1: ₹{setup.target_1:,.2f}\n"
+                                    f"• Target 2: ₹{setup.target_2:,.2f}\n"
+                                    f"• Risk-Reward: <b>{setup.risk_reward:.2f}R</b>\n\n"
+                                    f"💡 <b>Forensics:</b>\n"
+                                    f"• " + "\n• ".join(setup.confluences)
+                                )
+                                notifier.send(alert_msg)
+                                st.toast(f"✅ Reversal alert for {clean_sym} sent!")
+                            except Exception as al_err:
+                                st.error(f"Failed to send alert: {al_err}")
+
+                # Reversal Ranked Universe Table
+                st.markdown("#### 📋 Full Reversal Candidate Watchlist")
+                rev_table_rows = []
+                for s in filtered_reversals:
+                    c_sym = s.symbol.replace("NSE:", "").replace("-EQ", "")
+                    rev_table_rows.append({
+                        "Symbol": c_sym,
+                        "Sector": s.sector,
+                        "Direction": "🟢 CALL (Long)" if s.direction == "CALL" else "🔴 PUT (Short)",
+                        "Prob %": s.probability,
+                        "Confidence": s.confidence,
+                        "LTP (₹)": s.ltp,
+                        "SL (₹)": s.stop_loss,
+                        "Target 1 (₹)": s.target_1,
+                        "Target 2 (₹)": s.target_2,
+                        "R:R": f"{s.risk_reward:.2f}R",
+                        "RSI": s.metrics.get("rsi", "—"),
+                        "Vol Surge": f"{s.metrics.get('vol_surge', 1.0):.1f}x",
+                        "Primary Setup": s.primary_pattern,
+                        "Confluences": " • ".join(s.confluences),
+                        "_symbol": s.symbol
+                    })
+
+                df_rev_display = pd.DataFrame(rev_table_rows)
+                st.dataframe(
+                    df_rev_display.style.format({
+                        "LTP (₹)": "₹{:.2f}",
+                        "SL (₹)": "₹{:.2f}",
+                        "Target 1 (₹)": "₹{:.2f}",
+                        "Target 2 (₹)": "₹{:.2f}",
+                        "Prob %": "{}%"
+                    }).map(
+                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v >= 75 else ("color: #eab308; font-weight:700" if isinstance(v, (int, float)) and v >= 60 else ""),
+                        subset=["Prob %"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(400, len(df_rev_display) * 38 + 38)
+                )
+
+                # Interactive Reversal Chart Inspector
+                st.markdown("#### 🔬 Daily Reversal Chart Inspector")
+                inspector_symbols = [s.symbol for s in filtered_reversals]
+                clean_inspector_names = [s.replace("NSE:", "").replace("-EQ", "") for s in inspector_symbols]
+                
+                selected_inspect_idx = st.selectbox(
+                    "Select Stock to Inspect Reversal Forensics",
+                    range(len(inspector_symbols)),
+                    format_func=lambda i: f"{clean_inspector_names[i]} ({filtered_reversals[i].direction} — {filtered_reversals[i].probability}% Prob)",
+                    key="rev_chart_inspect_select"
+                )
+
+                inspect_sym = inspector_symbols[selected_inspect_idx]
+                inspect_setup = filtered_reversals[selected_inspect_idx]
+
+                # Fetch Daily Candles for this symbol
+                engine = get_engine()
+                with engine.connect() as conn:
+                    query_chart = text("""
+                        SELECT timestamp, open, high, low, close, volume 
+                        FROM ohlcv_daily 
+                        WHERE symbol = :sym AND timestamp >= date(:t_date, '-90 days') AND timestamp <= :t_date
+                        ORDER BY timestamp ASC
+                    """)
+                    df_chart = pd.read_sql(query_chart, conn, params={"sym": inspect_sym, "t_date": target_date.isoformat()})
+
+                if not df_chart.empty:
+                    df_chart["timestamp"] = pd.to_datetime(df_chart["timestamp"], format="mixed", errors="coerce")
+                    df_chart["sma20"] = df_chart["close"].rolling(20).mean()
+                    df_chart["std20"] = df_chart["close"].rolling(20).std()
+                    df_chart["upper_bb"] = df_chart["sma20"] + 2.0 * df_chart["std20"]
+                    df_chart["lower_bb"] = df_chart["sma20"] - 2.0 * df_chart["std20"]
+                    df_chart["rsi"] = _compute_rsi(df_chart["close"], 14)
+
+                    from plotly.subplots import make_subplots
+                    fig_rev = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08, row_heights=[0.7, 0.3])
+                    
+                    # Candlesticks
+                    fig_rev.add_trace(go.Candlestick(
+                        x=df_chart["timestamp"],
+                        open=df_chart["open"],
+                        high=df_chart["high"],
+                        low=df_chart["low"],
+                        close=df_chart["close"],
+                        name=inspect_setup.symbol.replace("NSE:", "").replace("-EQ", "")
+                    ), row=1, col=1)
+
+                    # Bollinger Bands & 20 SMA
+                    fig_rev.add_trace(go.Scatter(x=df_chart["timestamp"], y=df_chart["upper_bb"], name="Upper BB (2σ)", line=dict(color="rgba(239, 68, 68, 0.5)", width=1, dash="dash")), row=1, col=1)
+                    fig_rev.add_trace(go.Scatter(x=df_chart["timestamp"], y=df_chart["sma20"], name="20 SMA", line=dict(color="rgba(250, 204, 21, 0.6)", width=1.2)), row=1, col=1)
+                    fig_rev.add_trace(go.Scatter(x=df_chart["timestamp"], y=df_chart["lower_bb"], name="Lower BB (2σ)", line=dict(color="rgba(34, 197, 94, 0.5)", width=1, dash="dash")), row=1, col=1)
+
+                    # Reversal Levels
+                    fig_rev.add_hline(y=inspect_setup.stop_loss, line_dash="dash", line_color="#ef4444", annotation_text=f"SL: ₹{inspect_setup.stop_loss:.2f}", row=1, col=1)
+                    fig_rev.add_hline(y=inspect_setup.target_1, line_dash="dash", line_color="#22c55e", annotation_text=f"T1: ₹{inspect_setup.target_1:.2f}", row=1, col=1)
+
+                    # RSI Subpane
+                    fig_rev.add_trace(go.Scatter(x=df_chart["timestamp"], y=df_chart["rsi"], name="Daily RSI(14)", line=dict(color="#a78bfa", width=1.5)), row=2, col=1)
+                    fig_rev.add_hline(y=70, line_dash="dot", line_color="rgba(239, 68, 68, 0.5)", row=2, col=1)
+                    fig_rev.add_hline(y=30, line_dash="dot", line_color="rgba(34, 197, 94, 0.5)", row=2, col=1)
+
+                    fig_rev.update_layout(
+                        height=460,
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        xaxis_rangeslider_visible=False,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    st.plotly_chart(fig_rev, use_container_width=True)
+
+            else:
+                st.info("No reversal setups match the current filters. Adjust your minimum probability or sector filter above.")
+
+        except Exception as rev_err:
+            LOGGER.error("Error running Daily Reversal Scanner: %s", rev_err, exc_info=True)
+            st.warning(f"Unable to compute Daily Reversals: {rev_err}")
+
+    # ---- TAB 5: Sector Drill-Down ----
     with tab_drilldown:
         selected_sector = st.selectbox("Sector", options, key="selected_sector_drill")
         
@@ -1402,7 +1905,7 @@ else:
                 try:
                     with engine.connect() as conn:
                         df_daily = pd.read_sql(query_daily, conn, params={"target_date": target_date.isoformat()})
-                    df_daily['timestamp'] = pd.to_datetime(df_daily['timestamp'], format='ISO8601')
+                    df_daily['timestamp'] = pd.to_datetime(df_daily['timestamp'], format='mixed', errors='coerce')
                     daily_groups = {sym: grp.sort_values('timestamp') for sym, grp in df_daily.groupby('symbol')}
                 except Exception as e:
                     st.warning(f"Failed to fetch daily candles: {e}")
@@ -1727,6 +2230,7 @@ else:
                             edge.target_1 = trig.target_1
                             edge.target_2 = trig.target_2
                             edge.entry_status = trig.status
+                            edge.entry_time = getattr(trig, "trigger_time", "—")
                             
                     # Filter by entry status if checked
                     if show_triggered_only and edge.entry_status != "TRIGGERED":
@@ -1800,6 +2304,10 @@ else:
                                 <span style="color:#94a3b8; font-size:0.85rem;">Entry Status:</span>
                                 <span style="color:{dir_color if edge.entry_status == 'TRIGGERED' else '#eab308' if edge.entry_status == 'APPROACHING' else '#94a3b8'}; font-weight:700;">{status_badge}</span>
                             </div>
+                            <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                                <span style="color:#94a3b8; font-size:0.85rem;">Entry Time:</span>
+                                <span style="color:#38bdf8; font-weight:700;">{edge.entry_time if edge.entry_time and edge.entry_time != '—' else ('⚡ Active' if edge.entry_status == 'TRIGGERED' else '⏳ Pending')}</span>
+                            </div>
                             <hr style="margin:10px 0; border-color:rgba(255,255,255,0.08);"/>
                             <div style="font-size:0.85rem; margin-bottom:5px; color:#a78bfa; font-weight:600;">📐 Recommended Levels:</div>
                             <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:4px;">
@@ -1836,7 +2344,8 @@ else:
                             f"Direction: <b>{'🟢 BUY CALL / LONG' if edge.direction == 'CALL' else '🔴 BUY PUT / SHORT'}</b>\n"
                             f"Edge Score: <b>{edge.final_score:.0f}/100</b>\n"
                             f"LTP: ₹{edge.ltp:,.2f} ({edge.change_pct:+.2f}%)\n"
-                            f"Status: <b>{edge.entry_status}</b>\n\n"
+                            f"Status: <b>{edge.entry_status}</b>\n"
+                            f"Entry Time: <b>{edge.entry_time}</b>\n\n"
                             f"📐 <b>Levels:</b>\n"
                             f"• Entry: ₹{edge.entry_price:,.2f}\n"
                             f"• Stop Loss: ₹{edge.stop_loss:,.2f}\n"
@@ -1871,12 +2380,26 @@ else:
                 st_ok = "🟢" if edge.layers["supertrend_alignment"].direction == edge.direction else "⚪"
                 comp_ok = "🟢" if edge.layers["compression_release"].direction == edge.direction else "⚪"
                 
+                # Clean entry time formatting
+                time_disp = edge.entry_time
+                if not time_disp or str(time_disp) in ("—", "None", "nan", "NaT", ""):
+                    if edge.entry_status == "TRIGGERED":
+                        time_disp = "⚡ Active"
+                    elif edge.entry_status == "APPROACHING":
+                        time_disp = "🟡 Approaching"
+                    else:
+                        time_disp = "⏳ Pending"
+
                 table_rows.append({
                     "Symbol": clean_sym,
                     "Sector": edge.sector,
                     "Edge Score": edge.final_score,
                     "Dir": "🟢 CALL" if edge.direction == "CALL" else "🔴 PUT",
                     "Status": edge.entry_status,
+                    "Entry Time": time_disp,
+                    "Entry (₹)": edge.entry_price if edge.entry_price > 0 else edge.ltp,
+                    "SL (₹)": edge.stop_loss if edge.stop_loss > 0 else (round(edge.ltp - edge.atr * 1.0, 2) if edge.direction == "CALL" else round(edge.ltp + edge.atr * 1.0, 2)),
+                    "T1 (₹)": edge.target_1 if edge.target_1 > 0 else (round(edge.ltp + edge.atr * 1.5, 2) if edge.direction == "CALL" else round(edge.ltp - edge.atr * 1.5, 2)),
                     "LTP (₹)": edge.ltp,
                     "Chg %": edge.change_pct,
                     "Sector Mtm": sec_ok,
@@ -1894,9 +2417,12 @@ else:
                 st.dataframe(
                     df_table.style.format({
                         "LTP (₹)": "{:.2f}",
+                        "Entry (₹)": "{:.2f}",
+                        "SL (₹)": "{:.2f}",
+                        "T1 (₹)": "{:.2f}",
                         "Chg %": "{:+.2f}%",
                         "Edge Score": "{:.0f}/100"
-                    }).map(
+                    }, na_rep="—").map(
                         lambda v: "color: #22c55e; font-weight:700" if v == "🟢 CALL" else "color: #ef4444; font-weight:700" if v == "🔴 PUT" else "",
                         subset=["Dir"]
                     ).map(
@@ -1916,14 +2442,142 @@ else:
                     if 0 <= row_idx < len(enriched_edges):
                         selected_edge = enriched_edges[row_idx]
                         
-                        st.markdown(f"### 🔍 Detailed Analysis: **{selected_edge.symbol.replace('NSE:', '').replace('-EQ', '')}**")
+                        st.markdown(f"### 🔍 Detailed Analysis & Entry Studio: **{selected_edge.symbol.replace('NSE:', '').replace('-EQ', '')}**")
                         
-                        # 7 Layers breakdown
+                        sym_df = df_base_trig[df_base_trig["symbol"] == selected_edge.symbol]
+
+                        # ── 1. Momentum Entry Strategies Comparison ──────────────
+                        st.markdown("#### 📐 Momentum Entry & Exit Strategies")
+                        st.caption("Standard institutional execution frameworks for timing momentum entries with defined Risk-to-Reward.")
+
+                        all_trigs = trigger_eval.evaluate_all(
+                            direction=selected_edge.direction,
+                            ltp=selected_edge.ltp,
+                            atr=selected_edge.atr,
+                            df_base=sym_df,
+                            target_date=target_date
+                        )
+
+                        if all_trigs:
+                            strat_rows = []
+                            for strat_key, trig in all_trigs.items():
+                                strat_name_map = {
+                                    "FIBONACCI": "📐 Fibonacci Golden Pocket (50% - 61.8%)",
+                                    "VWAP": "🌊 Session / Rolling VWAP Pullback",
+                                    "EMA20": "📈 20 EMA Dynamic Trend Support",
+                                    "BREAKOUT": "🚀 Range / ORB Breakout",
+                                    "SUPERTREND": "🛡️ Supertrend Dynamic Support",
+                                }
+                                status_badge = "🟢 TRIGGERED" if trig.status == "TRIGGERED" else "🟡 APPROACHING" if trig.status == "APPROACHING" else "⚪ WAITING"
+                                risk = abs(trig.entry_price - trig.stop_loss)
+                                reward = abs(trig.target_1 - trig.entry_price)
+                                rrr = reward / risk if risk > 0 else 1.5
+                                
+                                strat_rows.append({
+                                    "Strategy": strat_name_map.get(strat_key, strat_key),
+                                    "Status": status_badge,
+                                    "Entry (₹)": trig.entry_price,
+                                    "Stop Loss (₹)": trig.stop_loss,
+                                    "Target 1 (₹)": trig.target_1,
+                                    "Target 2 (₹)": trig.target_2,
+                                    "RRR": f"1:{rrr:.1f}",
+                                    "Setup Detail": trig.detail,
+                                })
+
+                            st.dataframe(
+                                pd.DataFrame(strat_rows),
+                                use_container_width=True,
+                                hide_index=True,
+                                column_config={
+                                    "Entry (₹)": st.column_config.NumberColumn("Entry", format="₹%.2f"),
+                                    "Stop Loss (₹)": st.column_config.NumberColumn("Stop Loss", format="₹%.2f"),
+                                    "Target 1 (₹)": st.column_config.NumberColumn("Target 1", format="₹%.2f"),
+                                    "Target 2 (₹)": st.column_config.NumberColumn("Target 2", format="₹%.2f"),
+                                }
+                            )
+
+                        # ── 2. Fibonacci Retracement & Extension Ladder ───────────
+                        from trade_system.domains.strategy.application.strategies.fibonacci_retracement import FibonacciRetracementStrategy
+                        fib_strat = FibonacciRetracementStrategy()
+                        grid = fib_strat.calculate_grid(sym_df, direction=selected_edge.direction)
+
+                        if grid:
+                            st.markdown("#### 🪜 Fibonacci Retracement & Extension Ladder")
+                            st.caption(f"Impulse Swing: Low **₹{grid.swing_low:.2f}** ➔ High **₹{grid.swing_high:.2f}** (Range: ₹{grid.impulse_range:.2f})")
+
+                            col_fib1, col_fib2 = st.columns([1, 1.4])
+                            with col_fib1:
+                                fib_table_data = [
+                                    {"Fib Ratio": "-61.8% / 161.8%", "Level (₹)": grid.ext_1618, "Significance": "🎯 Golden Ratio Extension (T3)"},
+                                    {"Fib Ratio": "-27.2% / 127.2%", "Level (₹)": grid.ext_1272, "Significance": "🎯 First Trend Extension (T2)"},
+                                    {"Fib Ratio": "0.0%", "Level (₹)": grid.level_0, "Significance": "🏁 Swing High / Initial Target (T1)"},
+                                    {"Fib Ratio": "23.6%", "Level (₹)": grid.level_236, "Significance": "Shallow Retracement"},
+                                    {"Fib Ratio": "38.2%", "Level (₹)": grid.level_382, "Significance": "Momentum Support"},
+                                    {"Fib Ratio": "50.0%", "Level (₹)": grid.level_500, "Significance": "⚖️ Equilibrium (Halfway Retracement)"},
+                                    {"Fib Ratio": "61.8%", "Level (₹)": grid.level_618, "Significance": "✨ The Golden Pocket Entry"},
+                                    {"Fib Ratio": "78.6%", "Level (₹)": grid.level_786, "Significance": "🛑 Deep Discount / Invalidation SL"},
+                                    {"Fib Ratio": "100.0%", "Level (₹)": grid.level_1000, "Significance": "Origin Swing Low"},
+                                ]
+                                df_fib = pd.DataFrame(fib_table_data)
+                                st.dataframe(
+                                    df_fib,
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    column_config={
+                                        "Level (₹)": st.column_config.NumberColumn("Level", format="₹%.2f"),
+                                    }
+                                )
+
+                            with col_fib2:
+                                # Render visual candlestick chart with Fib levels
+                                if not sym_df.empty:
+                                    sub_df = sym_df.tail(40).copy()
+                                    fig_fib = go.Figure()
+                                    fig_fib.add_trace(go.Candlestick(
+                                        x=sub_df["timestamp"],
+                                        open=sub_df["open"],
+                                        high=sub_df["high"],
+                                        low=sub_df["low"],
+                                        close=sub_df["close"],
+                                        name="Price"
+                                    ))
+                                    # Add horizontal fib lines
+                                    colors = {
+                                        "0.0%": "#22c55e",
+                                        "38.2%": "#38bdf8",
+                                        "50.0%": "#eab308",
+                                        "61.8%": "#a855f7",
+                                        "78.6%": "#ef4444",
+                                        "127.2%": "#10b981",
+                                    }
+                                    for lvl_name, lvl_val in [
+                                        ("0.0% (T1)", grid.level_0),
+                                        ("50.0% (Eq)", grid.level_500),
+                                        ("61.8% (Golden)", grid.level_618),
+                                        ("78.6% (SL)", grid.level_786),
+                                        ("127.2% (T2)", grid.ext_1272),
+                                    ]:
+                                        fig_fib.add_hline(
+                                            y=lvl_val,
+                                            line_dash="dot",
+                                            line_color=colors.get(lvl_name.split()[0], "#94a3b8"),
+                                            annotation_text=f"{lvl_name}: ₹{lvl_val:.1f}",
+                                            annotation_position="bottom right",
+                                        )
+
+                                    fig_fib.update_layout(
+                                        title=f"Fibonacci Retracement Grid — {selected_edge.symbol.replace('NSE:', '').replace('-EQ', '')}",
+                                        height=360,
+                                        margin=dict(l=10, r=10, t=35, b=10),
+                                        template="plotly_dark",
+                                        xaxis_rangeslider_visible=False,
+                                    )
+                                    st.plotly_chart(fig_fib, use_container_width=True)
+
+                        # ── 3. Confluence Layers Breakdown ───────────────────────
                         st.markdown("#### 🛡️ Confluence Layer Breakdown")
                         for layer_key, result in selected_edge.layers.items():
                             layer_label = layer_key.replace("_", " ").title()
-                            
-                            # Subscore bar
                             st.markdown(f"**{layer_label}** — {result.detail}")
                             bar_color = "#22c55e" if result.direction == "CALL" else "#ef4444" if result.direction == "PUT" else "#94a3b8"
                             bar_width = int(result.score * 100)
@@ -1961,7 +2615,7 @@ else:
                 if df_cycle.empty or len(df_cycle) < 30:
                     st.warning("Insufficient daily historical candles in database to run cycle analysis.")
                 else:
-                    df_cycle['timestamp'] = pd.to_datetime(df_cycle['timestamp'], format='ISO8601')
+                    df_cycle['timestamp'] = pd.to_datetime(df_cycle['timestamp'], format='mixed', errors='coerce')
                     
                     # 1. Hurst Swing Cycle Calculations
                     df_c = df_cycle.copy().sort_values("timestamp").reset_index(drop=True)

@@ -105,6 +105,40 @@ def build_parser() -> argparse.ArgumentParser:
     ultimate_bt_parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
     ultimate_bt_parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
 
+    smc_scan_parser = subparsers.add_parser(
+        "smc-scan",
+        help="Run Smart Money Concepts (SMC) Daily F&O Scanner",
+    )
+    smc_scan_parser.add_argument("--direction", choices=["bullish", "bearish", "both"], default="both")
+    smc_scan_parser.add_argument("--min-score", type=float, default=50.0)
+    smc_scan_parser.add_argument("--top-n", type=int, default=15)
+    smc_scan_parser.add_argument("--telegram", action="store_true", help="Send alert to Telegram")
+
+    wyckoff_scan_parser = subparsers.add_parser(
+        "wyckoff-scan",
+        help="Run Wyckoff Method & VSA Daily F&O Scanner",
+    )
+    wyckoff_scan_parser.add_argument("--direction", choices=["bullish", "bearish", "both"], default="both")
+    wyckoff_scan_parser.add_argument("--min-score", type=float, default=60.0)
+    wyckoff_scan_parser.add_argument("--top-n", type=int, default=15)
+    wyckoff_scan_parser.add_argument("--telegram", action="store_true", help="Send alert to Telegram")
+
+    wyckoff_bt_parser = subparsers.add_parser(
+        "wyckoff-backtest",
+        help="Backtest Wyckoff Strategy over historical daily data",
+    )
+    wyckoff_bt_parser.add_argument("--max-symbols", type=int, default=60)
+    wyckoff_bt_parser.add_argument("--holding-bars", type=int, default=12)
+
+    fvg_scan_parser = subparsers.add_parser(
+        "fvg-scan",
+        help="Run Fair Value Gap (FVG) Daily F&O Scanner",
+    )
+    fvg_scan_parser.add_argument("--direction", choices=["bullish", "bearish", "both"], default="both")
+    fvg_scan_parser.add_argument("--min-score", type=float, default=65.0)
+    fvg_scan_parser.add_argument("--top-n", type=int, default=15)
+    fvg_scan_parser.add_argument("--telegram", action="store_true", help="Send alert to Telegram")
+
     return parser
 
 
@@ -310,6 +344,60 @@ def main(argv: list[str] | None = None) -> int:
         output_dir = Path("reports/ultimate_agent")
         agent_bt.run(output_dir, start_date=start, end_date=end)
         print(f"\nBacktest complete. Results saved to {output_dir}/")
+        return 0
+
+    if args.command == "smc-scan":
+        from trade_system.domains.advisory.application.agent.smc_daily_agent import SmcDailyScannerAgent
+        agent = SmcDailyScannerAgent(settings=settings, min_score=args.min_score)
+        setups = agent.scan_universe(direction=args.direction, min_score=args.min_score)
+        if not setups:
+            print("No high-conviction SMC setups found meeting threshold.")
+        else:
+            print(f"\nFound {len(setups)} SMC Setups (Showing Top {args.top_n}):\n")
+            for idx, s in enumerate(setups[:args.top_n], 1):
+                print(f"{idx}. {s.format_summary()}\n")
+            if args.telegram:
+                agent.send_telegram_report(setups, top_n=args.top_n)
+                print("Telegram notification sent.")
+        return 0
+
+    if args.command == "wyckoff-scan":
+        from trade_system.domains.advisory.application.agent.wyckoff_agent import WyckoffDailyScannerAgent
+        agent = WyckoffDailyScannerAgent(settings=settings, min_score=args.min_score)
+        setups = agent.scan_universe(direction=args.direction, min_score=args.min_score)
+        if not setups:
+            print("No active Wyckoff setups found meeting threshold.")
+        else:
+            print(f"\nFound {len(setups)} Wyckoff Setups (Showing Top {args.top_n}):\n")
+            for idx, s in enumerate(setups[:args.top_n], 1):
+                print(f"{idx}. {s.format_summary()}\n")
+            if args.telegram:
+                agent.send_telegram_report(setups, top_n=args.top_n)
+                print("Telegram notification sent.")
+        return 0
+
+    if args.command == "wyckoff-backtest":
+        from trade_system.domains.analysis.application.backtesting.wyckoff_backtest import WyckoffBacktestEngine
+        from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
+        engine = WyckoffBacktestEngine(max_holding_bars=args.holding_bars)
+        symbols = (["NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX"] + get_fo_universe())[:args.max_symbols]
+        summary = engine.evaluate_universe(symbols=symbols)
+        print(summary.summary_markdown())
+        return 0
+
+    if args.command == "fvg-scan":
+        from trade_system.domains.advisory.application.agent.fvg_agent import FvgDailyScannerAgent
+        agent = FvgDailyScannerAgent(settings=settings, min_score=args.min_score)
+        setups = agent.scan_universe(direction=args.direction, min_score=args.min_score)
+        if not setups:
+            print("No active FVG setups found meeting threshold.")
+        else:
+            print(f"\nFound {len(setups)} FVG Setups (Showing Top {args.top_n}):\n")
+            for idx, s in enumerate(setups[:args.top_n], 1):
+                print(f"{idx}. {s.format_summary()}\n")
+            if args.telegram:
+                agent.send_telegram_report(setups, top_n=args.top_n)
+                print("Telegram notification sent.")
         return 0
 
     parser.error(f"Unknown command: {args.command}")

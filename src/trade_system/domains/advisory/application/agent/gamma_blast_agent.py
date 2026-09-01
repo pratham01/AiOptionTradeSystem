@@ -80,7 +80,7 @@ class GammaBlastAgent:
         ctx = GammaContext()
 
         # 1. Expiry Calendar (NSE weekly expiry = Thursday)
-        today = pd.to_datetime(df.iloc[-1]["timestamp"]).date()
+        today = date.today()
         weekday = today.weekday()  # 0=Mon, 3=Thu
         if weekday <= 3:
             days_to_expiry = 3 - weekday

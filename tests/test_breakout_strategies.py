@@ -213,3 +213,28 @@ def test_vwap_pullback_detection(mock_engine, mock_read_sql, mock_breakout_scree
     assert len(pullback_alerts) == 1
     assert pullback_alerts[0]["symbol"] == "NSE:TESTSTOCK-EQ"
     assert pullback_alerts[0]["direction"] == "LONG"
+
+
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.pd.read_sql")
+@patch("trade_system.domains.analysis.application.analysis.breakout_screener.get_engine")
+def test_daily_supertrend_touch_detection(mock_engine, mock_read_sql, mock_breakout_screener, base_candles):
+    base_15m = base_candles.copy()
+    
+    # 30 daily candles ending on June 12, 2026
+    daily_dates = [pd.Timestamp("2026-05-14") + pd.Timedelta(days=i) for i in range(30)]
+    df_daily = pd.DataFrame({
+        "symbol": ["NSE:TESTSTOCK-EQ"] * 30,
+        "timestamp": daily_dates,
+        "open": [100.0 + i*0.1 for i in range(30)],
+        "high": [102.0 + i*0.1 for i in range(30)],
+        "low": [98.0 + i*0.1 for i in range(30)],
+        "close": [100.5 + i*0.1 for i in range(30)],
+        "volume": [5000.0] * 30
+    })
+    
+    mock_read_sql.side_effect = [base_15m, df_daily]
+    
+    alerts = mock_breakout_screener.scan_for_breakouts(target_date=date(2026, 6, 12))
+    assert isinstance(alerts, list)
+
+
