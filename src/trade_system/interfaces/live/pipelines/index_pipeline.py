@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time as dt_time
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from trade_system.domains.market_data.application.bar_store import BarStore
@@ -300,11 +302,6 @@ class IndexPipeline:
                         symbol, sugg.direction.value,
                         sugg.entry_zone_high, sugg.stop_loss,
                     )
-                elif "ORB" in sugg.tags:
-                    self.alert_agent.alert_orb(
-                        symbol, sugg.direction.value,
-                        sugg.entry_zone_high, sugg.stop_loss,
-                    )
         except Exception as exc:
             LOGGER.error("Early morning scan failed for %s: %s", symbol, exc)
 
@@ -343,8 +340,64 @@ class IndexPipeline:
     # SuperTrend trend-change detection
     # ------------------------------------------------------------------
 
+    def _check_supertrend_touch(
+        self,
+        symbol: str,
+        last_bar: pd.Series,
+        bar_time: pd.Timestamp,
+    ) -> None:
+        """Detect price touch on Supertrend line and dispatch Telegram retest alert."""
+        if self._last_touch_bar_time.get(symbol) == bar_time:
+            return
+        if "low" not in last_bar or "high" not in last_bar:
+            return
+        supertrend_val = float(last_bar.get("supertrend", 0.0))
+        if supertrend_val <= 0:
+            return
+        if not (float(last_bar["low"]) <= supertrend_val <= float(last_bar["high"])):
+            return
+
+        direction = int(last_bar["supertrend_direction"])
+        close_price = float(last_bar["close"])
+        self._last_touch_bar_time[symbol] = bar_time
+        self._supertrend_touch_events[symbol].append(
+            {
+                "bar_time": bar_time,
+                "direction": direction,
+                "close": close_price,
+                "supertrend": supertrend_val,
+            }
+        )
+
+        strike_info = self._build_adjacent_strikes_block(symbol, bar_time, close_price, count=5)
+        short_sym = symbol.split(":")[-1].replace("-INDEX", "").replace("-EQ", "")
+        dir_label = "BULLISH ST (SUPPORT)" if direction == 1 else "BEARISH ST (RESISTANCE)"
+        touch_icon = "🟢" if direction == 1 else "🔴"
+        touch_msg = (
+            f"🧭 <b>{short_sym} Supertrend Touch ({bar_time.strftime('%H:%M')})</b>\n"
+            f"Level: <b>{touch_icon} {dir_label}</b>\n"
+            f"ST Level: ₹{supertrend_val:.2f} | Close: ₹{close_price:.2f}\n"
+            f"<i>Institutional re-entry zone ({self.strategy_tf}m).</i>"
+            f"{strike_info}"
+        )
+        try:
+            self.notifier.send(touch_msg)
+            self.confirmed_notifier.send(touch_msg)
+        except Exception as exc:
+            LOGGER.exception("Failed to send ST touch alert for %s: %s", symbol, exc)
+
+        self.alert_agent.alert_retest(symbol, "Supertrend", supertrend_val, log_only=True)
+        LOGGER.info(
+            "Supertrend touch for %s at %s | trend=%s close=%.2f st=%.2f",
+            symbol,
+            bar_time,
+            direction,
+            close_price,
+            supertrend_val,
+        )
+
     def _check_trend_change(self, symbol: str, df: pd.DataFrame, adjusted: pd.DataFrame) -> None:
-        """Detect SuperTrend flips and send Telegram alerts."""
+        """Detect SuperTrend flips & touches and send Telegram alerts."""
         valid_df = _valid_supertrend_rows(df)
         if valid_df.empty:
             return
@@ -381,6 +434,9 @@ class IndexPipeline:
             else self._last_trend.get(symbol)
         )
 
+        # Check for price touching Supertrend
+        self._check_supertrend_touch(symbol, last_bar, bar_time)
+
         self._last_trend[symbol] = current_trend
         self._last_processed_trend_bar_time[symbol] = bar_time
 
@@ -399,6 +455,15 @@ class IndexPipeline:
                 return
 
             self._last_signal_bar_time[symbol] = bar_time
+            self._supertrend_flip_events[symbol].append(
+                {
+                    "bar_time": bar_time,
+                    "direction": current_trend,
+                    "close": close_price,
+                    "supertrend": supertrend_val,
+                    "timeframe_minutes": self.strategy_tf,
+                }
+            )
 
             action = "BUY CALL" if current_trend == 1 else "BUY PUT"
             color = "🟢" if current_trend == 1 else "🔴"
@@ -418,6 +483,9 @@ class IndexPipeline:
             except Exception as exc:
                 LOGGER.warning("Failed to calculate 15m ST for %s: %s", symbol, exc)
 
+            # --- Adjacent 5 Strikes Context ---
+            strike_info = self._build_adjacent_strikes_block(symbol, bar_time, close_price, count=5)
+
             short_sym = symbol.split(":")[-1].replace("-INDEX", "").replace("-EQ", "")
             main_msg = (
                 f"{color} <b>{short_sym} {bar_time.strftime('%H:%M')}</b>\n"
@@ -426,6 +494,7 @@ class IndexPipeline:
                 f"Close: ₹{close_price:.2f}\n"
                 f"Supertrend: ₹{supertrend_val:.2f}\n"
                 f"Action: <b>{action}</b>"
+                f"{strike_info}"
             )
             try:
                 self.notifier.send(main_msg)
@@ -436,6 +505,7 @@ class IndexPipeline:
                     f"15m Alignment: <b>{st_15_dir_str}</b>\n"
                     f"Close: ₹{close_price:.2f}  |  ST Level: ₹{supertrend_val:.2f}\n"
                     f"Action: <b>{action}</b>"
+                    f"{strike_info}"
                 )
                 self.confirmed_notifier.send(confirmed_msg)
             except Exception as exc:
@@ -445,6 +515,147 @@ class IndexPipeline:
                 "ST crossover %s at %s | trend=%s close=%.2f st=%.2f",
                 symbol, bar_time, current_trend, close_price, supertrend_val,
             )
+
+    # ------------------------------------------------------------------
+    # Option Chain Adjacent Strike Supertrend Helpers
+    # ------------------------------------------------------------------
+
+    def _build_adjacent_strikes_block(
+        self,
+        symbol: str,
+        bar_time: pd.Timestamp | datetime,
+        close_price: float,
+        count: int = 5,
+    ) -> str:
+        """Build formatted message block showing Supertrend direction for adjacent strikes."""
+        clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").replace("-EQ", "")
+        current_oc_df = None
+        oc_analysis = None
+        if callable(self._oc_snapshot_getter):
+            try:
+                res = self._oc_snapshot_getter(clean_sym)
+                if isinstance(res, tuple):
+                    current_oc_df, oc_analysis = res
+                elif isinstance(res, pd.DataFrame):
+                    current_oc_df = res
+            except Exception as exc:
+                LOGGER.warning("Failed to get OC snapshot via getter for %s: %s", clean_sym, exc)
+
+        date_str = bar_time.strftime("%Y%m%d") if hasattr(bar_time, "strftime") else datetime.now().strftime("%Y%m%d")
+        history_path = self.settings.option_chain_data_dir / f"{clean_sym}_strikes_{date_str}.csv"
+        history_df = self._load_option_chain_history(history_path)
+        if history_df.empty:
+            return ""
+
+        if oc_analysis and oc_analysis.get("atm", 0):
+            atm = int(oc_analysis.get("atm", 0))
+        else:
+            step = 100 if close_price > 40000 else 50
+            atm = int(round(close_price / step) * step)
+
+        if current_oc_df is not None and not current_oc_df.empty:
+            ce_strikes = self._select_adjacent_option_chain_strikes(current_oc_df, atm, "CE", count=count)
+            pe_strikes = self._select_adjacent_option_chain_strikes(current_oc_df, atm, "PE", count=count)
+        else:
+            ce_strikes = self._select_adjacent_option_chain_strikes(history_df, atm, "CE", count=count)
+            pe_strikes = self._select_adjacent_option_chain_strikes(history_df, atm, "PE", count=count)
+
+        if not ce_strikes and not pe_strikes:
+            return ""
+
+        def _build_strike_lines(strikes: list[int], opt_type: str) -> list[str]:
+            lines = []
+            for s in strikes:
+                res = self._calculate_option_chain_strike_supertrend(history_df, s, opt_type)
+                if res:
+                    st_dir = res["direction"]
+                    st_icon = "🟢" if st_dir == 1 else "🔴"
+                    ltp = res["ltp"]
+                    st_lvl = res.get("st_level")
+                    atm_tag = " ◀ATM" if s == atm else ""
+                    st_str = f" ST:{st_lvl:.1f}" if st_lvl else ""
+                    lines.append(f"  {st_icon} <b>{s}{opt_type}</b> ₹{ltp:.1f}{st_str}{atm_tag}")
+            return lines
+
+        ce_lines = _build_strike_lines(ce_strikes, "CE")
+        pe_lines = _build_strike_lines(pe_strikes, "PE")
+
+        if not ce_lines and not pe_lines:
+            return ""
+
+        parts = [f"\n\n<b>OI Snapshot (ATM {atm}) — {count} Strikes Each</b>"]
+        if ce_lines:
+            parts.append("<b>CALL (CE):</b>\n" + "\n".join(ce_lines))
+        if pe_lines:
+            parts.append("<b>PUT (PE):</b>\n" + "\n".join(pe_lines))
+        parts.append("🟢=ST Bullish  🔴=ST Bearish")
+        return "\n".join(parts)
+
+    def _select_adjacent_option_chain_strikes(
+        self,
+        current_df: pd.DataFrame,
+        atm: int,
+        option_type: str,
+        count: int = 5,
+    ) -> list[int]:
+        if "option_type" not in current_df.columns or "strike" not in current_df.columns:
+            return []
+        strikes = current_df.loc[current_df["option_type"].str.upper() == option_type.upper(), "strike"]
+        strikes = strikes.dropna().astype(float)
+        if strikes.empty:
+            return []
+        strike_set = {int(round(float(s))) for s in strikes}
+        strike_set.add(atm)
+        ordered = sorted(strike_set, key=lambda strike: (abs(strike - atm), strike))
+        return ordered[:count]
+
+    def _calculate_option_chain_strike_supertrend(
+        self,
+        history_df: pd.DataFrame,
+        strike: int,
+        option_type: str,
+    ) -> dict[str, Any] | None:
+        if "option_type" not in history_df.columns or "strike" not in history_df.columns:
+            return None
+        subset = history_df[
+            (history_df["option_type"].str.upper() == option_type.upper())
+            & (history_df["strike"].round().astype(int) == strike)
+        ].sort_values("timestamp").reset_index(drop=True)
+        if len(subset) < self.st_period + 2:
+            return None
+        prices = subset["ltp"].astype(float).values
+        opens = prices[:-1]
+        closes = prices[1:]
+        highs = np.maximum(opens, closes) * 1.001
+        lows = np.minimum(opens, closes) * 0.999
+        timestamps = subset["timestamp"].iloc[1:].values
+        ohlc = pd.DataFrame(
+            {"open": opens, "high": highs, "low": lows, "close": closes, "timestamp": timestamps},
+            index=timestamps,
+        )
+        st_df = calculate_supertrend(ohlc, period=self.st_period, multiplier=self.st_multiplier)
+        if st_df is None or st_df.empty:
+            return None
+        last = st_df.iloc[-1]
+        return {
+            "strike": strike,
+            "option_type": option_type,
+            "direction": int(last["supertrend_direction"]),
+            "st_level": float(last["supertrend"]),
+            "ltp": float(last["close"]),
+        }
+
+    def _load_option_chain_history(self, path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_csv(path, parse_dates=["timestamp"])
+            if "open_interest" in df.columns and "oi" not in df.columns:
+                df = df.rename(columns={"open_interest": "oi"})
+            return df
+        except Exception as exc:
+            LOGGER.warning("Failed to read OC history %s: %s", path, exc)
+            return pd.DataFrame()
 
     # ------------------------------------------------------------------
     # RSI Divergence

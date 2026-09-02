@@ -160,28 +160,8 @@ class LiveAlertAgent:
         self._try_execute_trade(symbol, 1 if direction == "CALL" else -1, price, sl, "GAP_AND_GO")
 
     def alert_orb(self, symbol: str, direction: str, price: float, sl: float):
-        """High-priority alert for 15-minute Opening Range Breakout (Index only)."""
-        is_index = "INDEX" in symbol.upper()
-        if not is_index:
-            LOGGER.debug(f"Telegram ORB alert suppressed for FO stock {symbol}")
-            self._try_execute_trade(symbol, 1 if direction == "CALL" else -1, price, sl, "ORB")
-            return
-
-        if getattr(self.settings, "enable_orb_telegram_alerts", True):
-            short_sym = symbol.split(':')[-1].replace('-INDEX', '')
-            icon = "💥" if direction == "CALL" else "🌪️"
-            message = (
-                f"{icon} <b>15M ORB BREAKOUT: {short_sym}</b>\n"
-                f"Direction: <b>{direction}</b>\n"
-                f"Breakout Price: ₹{price:.2f}\n"
-                f"Stop Loss: ₹{sl:.2f}\n"
-                f"<i>Institutional opening range breakout.</i>"
-            )
-            self._debounce_send(symbol, "ORB", message, custom_debounce=1800)
-        else:
-            LOGGER.debug(f"Telegram ORB alert suppressed for {symbol} (enable_orb_telegram_alerts=False)")
-            
-        self._try_execute_trade(symbol, 1 if direction == "CALL" else -1, price, sl, "ORB")
+        """Deprecated: ORB alert logic removed."""
+        pass
 
     def _try_execute_trade(self, symbol: str, direction: int, price: float, sl: float, trigger: str):
         if not self.execution_engine or not self.position_manager:

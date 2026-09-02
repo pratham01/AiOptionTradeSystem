@@ -73,7 +73,6 @@ from trade_system.domains.market_data.application.bar_store import BarStore
 from trade_system.interfaces.live.bar_aggregator import BarAggregator
 from trade_system.interfaces.live.pipelines.index_pipeline import IndexPipeline
 from trade_system.interfaces.live.pipelines.fo_pipeline import FoPipeline
-from trade_system.interfaces.live.pipelines.orb_pipeline import OrbPipeline
 from trade_system.interfaces.live.pipelines.sr_pipeline import SrPipeline
 from trade_system.interfaces.live.pipelines.gamma_pipeline import GammaPipeline
 
@@ -253,10 +252,6 @@ class LiveMarketDataService:
         self.last_option_edge_alerts: dict[str, pd.Timestamp] = {}
         self.alert_debounce_seconds: int = 300  # 5-minute cooldown on level-touch alerts
 
-        # Opening Range (first 15-min candle) tracking
-        self.first_15min_candle: dict[str, dict | None] = {symbol: None for symbol in symbols}
-        self.first_15min_break_sent: dict[str, set] = {symbol: set() for symbol in symbols}
-
         # Live state writer for dashboard communication
         self._live_state = LiveStateWriter()
 
@@ -304,6 +299,10 @@ class LiveMarketDataService:
             ict_ob=self.ict_ob,
             ict_liq=self.ict_liq,
             ict_ms=self.ict_ms,
+            oc_snapshot_getter=lambda clean_sym: (
+                self.oc_analyzers[clean_sym].get_option_chain_df() if clean_sym in self.oc_analyzers else self.prev_oc_df.get(clean_sym),
+                self.latest_oc_analysis.get(clean_sym)
+            ),
         )
 
         # FoPipeline: lightweight analytics for F&O equity symbols
@@ -320,11 +319,7 @@ class LiveMarketDataService:
             else:
                 self.fo_pipeline.register_symbol(sym)
 
-        # ---- Phase 7: ORB / S/R / Gamma pipelines (index-only) ----
-        self.orb_pipeline = OrbPipeline(
-            notifier=self.notifier,
-            confirmed_notifier=self.confirmed_notifier,
-        )
+        # ---- Phase 7: S/R / Gamma pipelines (index-only) ----
         self.sr_pipeline = SrPipeline(
             notifier=self.notifier,
             alert_agent=self.alert_agent,
@@ -338,7 +333,6 @@ class LiveMarketDataService:
         # Register index symbols in these pipelines
         for sym in symbols:
             if self._is_index(sym):
-                self.orb_pipeline.register_symbol(sym)
                 self.sr_pipeline.register_symbol(sym)
                 self.gamma_pipeline.register_symbol(sym)
 
@@ -712,9 +706,6 @@ class LiveMarketDataService:
         self.gamma_open_position = {symbol: None for symbol in self.symbols}
         self.gamma_trades = {symbol: [] for symbol in self.symbols}
 
-        self.first_15min_candle = {symbol: None for symbol in self.symbols}
-        self.first_15min_break_sent = {symbol: set() for symbol in self.symbols}
-
         self.last_rsi_div_signal_time = {symbol: None for symbol in self.symbols}
 
         self.eod_summary_sent_for = None
@@ -728,8 +719,6 @@ class LiveMarketDataService:
             self.index_pipeline.reset(index_syms)
         if hasattr(self, "fo_pipeline"):
             self.fo_pipeline.reset(fo_syms)
-        if hasattr(self, "orb_pipeline"):
-            self.orb_pipeline.reset(index_syms)
         if hasattr(self, "sr_pipeline"):
             self.sr_pipeline.reset(index_syms)
         if hasattr(self, "gamma_pipeline"):
@@ -1338,10 +1327,6 @@ class LiveMarketDataService:
         price = float(tick["ltp"])
         tick_time = tick["timestamp"]
 
-        # --- ORB breakout detection (index-only, delegates to OrbPipeline) ---
-        if self._is_index(symbol) and hasattr(self, "orb_pipeline"):
-            self.orb_pipeline.on_tick(symbol, price, tick_time)
-
         # --- Zone and level proximity (index-only, delegates to SrPipeline) ---
         if self._is_index(symbol) and hasattr(self, "sr_pipeline"):
             self.sr_pipeline.on_tick(symbol, price, tick_time)
@@ -1425,98 +1410,6 @@ class LiveMarketDataService:
         lower = min(previous_price, current_price)
         upper = max(previous_price, current_price)
         return lower <= level <= upper
-
-    # ------------------------------------------------------------------
-    # Opening Range Breakout (first 15-min candle)
-    # ------------------------------------------------------------------
-
-    def _maybe_set_first_15min_candle(self, symbol: str, current_date: date) -> None:
-        """Lock in the high/low of the first 15-min candle (9:15–9:29) once complete."""
-        if self.first_15min_candle[symbol] is not None:
-            return  # Already set for today
-        frame = self.minute_data[symbol]
-        if frame.empty:
-            return
-        today = frame[frame.index.date == current_date]
-        first_15 = today[
-            (today.index.time >= dt_time(9, 15)) & (today.index.time < dt_time(9, 30))
-        ]
-        if len(first_15) < 14:  # wait for at least 14 of 15 bars
-            return
-        candle = {
-            "high": float(first_15["high"].max()),
-            "low": float(first_15["low"].min()),
-            "open": float(first_15["open"].iloc[0]),
-            "close": float(first_15["close"].iloc[-1]),
-        }
-        self.first_15min_candle[symbol] = candle
-        LOGGER.info(
-            "First 15-min candle locked for %s: Open=%.2f High=%.2f Low=%.2f Close=%.2f",
-            symbol, candle["open"], candle["high"], candle["low"], candle["close"],
-        )
-        # Immediately send a reference card to Telegram so traders know the range
-        ref_msg = (
-            f"📐 <b>Opening Range Set — {self._short_symbol(symbol)}</b>\n"
-            f"<i>First 15-min candle (9:15 – 9:29)</i>\n"
-            f"Open:  ₹{candle['open']:.2f}\n"
-            f"🔺 High: ₹{candle['high']:.2f}\n"
-            f"🔻 Low:  ₹{candle['low']:.2f}\n"
-            f"Range: ₹{candle['high'] - candle['low']:.2f} pts\n"
-            f"<i>Alerts will fire on breakout above ₹{candle['high']:.2f} "
-            f"or breakdown below ₹{candle['low']:.2f}</i>"
-        )
-        self.notifier.send(ref_msg)
-        self.confirmed_notifier.send(ref_msg)
-
-    def _maybe_alert_first_15min_break(self, symbol: str, price: float, tick_time: datetime) -> None:
-        """Fire a Telegram alert when price crosses the first 15-min candle high or low (index-only)."""
-        if not self._is_index(symbol):
-            return
-        candle = self.first_15min_candle.get(symbol)
-        if not candle:
-            return
-        sent = self.first_15min_break_sent[symbol]
-        time_str = tick_time.strftime("%H:%M") if isinstance(tick_time, datetime) else str(tick_time)
-
-        if "HIGH" not in sent and price > candle["high"]:
-            sent.add("HIGH")
-            gap = price - candle["high"]
-            msg = (
-                f"🟢 <b>ORB Breakout — {self._short_symbol(symbol)} {time_str}</b>\n"
-                f"Price broke <b>ABOVE</b> first 15-min candle high\n"
-                f"\n"
-                f"First 15m High : ₹{candle['high']:.2f}\n"
-                f"Current Price  : ₹{price:.2f}  (+{gap:.2f} pts)\n"
-                f"First 15m Low  : ₹{candle['low']:.2f}\n"
-                f"\n"
-                f"Action: <b>BUY CALL / LONG</b>\n"
-                f"SL Ref: Below ₹{candle['high']:.2f} (ORB High)"
-            )
-            self.notifier.send(msg)
-            self.confirmed_notifier.send(msg)
-            LOGGER.info(
-                "ORB HIGH breakout for %s at %.2f (ORB High=%.2f)", symbol, price, candle["high"]
-            )
-
-        if "LOW" not in sent and price < candle["low"]:
-            sent.add("LOW")
-            gap = candle["low"] - price
-            msg = (
-                f"🔴 <b>ORB Breakdown — {self._short_symbol(symbol)} {time_str}</b>\n"
-                f"Price broke <b>BELOW</b> first 15-min candle low\n"
-                f"\n"
-                f"First 15m Low  : ₹{candle['low']:.2f}\n"
-                f"Current Price  : ₹{price:.2f}  (-{gap:.2f} pts)\n"
-                f"First 15m High : ₹{candle['high']:.2f}\n"
-                f"\n"
-                f"Action: <b>BUY PUT / SHORT</b>\n"
-                f"SL Ref: Above ₹{candle['low']:.2f} (ORB Low)"
-            )
-            self.notifier.send(msg)
-            self.confirmed_notifier.send(msg)
-            LOGGER.info(
-                "ORB LOW breakdown for %s at %.2f (ORB Low=%.2f)", symbol, price, candle["low"]
-            )
 
     def _flush_symbol_minute(self, symbol: str) -> None:
         """Complete the current minute bar and route it to the appropriate pipeline."""
@@ -1616,15 +1509,8 @@ class LiveMarketDataService:
             except Exception as exc:
                 LOGGER.error("IndexPipeline.on_bar failed for %s: %s", symbol, exc)
 
-            # ORB, S/R, Gamma Blast — now routed to dedicated pipelines
+            # S/R, Gamma Blast — routed to dedicated pipelines
             current_date = self._today_ist()
-
-            if hasattr(self, "orb_pipeline"):
-                self.orb_pipeline.on_bar(symbol, bar, minute_data, current_date)
-                # Sync candle back to orchestrator state for dashboard/EOD access
-                candle = self.orb_pipeline.get_candle(symbol)
-                if candle:
-                    self.first_15min_candle[symbol] = candle
 
             if hasattr(self, "sr_pipeline"):
                 # Sync previous-day levels into sr_pipeline on each bar
@@ -1941,8 +1827,6 @@ class LiveMarketDataService:
                 for sugg in morning_setups:
                     if "GAP_AND_GO" in sugg.tags:
                         self.alert_agent.alert_gap_and_go(symbol, sugg.direction.value, sugg.entry_zone_high, sugg.stop_loss)
-                    elif "ORB" in sugg.tags and "INDEX" in symbol.upper():
-                        self.alert_agent.alert_orb(symbol, sugg.direction.value, sugg.entry_zone_high, sugg.stop_loss)
             except Exception as e:
                 LOGGER.error(f"Early morning scan failed for {symbol}: {e}")
 

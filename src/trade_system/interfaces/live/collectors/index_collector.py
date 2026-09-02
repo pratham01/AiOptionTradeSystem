@@ -18,7 +18,6 @@ import pandas as pd
 
 from trade_system.domains.strategy.application.strategies.base import StrategyContext, TradeSignal
 from trade_system.domains.strategy.application.strategies.supertrend_strategy import SupertrendStrategy
-from trade_system.domains.strategy.application.strategies.orb_strategy import OrbStrategy
 from trade_system.domains.strategy.application.strategies.gamma_blast_strategy import GammaBlastStrategy
 from trade_system.domains.strategy.application.strategies.sniper_reversal_strategy import SniperReversalStrategy
 from trade_system.interfaces.live.alert_dispatcher import AlertDispatcher
@@ -51,7 +50,6 @@ class IndexMarketDataCollector:
 
         # Strategies
         self.st_strategy = SupertrendStrategy(period=7, multiplier=3.0)
-        self.orb_strategy = OrbStrategy(orb_minutes=15)
         self.gamma_strategy = GammaBlastStrategy()
         self.sniper_strategy = SniperReversalStrategy()
 
@@ -94,17 +92,12 @@ class IndexMarketDataCollector:
             if st_signal:
                 self._handle_signal(symbol, "supertrend_flip", st_signal)
 
-        # 2. Evaluate ORB Strategy on 1m or strategy timeframe
-        orb_signal = self.orb_strategy.evaluate(context)
-        if orb_signal:
-            self._handle_signal(symbol, "orb_breakout", orb_signal)
-
-        # 3. Evaluate Gamma Blast Strategy on 1m/3m
+        # 2. Evaluate Gamma Blast Strategy on 1m/3m
         gamma_signal = self.gamma_strategy.evaluate(context)
         if gamma_signal:
             self._handle_signal(symbol, "gamma_blast", gamma_signal)
 
-        # 4. Evaluate Sniper Reversal Strategy
+        # 3. Evaluate Sniper Reversal Strategy
         sniper_signal = self.sniper_strategy.evaluate(context)
         if sniper_signal:
             self._handle_signal(symbol, "sniper_reversal", sniper_signal)
