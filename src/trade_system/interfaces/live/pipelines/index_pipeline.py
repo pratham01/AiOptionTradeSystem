@@ -51,6 +51,10 @@ from trade_system.interfaces.live.helpers import (
     valid_supertrend_rows as _valid_supertrend_rows,
 )
 from trade_system.domains.strategy.application.indicators import calculate_supertrend
+from trade_system.domains.strategy.application.strategies.institutional_reversal_strategy import (
+    InstitutionalIntradayReversalStrategy,
+)
+from trade_system.domains.strategy.application.strategies.base import StrategyContext
 from trade_system.shared.config import Settings
 from trade_system.shared.notifications.telegram import TelegramNotifier
 
@@ -130,6 +134,14 @@ class IndexPipeline:
         self.ict_liq = ict_liq or {}
         self.ict_ms = ict_ms or {}
         self._oc_snapshot_getter = oc_snapshot_getter
+
+        # Institutional Intraday Reversal Strategy
+        self.institutional_reversal = InstitutionalIntradayReversalStrategy(
+            st_period=self.st_period,
+            st_multiplier=self.st_multiplier,
+            target_rr=2.0,
+            max_risk_pct=0.004,
+        )
 
         # Per-symbol tracking state
         self._strategy_data: dict[str, pd.DataFrame] = {}
@@ -275,6 +287,10 @@ class IndexPipeline:
 
             # MWPL Trigger
             self._check_mwpl_trigger(symbol, adjusted)
+
+            # Institutional Intraday Reversal Check (Feature Flagged)
+            if self.settings.enable_intraday_reversal_alerts:
+                self._check_institutional_reversal(symbol, adjusted)
 
         # --- ICT Stream ---
         if self.settings.enable_experimental_ict_stream:
@@ -686,6 +702,39 @@ class IndexPipeline:
             f"Action: <b>{action}</b>"
         )
         LOGGER.info("RSI Divergence for %s at %s | signal=%s", symbol, bar_time, direction)
+
+    def _check_institutional_reversal(self, symbol: str, adjusted: pd.DataFrame) -> None:
+        """Evaluate Institutional Intraday Reversal and dispatch alert if confirmed."""
+        try:
+            context = StrategyContext(
+                symbol=symbol,
+                timeframe=f"{self.strategy_timeframe_minutes}m",
+                history_df=adjusted,
+            )
+            signal = self.institutional_reversal.evaluate(context)
+            if signal is None:
+                return
+
+            # Build adjacent 5-strike Supertrend snapshot
+            bar_time = signal.timestamp if isinstance(signal.timestamp, pd.Timestamp) else pd.Timestamp(signal.timestamp)
+            strike_block = self._build_adjacent_strikes_block(symbol, bar_time, signal.entry_price, count=5)
+
+            self.alert_agent.alert_institutional_reversal(
+                symbol=symbol,
+                direction=signal.direction,
+                price=signal.entry_price,
+                sl=signal.stop_loss,
+                target_1=signal.target_1,
+                target_2=signal.target_2,
+                confluence=signal.confluence_factors[0] if signal.confluence_factors else "",
+                strike_block=strike_block,
+            )
+            LOGGER.info(
+                "Institutional Reversal alert sent for %s: %s at ₹%.2f (SL=%.2f, T1=%.2f)",
+                symbol, signal.direction, signal.entry_price, signal.stop_loss, signal.target_1,
+            )
+        except Exception as exc:
+            LOGGER.error("IndexPipeline._check_institutional_reversal failed for %s: %s", symbol, exc)
 
     # ------------------------------------------------------------------
     # Helpers

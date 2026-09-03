@@ -81,19 +81,20 @@ def run_recommend(top_n: int, out_dir: Path, send_telegram: bool) -> Path:
 
     if send_telegram:
         settings = Settings.load()
-        telegram_cfg = settings.st_confirmed_telegram if settings.st_confirmed_telegram.enabled else settings.telegram
-        if telegram_cfg.enabled:
-            notifier = TelegramNotifier(telegram_cfg.bot_token, telegram_cfg.chat_id)
-            lines = [
-                f"🎯 <b>F&O Option Buyer Picks (Top {top_n})</b>",
-                f"PCR: {context['pcr']} | VIX: {context['vix']} | Regime: {context['market_nature']}",
-                "",
-            ]
-            for i, r in enumerate(recs, 1):
-                sym = r.symbol.replace("NSE:", "").replace("-EQ", "")
-                conviction = "🔥 HIGH" if r.score >= 80 else "✅ MED" if r.score >= 60 else "⚠️ LOW"
-                lines.append(f"{i:02d}. <b>{sym}</b> ({r.sector}) score={r.score:.2f} [{conviction}] spot={r.spot:.2f}")
-            notifier.send("\n".join(lines))
+        if getattr(settings, "enable_fo_telegram_alerts", False):
+            telegram_cfg = settings.top_gainer_telegram if settings.top_gainer_telegram.enabled else settings.telegram
+            if telegram_cfg.enabled:
+                notifier = TelegramNotifier(telegram_cfg.bot_token, telegram_cfg.chat_id)
+                lines = [
+                    f"🎯 <b>F&O Option Buyer Picks (Top {top_n})</b>",
+                    f"PCR: {context['pcr']} | VIX: {context['vix']} | Regime: {context['market_nature']}",
+                    "",
+                ]
+                for i, r in enumerate(recs, 1):
+                    sym = r.symbol.replace("NSE:", "").replace("-EQ", "")
+                    conviction = "🔥 HIGH" if r.score >= 80 else "✅ MED" if r.score >= 60 else "⚠️ LOW"
+                    lines.append(f"{i:02d}. <b>{sym}</b> ({r.sector}) score={r.score:.2f} [{conviction}] spot={r.spot:.2f}")
+                notifier.send("\n".join(lines))
 
     LOGGER.info("Saved recommendations: %s", out_path)
     return out_path
@@ -135,18 +136,19 @@ def run_validate(input_file: Path | None, out_dir: Path, send_telegram: bool) ->
 
     if send_telegram:
         settings = Settings.load()
-        telegram_cfg = settings.st_confirmed_telegram if settings.st_confirmed_telegram.enabled else settings.telegram
-        if telegram_cfg.enabled:
-            notifier = TelegramNotifier(telegram_cfg.bot_token, telegram_cfg.chat_id)
-            lines = [
-                "📘 <b>F&O Option Buyer Validation</b>",
-                f"Hit rate: {report['hit_rate']}% | Avg change: {report['avg_change_pct']}%",
-                f"Benchmark (NIFTY): {benchmark_change:.2f}%",
-                "",
-                f"📝 <b>Analysis:</b>",
-                report["analysis"],
-            ]
-            notifier.send("\n".join(lines))
+        if getattr(settings, "enable_fo_telegram_alerts", False):
+            telegram_cfg = settings.top_gainer_telegram if settings.top_gainer_telegram.enabled else settings.telegram
+            if telegram_cfg.enabled:
+                notifier = TelegramNotifier(telegram_cfg.bot_token, telegram_cfg.chat_id)
+                lines = [
+                    "📘 <b>F&O Option Buyer Validation</b>",
+                    f"Hit rate: {report['hit_rate']}% | Avg change: {report['avg_change_pct']}%",
+                    f"Benchmark (NIFTY): {benchmark_change:.2f}%",
+                    "",
+                    f"📝 <b>Analysis:</b>",
+                    report["analysis"],
+                ]
+                notifier.send("\n".join(lines))
 
     LOGGER.info("Saved validation report: %s", out_path)
     return out_path

@@ -2042,7 +2042,8 @@ class LiveMarketDataService:
                     f"Suggested Action: <b>{action}</b>"
                     f"{confirmed_strike_block}"
                 )
-                self.confirmed_notifier.send(confirmed_msg)
+                if self._is_index(symbol):
+                    self.confirmed_notifier.send(confirmed_msg)
             except Exception as e:
                 LOGGER.exception(f"Failed to process trend change alert: {e}")
 
@@ -2148,6 +2149,8 @@ class LiveMarketDataService:
         )
 
     def _run_confirmed_strategy(self, symbol: str, adjusted: pd.DataFrame, latest_minute: pd.Timestamp | None) -> None:
+        if not self._is_index(symbol):
+            return
         timeframe = resample_to_timeframe(adjusted, self.confirmed_timeframe_minutes)
         timeframe = _completed_timeframe_bars(timeframe, self.confirmed_timeframe_minutes, latest_minute)
         if len(timeframe) < self.supertrend_period + 2:
@@ -2504,7 +2507,6 @@ class LiveMarketDataService:
                                     f"<b>Max Pain Strike:</b> ₹{max_pain:.1f}\n"
                                 )
                                 self.notifier.send(msg)
-                                self.confirmed_notifier.send(msg)
                                 LOGGER.info(f"Sent expiry Max Pain alert for {symbol}: Max Pain = {max_pain}")
                                 self.expiry_max_pain_sent[symbol] = now.date()
             

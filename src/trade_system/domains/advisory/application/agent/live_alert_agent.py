@@ -202,6 +202,37 @@ class LiveAlertAgent:
             )
             self.position_manager.add_position(pos)
 
+    def alert_institutional_reversal(
+        self,
+        symbol: str,
+        direction: str,
+        price: float,
+        sl: float,
+        target_1: float,
+        target_2: float,
+        confluence: str,
+        strike_block: str = "",
+    ) -> None:
+        """High-conviction Institutional Intraday Trend Reversal Alert (Indices)."""
+        if not getattr(self.settings, "enable_intraday_reversal_alerts", False):
+            LOGGER.debug("Institutional reversal alert suppressed for %s (enable_intraday_reversal_alerts=False)", symbol)
+            return
+
+        short_sym = symbol.split(":")[-1].replace("-INDEX", "").replace("-EQ", "")
+        icon = "🟢" if direction == "CALL" else "🔴"
+        action = "BUY CALL / BOTTOM FISHING" if direction == "CALL" else "BUY PUT / TOP SNIPE"
+        message = (
+            f"{icon} <b>INSTITUTIONAL INTRADAY REVERSAL: {short_sym}</b>\n"
+            f"Action: <b>{action}</b>\n"
+            f"Entry Spot: ₹{price:.2f}\n"
+            f"Stop Loss: ₹{sl:.2f}\n"
+            f"Target 1: ₹{target_1:.2f}\n"
+            f"Target 2: ₹{target_2:.2f}\n"
+            f"<i>Confluence: {confluence}</i>\n"
+            f"{strike_block}"
+        )
+        self._debounce_send(symbol, "INSTITUTIONAL_REVERSAL", message, custom_debounce=1800)
+
     def alert_sniper_reversal(self, symbol: str, setup_type: str, price: float, sl: float, narrative: str):
         """High-priority alert for precise institutional reversals."""
         short_sym = symbol.split(':')[-1].replace('-EQ', '')

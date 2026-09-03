@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 LOGGER = logging.getLogger(__name__)
 logger = LOGGER
@@ -25,6 +26,14 @@ importlib.reload(trade_system.domains.analysis.application.analysis.smart_entry_
 from trade_system.domains.analysis.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
 from trade_system.domains.analysis.application.analysis.smart_entry_trigger import SmartEntryTrigger
 from trade_system.domains.analysis.application.analysis.reversal_scanner import DailyReversalScanner, DailyReversalSetup
+from trade_system.domains.analysis.application.analysis.breakout_breakdown_proximity_screener import (
+    BreakoutBreakdownProximityScreener,
+    ProximitySetup,
+)
+from trade_system.domains.analysis.application.analysis.fo_pcr_screener import (
+    FOPCRScreener,
+    StockPCRInfo,
+)
 from trade_system.shared.notifications.telegram import TelegramNotifier
 from trade_system.shared.config import Settings
 
@@ -1134,12 +1143,14 @@ else:
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
 
     # -------------------------------------------------------------
-    # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Reversals | Edge | Drill-Down | Squeeze | Cycle
+    # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Proximity | PCR | Reversals | Edge | Drill-Down | Squeeze | Cycle
     # -------------------------------------------------------------
-    tab_leaderboard, tab_chart, tab_scanner, tab_reversal, tab_edge, tab_drilldown, tab_compression, tab_cycle = st.tabs([
+    tab_leaderboard, tab_chart, tab_scanner, tab_proximity, tab_pcr, tab_reversal, tab_edge, tab_drilldown, tab_compression, tab_cycle = st.tabs([
         "📊 Gainers & Losers",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
+        "🎯 Multi-Touch Proximity (KEI Pattern)",
+        "🎲 F&O Stock PCR Radar (Overbought/Oversold)",
         "🔄 Daily Reversal Radar",
         "⚡ Intraday Edge Finder",
         "🔎 Sector Drill-Down",
@@ -1598,6 +1609,484 @@ else:
                     st.info("No daily candle data found for the selected date.")
             except Exception as st_err:
                 st.error(f"Error loading Supertrend Radar: {st_err}")
+
+    # ---- TAB: Multi-Touch Proximity (KEI Pattern Radar) ----
+    with tab_proximity:
+        st.markdown("""
+        <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
+            <h3>🎯 Multi-Touch Support & Resistance Proximity Radar</h3>
+            <span class="badge" style="background: rgba(124, 58, 237, 0.2); color: #c084fc; border: 1px solid rgba(124, 58, 237, 0.35);">
+                KEI PATTERN • BREAKDOWN FLOORS & BREAKOUT CEILINGS
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("ℹ️ How does the Multi-Touch Proximity Radar (KEI Pattern) work?", expanded=False):
+            st.markdown("""
+            **Pattern Concept (Observed in stocks like KEI):**
+            - **Liquidity Absorption:** When a stock tests a horizontal level $\ge 3$ times, the orders at that level get consumed.
+            - **Descending/Ascending Squeeze:** In a breakdown setup, each bounce produces lower highs, squeezing price into support. In a breakout, higher lows compress into resistance.
+            - **Explosive Expansion:** When the level gives way, price breaks out or breaks down with sharp momentum.
+            - **Scanner Purpose:** Pinpoints stocks **right before** or **at the exact point** of breakdown/breakout so you can capture high R:R setups with defined risk.
+            """)
+
+        # Control filters
+        col_f1, col_f2, col_f3, col_f4 = st.columns([1.2, 1.2, 1.2, 1.5])
+        with col_f1:
+            prox_lookback = st.slider("Lookback (Days)", min_value=15, max_value=60, value=30, step=5, key="prox_lookback")
+        with col_f2:
+            prox_min_touches = st.slider("Min Tests (Touches)", min_value=2, max_value=6, value=3, step=1, key="prox_touches")
+        with col_f3:
+            prox_max_dist = st.slider("Max Distance %", min_value=0.5, max_value=5.0, value=2.5, step=0.5, key="prox_dist")
+        with col_f4:
+            prox_type_filter = st.selectbox(
+                "Filter Category",
+                ["All Setups", "🚨 At Trigger Point (<= 0.5%)", "📉 Breakdown Floor Setups", "🚀 Breakout Ceiling Setups", "⚡ Just Broken Down/Out"],
+                index=0,
+                key="prox_category_filter"
+            )
+
+        with st.spinner("Analyzing F&O stocks for multi-touch levels..."):
+            engine = get_engine()
+            try:
+                with engine.connect() as conn:
+                    df_prox_raw = pd.read_sql(text("""
+                        SELECT symbol, timestamp, open, high, low, close, volume 
+                        FROM ohlcv_daily 
+                        WHERE timestamp >= date(:target_date, '-90 days') AND timestamp <= :target_date
+                        ORDER BY symbol, timestamp ASC
+                    """), conn, params={"target_date": target_date.isoformat()})
+                df_prox_raw['timestamp'] = pd.to_datetime(df_prox_raw['timestamp'], format="mixed", errors="coerce")
+                df_prox_raw = df_prox_raw.dropna(subset=['timestamp'])
+            except Exception as prox_e:
+                st.error(f"Error querying database for proximity radar: {prox_e}")
+                df_prox_raw = pd.DataFrame()
+
+        if df_prox_raw.empty:
+            st.info("No daily candle data available to scan for proximity setups.")
+        else:
+            symbols_data = {sym: grp for sym, grp in df_prox_raw.groupby('symbol')}
+            screener = BreakoutBreakdownProximityScreener(
+                lookback_days=prox_lookback,
+                cluster_tolerance_pct=0.012,
+                min_touches=prox_min_touches,
+                max_proximity_pct=prox_max_dist,
+            )
+            scan_out = screener.scan_universe(symbols_data)
+            all_breakdowns = scan_out["breakdown_setups"]
+            all_breakouts = scan_out["breakout_setups"]
+
+            # Filter setups based on category
+            if prox_type_filter == "🚨 At Trigger Point (<= 0.5%)":
+                bdowns = [s for s in all_breakdowns if abs(s.distance_pct) <= 0.5]
+                bouts = [s for s in all_breakouts if abs(s.distance_pct) <= 0.5]
+            elif prox_type_filter == "📉 Breakdown Floor Setups":
+                bdowns = all_breakdowns
+                bouts = []
+            elif prox_type_filter == "🚀 Breakout Ceiling Setups":
+                bdowns = []
+                bouts = all_breakouts
+            elif prox_type_filter == "⚡ Just Broken Down/Out":
+                bdowns = [s for s in all_breakdowns if s.setup_type == "JUST_BROKEN_DOWN"]
+                bouts = [s for s in all_breakouts if s.setup_type == "JUST_BROKEN_OUT"]
+            else:
+                bdowns = all_breakdowns
+                bouts = all_breakouts
+
+            # Top KPI metrics
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            with kpi1:
+                st.metric("🚨 Breakdown Floor Tests", len(all_breakdowns), help="Stocks testing horizontal support >= 3 times")
+            with kpi2:
+                st.metric("🚀 Breakout Ceiling Tests", len(all_breakouts), help="Stocks testing horizontal resistance >= 3 times")
+            with kpi3:
+                at_trigger_count = sum(1 for s in all_breakdowns + all_breakouts if abs(s.distance_pct) <= 0.5)
+                st.metric("⚡ At Trigger Level (<0.5%)", at_trigger_count, help="Stocks currently within 0.5% of the level")
+            with kpi4:
+                high_comp_count = sum(1 for s in all_breakdowns + all_breakouts if s.atr_ratio < 0.85)
+                st.metric("📦 High Volatility Squeeze", high_comp_count, help="5d ATR < 0.85x 20d ATR")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # Tabbed View for Breakdowns vs Breakouts
+            col_bdown_tab, col_bout_tab = st.tabs([
+                f"🚨 Breakdown Candidates ({len(bdowns)})",
+                f"🚀 Breakout Candidates ({len(bouts)})"
+            ])
+
+            with col_bdown_tab:
+                if not bdowns:
+                    st.info("No breakdown setups matching the filter.")
+                else:
+                    bdown_df = pd.DataFrame([s.to_dict() for s in bdowns])
+                    display_cols = ["clean_symbol", "sector", "current_price", "key_level", "distance_pct", "touch_count", "compression_score", "atr_ratio", "setup_type"]
+                    renamed_df = bdown_df[display_cols].rename(columns={
+                        "clean_symbol": "Symbol",
+                        "sector": "Sector",
+                        "current_price": "LTP",
+                        "key_level": "Support Floor",
+                        "distance_pct": "Dist %",
+                        "touch_count": "Touches",
+                        "compression_score": "Score",
+                        "atr_ratio": "ATR Ratio",
+                        "setup_type": "Status"
+                    })
+                    st.dataframe(
+                        renamed_df.style.format({
+                            "LTP": "₹{:.2f}",
+                            "Support Floor": "₹{:.2f}",
+                            "Dist %": "{:+.2f}%",
+                            "Touches": "{:d} tests",
+                            "Score": "{:.0f}/100",
+                            "ATR Ratio": "{:.2f}x"
+                        }).map(
+                            lambda v: "background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and abs(v) <= 0.5 else "color: #f87171",
+                            subset=["Dist %"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="prox_breakdown_table"
+                    )
+
+            with col_bout_tab:
+                if not bouts:
+                    st.info("No breakout setups matching the filter.")
+                else:
+                    bout_df = pd.DataFrame([s.to_dict() for s in bouts])
+                    display_cols = ["clean_symbol", "sector", "current_price", "key_level", "distance_pct", "touch_count", "compression_score", "atr_ratio", "setup_type"]
+                    renamed_bout_df = bout_df[display_cols].rename(columns={
+                        "clean_symbol": "Symbol",
+                        "sector": "Sector",
+                        "current_price": "LTP",
+                        "key_level": "Resistance Ceiling",
+                        "distance_pct": "Dist %",
+                        "touch_count": "Touches",
+                        "compression_score": "Score",
+                        "atr_ratio": "ATR Ratio",
+                        "setup_type": "Status"
+                    })
+                    st.dataframe(
+                        renamed_bout_df.style.format({
+                            "LTP": "₹{:.2f}",
+                            "Resistance Ceiling": "₹{:.2f}",
+                            "Dist %": "{:+.2f}%",
+                            "Touches": "{:d} tests",
+                            "Score": "{:.0f}/100",
+                            "ATR Ratio": "{:.2f}x"
+                        }).map(
+                            lambda v: "background-color: rgba(34, 197, 94, 0.2); color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and abs(v) <= 0.5 else "color: #4ade80",
+                            subset=["Dist %"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        key="prox_breakout_table"
+                    )
+
+            # Interactive Chart Inspector
+            st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+            st.subheader("🔬 Multi-Touch Level Chart Inspector")
+
+            combined_setups = bdowns + bouts
+            if combined_setups:
+                setup_map = {f"{s.clean_symbol} ({s.sector}) — {s.setup_type} | Level: ₹{s.key_level:.1f} ({s.touch_count} tests)": s for s in combined_setups}
+                selected_label = st.selectbox(
+                    "Select Stock to Inspect Multi-Touch S/R Level & Compression:",
+                    list(setup_map.keys()),
+                    index=0,
+                    key="prox_chart_selector"
+                )
+                active_setup = setup_map[selected_label]
+                sym_raw = active_setup.symbol
+                df_chart = symbols_data.get(sym_raw, pd.DataFrame()).copy()
+
+                if not df_chart.empty:
+                    df_chart = df_chart.sort_values("timestamp").reset_index(drop=True)
+                    df_sub = df_chart.iloc[-prox_lookback:].copy()
+
+                    # Technical indicators for chart
+                    df_sub["sma20"] = df_sub["close"].rolling(20, min_periods=5).mean()
+                    df_sub["std20"] = df_sub["close"].rolling(20, min_periods=5).std()
+                    df_sub["bb_upper"] = df_sub["sma20"] + 2.0 * df_sub["std20"]
+                    df_sub["bb_lower"] = df_sub["sma20"] - 2.0 * df_sub["std20"]
+
+                    from plotly.subplots import make_subplots
+                    fig_prox = make_subplots(
+                        rows=2, cols=1,
+                        shared_xaxes=True,
+                        vertical_spacing=0.08,
+                        row_heights=[0.75, 0.25],
+                        subplot_titles=(
+                            f"<b>{active_setup.clean_symbol}</b> — {active_setup.setup_type} (Key Level: ₹{active_setup.key_level:.2f})",
+                            "Volume"
+                        )
+                    )
+
+                    # Candlestick Trace
+                    fig_prox.add_trace(go.Candlestick(
+                        x=df_sub["timestamp"],
+                        open=df_sub["open"],
+                        high=df_sub["high"],
+                        low=df_sub["low"],
+                        close=df_sub["close"],
+                        name="Daily OHLC",
+                        increasing_line_color="#22c55e",
+                        decreasing_line_color="#ef4444",
+                    ), row=1, col=1)
+
+                    # Horizontal Key Level Line
+                    level_color = "#ef4444" if active_setup.direction == "BEARISH" else "#22c55e"
+                    level_name = f"Support Floor (₹{active_setup.key_level:.2f})" if active_setup.direction == "BEARISH" else f"Resistance Ceiling (₹{active_setup.key_level:.2f})"
+
+                    fig_prox.add_hline(
+                        y=active_setup.key_level,
+                        line_dash="dash",
+                        line_color=level_color,
+                        line_width=2.5,
+                        annotation_text=f"🎯 {level_name} [{active_setup.touch_count} tests]",
+                        annotation_position="top left",
+                        row=1, col=1,
+                    )
+
+                    # Bollinger Bands
+                    fig_prox.add_trace(go.Scatter(
+                        x=df_sub["timestamp"], y=df_sub["bb_upper"],
+                        line=dict(color="rgba(148, 163, 184, 0.3)", width=1),
+                        name="BB Upper", showlegend=False
+                    ), row=1, col=1)
+                    fig_prox.add_trace(go.Scatter(
+                        x=df_sub["timestamp"], y=df_sub["bb_lower"],
+                        line=dict(color="rgba(148, 163, 184, 0.3)", width=1),
+                        fill="tonexty", fillcolor="rgba(148, 163, 184, 0.05)",
+                        name="BB Lower", showlegend=False
+                    ), row=1, col=1)
+
+                    # Volume Bar
+                    vol_colors = ["#22c55e" if c >= o else "#ef4444" for c, o in zip(df_sub["close"], df_sub["open"])]
+                    fig_prox.add_trace(go.Bar(
+                        x=df_sub["timestamp"], y=df_sub["volume"],
+                        marker_color=vol_colors, name="Volume", showlegend=False
+                    ), row=2, col=1)
+
+                    fig_prox.update_layout(
+                        template="plotly_dark",
+                        xaxis_rangeslider_visible=False,
+                        height=520,
+                        margin=dict(l=20, r=20, t=40, b=20),
+                    )
+                    st.plotly_chart(fig_prox, use_container_width=True)
+
+                    # Forensics Callout
+                    st.info(f"💡 **Forensics Summary:** {active_setup.analysis_summary} | Compression Score: **{active_setup.compression_score:.0f}/100** | 5d/20d ATR Ratio: **{active_setup.atr_ratio:.2f}x**")
+
+    # ---- TAB: F&O Stock PCR Radar (Overbought / Oversold) ----
+    with tab_pcr:
+        st.markdown("""
+        <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
+            <h3>🎲 F&O Stock Put-Call Ratio (PCR) & Overbought / Oversold Radar</h3>
+            <span class="badge" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35);">
+                LIVE OPTION CHAINS • CONTRARIAN SHORT SQUEEZES & OVERBOUGHT RISKS
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("ℹ️ How does Stock Option PCR & Overbought/Oversold Detection work?", expanded=False):
+            st.markdown("""
+            **Understanding Equity Option PCR (Put-Call Ratio):**
+            - **Stock Options vs Indices:** Unlike Index Nifty/BankNifty where PCR ranges 0.60–1.60, individual stock options naturally have higher institutional Call writing. 
+            - **🟢 OVERSOLD (PCR $\le 0.55$):** Heavy Call writing builds thick overhead resistance. However, if the stock bases or reverses upward, call writers are trapped and forced to cover, fueling explosive **Short Squeeze Rallies**.
+            - **🔴 OVERBOUGHT (PCR $\ge 0.85$):** Heavy Put writing reflects euphoric long positioning. If key support breaks, long liquidation triggers sharp multi-day declines.
+            - **🎯 Max Pain:** The strike price where option sellers experience minimum aggregate loss at expiry.
+            """)
+
+        # Controls & Sliders
+        col_p1, col_p2, col_p3, col_p4 = st.columns([1.2, 1.2, 1.4, 1.2])
+        with col_p1:
+            pcr_ob_thresh = st.slider("Overbought PCR (>=)", min_value=0.70, max_value=1.50, value=0.85, step=0.05, key="pcr_ob_thresh")
+        with col_p2:
+            pcr_os_thresh = st.slider("Oversold PCR (<=)", min_value=0.30, max_value=0.70, value=0.55, step=0.05, key="pcr_os_thresh")
+        with col_p3:
+            pcr_filter_cat = st.selectbox(
+                "Filter Sentiment",
+                ["All Setups", "🟢 Oversold (Short Squeeze Candidates)", "🔴 Overbought (Reversal Risk)", "💎 Extreme Setups Only"],
+                index=0,
+                key="pcr_filter_cat"
+            )
+        with col_p4:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            run_pcr_scan = st.button("🔄 Scan Live Option Chains", key="btn_run_pcr_scan", use_container_width=True)
+
+        # Cache/Session State for PCR Scan Data
+        if "pcr_scan_results" not in st.session_state or run_pcr_scan:
+            with st.spinner("Fetching live option chains & computing PCR across F&O universe..."):
+                try:
+                    pcr_screener = FOPCRScreener(
+                        overbought_threshold=pcr_ob_thresh,
+                        oversold_threshold=pcr_os_thresh,
+                    )
+                    st.session_state["pcr_scan_results"] = pcr_screener.scan_universe_pcr(max_symbols=120)
+                except Exception as pcr_exc:
+                    st.error(f"Failed to scan F&O option chains: {pcr_exc}")
+                    st.session_state["pcr_scan_results"] = {"overbought": [], "oversold": [], "neutral": [], "all": []}
+
+        pcr_data = st.session_state.get("pcr_scan_results", {})
+        all_pcr_stocks: List[StockPCRInfo] = pcr_data.get("all", [])
+
+        if not all_pcr_stocks:
+            st.info("No option chain data available. Click '🔄 Scan Live Option Chains' to scan.")
+        else:
+            ob_stocks = [s for s in all_pcr_stocks if s.pcr_oi >= pcr_ob_thresh]
+            os_stocks = [s for s in all_pcr_stocks if s.pcr_oi <= pcr_os_thresh]
+            extreme_stocks = [s for s in all_pcr_stocks if s.pcr_oi >= 1.00 or s.pcr_oi <= 0.45]
+            avg_pcr = np.mean([s.pcr_oi for s in all_pcr_stocks]) if all_pcr_stocks else 0.0
+
+            # KPI Summary
+            pk1, pk2, pk3, pk4 = st.columns(4)
+            with pk1:
+                st.metric("🔴 Overbought Stocks", len(ob_stocks), help=f"PCR >= {pcr_ob_thresh:.2f} (High Put Writing)")
+            with pk2:
+                st.metric("🟢 Oversold Stocks", len(os_stocks), help=f"PCR <= {pcr_os_thresh:.2f} (High Call Writing / Squeeze Candidates)")
+            with pk3:
+                st.metric("💎 Extreme Setups", len(extreme_stocks), help="PCR >= 1.00 or PCR <= 0.45")
+            with pk4:
+                st.metric("⚖️ Average F&O PCR", f"{avg_pcr:.2f}", help="Average Put-Call Ratio across universe")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # Sub-Tabs for Oversold vs Overbought vs All
+            tab_os, tab_ob, tab_all_pcr = st.tabs([
+                f"🟢 Oversold / Squeeze Candidates ({len(os_stocks)})",
+                f"🔴 Overbought / Reversal Risk ({len(ob_stocks)})",
+                f"📋 All F&O Stock PCR ({len(all_pcr_stocks)})"
+            ])
+
+            def _render_pcr_dataframe(stock_list: List[StockPCRInfo], key_name: str):
+                if not stock_list:
+                    st.info("No stocks matching current criteria.")
+                    return
+                df = pd.DataFrame([s.to_dict() for s in stock_list])
+                cols = ["clean_symbol", "sector", "spot_price", "pcr_oi", "pcr_volume", "sentiment_state", "total_call_oi", "total_put_oi", "max_pain_strike", "highest_ce_oi_strike", "highest_pe_oi_strike", "contrarian_bias"]
+                renamed = df[cols].rename(columns={
+                    "clean_symbol": "Symbol",
+                    "sector": "Sector",
+                    "spot_price": "Spot LTP",
+                    "pcr_oi": "PCR (OI)",
+                    "pcr_volume": "PCR (Vol)",
+                    "sentiment_state": "Regime",
+                    "total_call_oi": "Call OI",
+                    "total_put_oi": "Put OI",
+                    "max_pain_strike": "Max Pain",
+                    "highest_ce_oi_strike": "CE Wall (Res)",
+                    "highest_pe_oi_strike": "PE Wall (Supp)",
+                    "contrarian_bias": "Contrarian Bias"
+                })
+                st.dataframe(
+                    renamed.style.format({
+                        "Spot LTP": "₹{:.2f}",
+                        "PCR (OI)": "{:.2f}",
+                        "PCR (Vol)": "{:.2f}",
+                        "Call OI": "{:,.0f}",
+                        "Put OI": "{:,.0f}",
+                        "Max Pain": "₹{:.1f}",
+                        "CE Wall (Res)": "₹{:.1f}",
+                        "PE Wall (Supp)": "₹{:.1f}",
+                    }).map(
+                        lambda v: "background-color: rgba(34, 197, 94, 0.2); color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v <= 0.55 else ("background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v >= 0.85 else ""),
+                        subset=["PCR (OI)"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    key=key_name
+                )
+
+            with tab_os:
+                _render_pcr_dataframe(os_stocks, "pcr_table_os")
+
+            with tab_ob:
+                _render_pcr_dataframe(ob_stocks, "pcr_table_ob")
+
+            with tab_all_pcr:
+                _render_pcr_dataframe(all_pcr_stocks, "pcr_table_all")
+
+            # Option Chain Strike Distribution Chart Inspector
+            st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
+            st.subheader("🔬 F&O Stock Option Chain & OI Distribution Inspector")
+
+            stock_lookup = {f"{s.clean_symbol} ({s.sector}) — PCR: {s.pcr_oi:.2f} | {s.sentiment_state}": s for s in all_pcr_stocks}
+            selected_pcr_label = st.selectbox(
+                "Select Stock to Inspect Option Chain Strike OI & Max Pain:",
+                list(stock_lookup.keys()),
+                index=0,
+                key="pcr_stock_chart_selector"
+            )
+            target_stock = stock_lookup[selected_pcr_label]
+
+            # Fetch fresh detailed option chain for selected stock
+            with st.spinner(f"Loading strike-by-strike option chain for {target_stock.clean_symbol}..."):
+                try:
+                    broker = get_broker()
+                    res_chain = broker.fyers.optionchain(data={"symbol": target_stock.symbol, "strikecount": 15})
+                    if isinstance(res_chain, dict) and res_chain.get("s") == "ok":
+                        oc_list = res_chain.get("data", {}).get("optionsChain", [])
+                        df_oc = pd.DataFrame(oc_list)
+                    else:
+                        df_oc = pd.DataFrame()
+                except Exception:
+                    df_oc = pd.DataFrame()
+
+            if not df_oc.empty and "strike_price" in df_oc.columns:
+                ce_df = df_oc[df_oc["option_type"] == "CE"].sort_values("strike_price")
+                pe_df = df_oc[df_oc["option_type"] == "PE"].sort_values("strike_price")
+
+                fig_oc = go.Figure()
+                fig_oc.add_trace(go.Bar(
+                    x=ce_df["strike_price"],
+                    y=ce_df["oi"],
+                    name="Call OI (Resistance)",
+                    marker_color="#ef4444",
+                    opacity=0.85
+                ))
+                fig_oc.add_trace(go.Bar(
+                    x=pe_df["strike_price"],
+                    y=pe_df["oi"],
+                    name="Put OI (Support)",
+                    marker_color="#22c55e",
+                    opacity=0.85
+                ))
+
+                # Add Max Pain vertical line
+                fig_oc.add_vline(
+                    x=target_stock.max_pain_strike,
+                    line_dash="dash",
+                    line_color="#f59e0b",
+                    line_width=2,
+                    annotation_text=f"Max Pain: ₹{target_stock.max_pain_strike:.1f}",
+                    annotation_position="top left"
+                )
+
+                # Add Spot Price vertical line
+                if target_stock.spot_price > 0:
+                    fig_oc.add_vline(
+                        x=target_stock.spot_price,
+                        line_dash="solid",
+                        line_color="#38bdf8",
+                        line_width=2.5,
+                        annotation_text=f"Spot LTP: ₹{target_stock.spot_price:.2f}",
+                        annotation_position="top right"
+                    )
+
+                fig_oc.update_layout(
+                    title=f"<b>{target_stock.clean_symbol}</b> — Strike-by-Strike OI Profile (PCR: {target_stock.pcr_oi:.2f})",
+                    barmode="group",
+                    template="plotly_dark",
+                    xaxis_title="Strike Price (₹)",
+                    yaxis_title="Open Interest (Contracts)",
+                    height=460,
+                    margin=dict(l=20, r=20, t=40, b=20),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                st.plotly_chart(fig_oc, use_container_width=True)
+
+                st.info(f"💡 **Institutional Forensics:** {target_stock.analysis_narrative} | CE Resistance Wall: **₹{target_stock.highest_ce_oi_strike:.1f}** | PE Support Wall: **₹{target_stock.highest_pe_oi_strike:.1f}** | Expiry: **{target_stock.nearest_expiry}**")
 
     # ---- TAB 4: Daily Reversal Radar ----
     with tab_reversal:

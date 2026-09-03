@@ -6,10 +6,16 @@ import plotly.graph_objects as go
 from datetime import datetime, date
 from pathlib import Path
 import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from trade_system.domains.analysis.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
 from trade_system.domains.analysis.application.analysis import pro_oc_analyzer
+from trade_system.domains.analysis.application.analysis.fo_pcr_screener import (
+    FOPCRScreener,
+    StockPCRInfo,
+)
 from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
 from trade_system.shared.config import Settings
 from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 
@@ -27,6 +33,57 @@ SIGNAL_STYLES = {
 def get_broker():
     """Return the shared cached broker instance."""
     return get_cached_broker()
+
+
+@st.cache_data(ttl=15)
+def fetch_live_fyers_option_chain(symbol: str, strikecount: int = 15) -> Tuple[Optional[pd.DataFrame], float, str]:
+    """Fetch live real-time option chain and spot price directly from Fyers."""
+    try:
+        broker = get_broker()
+        if not broker:
+            return None, 0.0, ""
+        res = broker.fyers.optionchain(data={"symbol": symbol, "strikecount": strikecount})
+        if not isinstance(res, dict) or res.get("s") != "ok":
+            LOGGER.warning("Fyers live option chain call returned non-ok: %s", res)
+            return None, 0.0, ""
+        data = res.get("data", {})
+        options_chain = data.get("optionsChain", [])
+        if not options_chain:
+            return None, 0.0, ""
+        df = pd.DataFrame(options_chain)
+        spot_price = 0.0
+        for item in options_chain:
+            if item.get("underlying_value"):
+                spot_price = float(item["underlying_value"])
+                break
+        if spot_price == 0.0:
+            q = broker.get_quotes([symbol])
+            if q and symbol in q:
+                val = q[symbol]
+                spot_price = float(val.get("lp", 0.0) if isinstance(val, dict) else getattr(val, "ltp", 0.0))
+        expiry = str(options_chain[0].get("expiry_date", "")) if options_chain else ""
+        return df, spot_price, expiry
+    except Exception as e:
+        LOGGER.error(f"Error fetching live option chain: {e}")
+        return None, 0.0, ""
+
+
+@st.cache_data(ttl=60)
+def fetch_live_price_history(symbol: str, resolution: str = "5") -> pd.DataFrame:
+    """Fetch recent intraday price candles from Fyers for live VWAP and charts."""
+    try:
+        broker = get_broker()
+        if not broker:
+            return pd.DataFrame()
+        today_str = date.today().strftime("%Y-%m-%d")
+        df = broker.fetch_history(symbol, resolution, today_str, today_str)
+        if df is not None and not df.empty:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed")
+            return df.sort_values("timestamp").reset_index(drop=True)
+        return pd.DataFrame()
+    except Exception as e:
+        LOGGER.error(f"Error fetching live price history: {e}")
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
@@ -1200,6 +1257,147 @@ def render_tab_iv_greeks(latest_oc: pd.DataFrame, spot_price: float, analyzer: S
         st.info("No Greeks data available for theta visualization.")
 
 
+def render_tab_divergence_radar(divergence_data: Dict[str, Any], spot_price: float, max_pain: float, pcr: float, ce_wall: float, pe_wall: float):
+    """Render the Institutional Divergence & Market Trap Radar tab."""
+    st.subheader("⚡ Institutional Divergence & Market Trap Radar")
+    st.caption("Detects where Smart Money positioning contradicts surface retail price action to reveal impending reversals.")
+
+    divergences = divergence_data.get("divergences", [])
+    trap_alerts = divergence_data.get("trap_alerts", [])
+    atm_delta = divergence_data.get("atm_volume_delta", 0)
+    atm_ratio = divergence_data.get("atm_volume_ratio", 1.0)
+    aggression = divergence_data.get("taker_aggression", "NEUTRAL")
+
+    # Metric Row
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("🌊 ATM Volume Delta", f"{atm_delta:+,} contracts", help="Call Volume minus Put Volume across ATM ±1 strikes")
+    with c2:
+        st.metric("⚔️ Taker Aggression Ratio", f"{atm_ratio:.2f}x", delta="Bullish Takers" if atm_ratio >= 1.5 else ("Bearish Takers" if atm_ratio <= 0.65 else "Balanced"))
+    with c3:
+        gex_regime = "Positive Gamma (Mean Reverting)" if pcr >= 0.70 and pcr <= 1.25 else "Negative Gamma (Volatility Expansion)"
+        st.metric("⚡ Gamma Regime", gex_regime)
+
+    st.markdown("---")
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        st.markdown("#### 🚨 Detected Market Trap Alerts")
+        if trap_alerts:
+            for alert in trap_alerts:
+                st.error(alert)
+        else:
+            st.success("✅ No Bull/Bear Traps detected at current key boundary levels.")
+            st.caption("Institutional option writers are not heavily fading the current boundary test.")
+
+    with col_right:
+        st.markdown("#### 🔄 Price vs OI / PCR Divergences")
+        if divergences:
+            for div in divergences:
+                if "Bullish" in div:
+                    st.success(div)
+                elif "Bearish" in div:
+                    st.error(div)
+                else:
+                    st.warning(div)
+        else:
+            st.info("ℹ️ No active price-to-PCR divergences. Flow is aligned with Spot Price.")
+
+    with st.expander("🧠 How Institutional Traps & Divergences Work"):
+        st.markdown("""
+        * **Bull Trap (Fake Breakout):** Spot breaks above resistance, enticing retail traders to buy calls. However, institutional writers sell calls heavily into the breakout liquidity ($\Delta \text{Call OI} > 0$) rather than unwinding. The breakout fails and collapses.
+        * **Bear Trap (Fake Breakdown):** Spot breaks below support, but Put OI increases ($\Delta \text{Put OI} > 0$). Institutional writers absorb the supply, trapping short sellers and triggering a violent short squeeze.
+        * **Volume Delta Exhaustion:** Spot reaches a new intraday high while ATM Volume Delta is negative. Indicates lack of aggressive buyers and impending reversal.
+        """)
+
+
+def render_tab_volume_profile(volume_profile_df: pd.DataFrame, spot_price: float, max_pain: float):
+    """Render the Strike Volume Profile & Institutional Stickiness tab."""
+    st.subheader("📊 Strike Volume Profile & Institutional Stickiness")
+    st.caption("Compares Call vs Put volume across strikes and evaluates the Volume-to-OI (V/OI) ratio to distinguish day-trading churn from sticky institutional accumulation.")
+
+    if volume_profile_df is None or volume_profile_df.empty:
+        st.info("No volume profile data available.")
+        return
+
+    # Dual Bar Charts: OI and Volume Side-by-Side
+    col_oi, col_vol = st.columns(2)
+
+    with col_oi:
+        st.markdown("##### 🧱 Open Interest Distribution by Strike")
+        fig_oi = go.Figure()
+        fig_oi.add_trace(go.Bar(
+            y=volume_profile_df["strike"].astype(str),
+            x=volume_profile_df["ce_oi"],
+            name="Call OI (Resistance)",
+            orientation="h",
+            marker_color="#ff4d6d"
+        ))
+        fig_oi.add_trace(go.Bar(
+            y=volume_profile_df["strike"].astype(str),
+            x=volume_profile_df["pe_oi"],
+            name="Put OI (Support)",
+            orientation="h",
+            marker_color="#00d084"
+        ))
+        fig_oi.update_layout(
+            barmode="group",
+            height=520,
+            template="plotly_dark",
+            margin=dict(l=20, r=20, t=30, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_oi, use_container_width=True)
+
+    with col_vol:
+        st.markdown("##### 🌊 Traded Volume Profile by Strike")
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Bar(
+            y=volume_profile_df["strike"].astype(str),
+            x=volume_profile_df["ce_vol"],
+            name="Call Volume",
+            orientation="h",
+            marker_color="#e06666"
+        ))
+        fig_vol.add_trace(go.Bar(
+            y=volume_profile_df["strike"].astype(str),
+            x=volume_profile_df["pe_vol"],
+            name="Put Volume",
+            orientation="h",
+            marker_color="#6aa84f"
+        ))
+        fig_vol.update_layout(
+            barmode="group",
+            height=520,
+            template="plotly_dark",
+            margin=dict(l=20, r=20, t=30, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+
+    # Strike Profile Data Table
+    st.markdown("##### 📋 Strike-by-Strike Volume & Stickiness Forensics")
+    display_df = volume_profile_df.copy()
+    display_df["Marker"] = display_df.apply(
+        lambda r: "🎯 ATM" if r["is_atm"] else ("🧲 Max Pain" if r["strike"] == max_pain else ""), axis=1
+    )
+
+    styled_df = display_df[[
+        "strike", "Marker", "ce_oi", "pe_oi", "net_oi", "ce_vol", "pe_vol", "total_vol", "v_oi_ratio", "stickiness"
+    ]].rename(columns={
+        "strike": "Strike",
+        "ce_oi": "Call OI",
+        "pe_oi": "Put OI",
+        "net_oi": "Net OI (PE-CE)",
+        "ce_vol": "Call Volume",
+        "pe_vol": "Put Volume",
+        "total_vol": "Total Volume",
+        "v_oi_ratio": "V/OI Ratio",
+        "stickiness": "Institutional Stickiness"
+    })
+    st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+
 def render_footer_help():
     """Render the explanatory notes at the bottom of the page."""
     st.divider()
@@ -1218,8 +1416,8 @@ def render_footer_help():
 def run_dashboard():
     """Main function to run and render the Smart OI Dashboard."""
     # Main page titles
-    st.title("📊 Nifty 50 Smart OI: Comparing With Price Action")
-    st.caption("Noise-filtered Institutional derivatives positioning correlated with real-time price action")
+    st.title("📊 Smart OI & Institutional Option Forensics")
+    st.caption("Decodes smart money positioning, volume profile, open interest divergence, and actionable trades across Indices and F&O Stocks.")
     st.markdown("---")
 
     # Inject Custom CSS styles
@@ -1229,44 +1427,97 @@ def run_dashboard():
     st.sidebar.title("⚙️ Smart OI Controls")
     st.sidebar.markdown("---")
 
-    symbol_map = {
-        "NIFTY 50": "NSE:NIFTY50-INDEX",
-        "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
-        "SENSEX": "BSE:SENSEX-INDEX"
-    }
-    selected_symbol_label = st.sidebar.selectbox("Select Underlying", list(symbol_map.keys()), index=0)
-    db_symbol = symbol_map[selected_symbol_label]
+    # 1. Mode Switch: Live vs Database
+    mode = st.sidebar.radio(
+        "Data Source",
+        ["🔴 Live Real-Time (Fyers API)", "📁 Database Snapshots (Historical)"],
+        index=0,
+        help="Switch between live real-time market data directly from Fyers or historical database snapshots."
+    )
 
-    available_dates = load_db_dates(db_symbol)
-    if not available_dates:
-        st.error(f"No option chain data found in database for {selected_symbol_label}.")
-        st.stop()
+    # 2. Asset Class Switch: Indices vs F&O Stocks
+    category = st.sidebar.selectbox("Asset Class", ["📊 Major Indices", "🏢 F&O Stocks Universe"], index=0)
+    if category == "📊 Major Indices":
+        index_map = {
+            "NIFTY 50": "NSE:NIFTY50-INDEX",
+            "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+            "FINNIFTY": "NSE:FINNIFTY-INDEX",
+            "MIDCPNIFTY": "NSE:MIDCPNIFTY-INDEX",
+            "SENSEX": "BSE:SENSEX-INDEX",
+        }
+        selected_symbol_label = st.sidebar.selectbox("Select Index", list(index_map.keys()), index=0)
+        db_symbol = index_map[selected_symbol_label]
+    else:
+        try:
+            fo_list = get_fo_universe()
+        except Exception:
+            fo_list = ["NSE:RELIANCE-EQ", "NSE:HDFCBANK-EQ", "NSE:KEI-EQ", "NSE:TATAMOTORS-EQ", "NSE:INFY-EQ"]
 
-    selected_date = st.sidebar.selectbox("Select Analysis Date", available_dates, index=0)
+        display_options = {s.split(":")[-1].replace("-EQ", ""): s for s in sorted(fo_list)}
+        selected_stock = st.sidebar.selectbox("Select F&O Stock", list(display_options.keys()), index=0)
+        selected_symbol_label = selected_stock
+        db_symbol = display_options[selected_stock]
 
-    # Load Snapshots & Price Data
-    snapshots = load_db_snapshots(db_symbol, selected_date)
-    price_df = load_db_price_data(db_symbol, selected_date)
-    price_df = calculate_price_vwap(price_df)
-
-    if not snapshots:
-        st.warning(f"No snapshots loaded for {selected_symbol_label} on {selected_date}.")
-        st.stop()
-
-    latest_ts, latest_oc = snapshots[-1]
-    prev_oc = snapshots[-2][1] if len(snapshots) > 1 else None
-
-    # Initialize SmartOI Analyzer
-    analyzer = SmartOIAnalyzer(db_symbol)
-
-    # Calculate current spot price
+    latest_oc = None
+    prev_oc = None
     spot_price = None
-    if not price_df.empty:
-        snap_price_df = price_df[price_df["timestamp"] <= latest_ts]
-        if not snap_price_df.empty:
-            spot_price = snap_price_df.iloc[-1]["close"]
-        else:
+    snapshots = []
+    price_df = pd.DataFrame()
+    expiry_str = ""
+
+    if mode == "🔴 Live Real-Time (Fyers API)":
+        col_ref, col_stk = st.sidebar.columns([1.2, 1])
+        with col_ref:
+            if st.button("🔄 Refresh Live", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+        with col_stk:
+            live_strikes = st.slider("Strikes", 10, 30, 15, 5, key="smart_oi_live_strikes")
+
+        with st.spinner(f"Fetching real-time option chain for {selected_symbol_label}..."):
+            latest_oc, spot_price, expiry_str = fetch_live_fyers_option_chain(db_symbol, strikecount=live_strikes)
+            price_df = fetch_live_price_history(db_symbol, resolution="5")
+            if not price_df.empty:
+                price_df = calculate_price_vwap(price_df)
+            if latest_oc is not None and not latest_oc.empty:
+                snapshots = [(datetime.now(), latest_oc)]
+    else:
+        available_dates = load_db_dates(db_symbol)
+        if not available_dates:
+            st.error(f"No option chain data found in database for {selected_symbol_label}. Switch to '🔴 Live Real-Time' to analyze live.")
+            st.stop()
+
+        selected_date = st.sidebar.selectbox("Select Analysis Date", available_dates, index=0)
+        snapshots = load_db_snapshots(db_symbol, selected_date)
+        price_df = load_db_price_data(db_symbol, selected_date)
+        if not price_df.empty:
+            price_df = calculate_price_vwap(price_df)
+
+        if not snapshots:
+            st.warning(f"No snapshots loaded for {selected_symbol_label} on {selected_date}.")
+            st.stop()
+
+        latest_ts, latest_oc = snapshots[-1]
+        prev_oc = snapshots[-2][1] if len(snapshots) > 1 else None
+        if spot_price is None and not price_df.empty:
             spot_price = price_df.iloc[-1]["close"]
+
+    if latest_oc is None or latest_oc.empty:
+        st.warning(f"Unable to load Option Chain for {selected_symbol_label}. Please check market hours or broker connection.")
+        st.stop()
+
+    # Initialize SmartOI Analyzer & dynamically infer strike step
+    analyzer = SmartOIAnalyzer(db_symbol)
+    analyzer.update_strike_step_from_df(latest_oc)
+
+    # Estimate spot price if not available
+    if spot_price is None or spot_price == 0.0:
+        if "underlying_value" in latest_oc.columns and latest_oc["underlying_value"].iloc[0]:
+            spot_price = float(latest_oc["underlying_value"].iloc[0])
+        elif not price_df.empty:
+            spot_price = float(price_df.iloc[-1]["close"])
+        else:
+            spot_price = float(latest_oc["strike"].mean())
 
     # Run Smart OI analysis
     analysis = analyzer.analyze_smart_oi(latest_oc, prev_oc, spot_price=spot_price)
@@ -1274,18 +1525,17 @@ def run_dashboard():
     signal_strikes = analysis["signal_strikes"]
     summary = analysis["summary"]
 
+    # Compute Divergences & Volume Profile
+    divergence_data = analyzer.detect_institutional_divergences(price_df, latest_oc, prev_oc, spot_price=spot_price)
+    volume_profile_df = analyzer.compute_strike_volume_profile(latest_oc, spot_price=spot_price)
+
     # Run Confluence & Divergence detection
     confluence_data = {}
     if not price_df.empty:
-        snap_price_df = price_df[price_df["timestamp"] <= latest_ts]
-        confluence_data = analyzer.detect_confluence_divergence(
-            signal, snap_price_df if not snap_price_df.empty else price_df
-        )
+        confluence_data = analyzer.detect_confluence_divergence(signal, price_df)
 
     # Run Market Direction & Actionable Trade Setup Generator
-    trade_setups = analyzer.generate_trade_setups(
-        latest_oc, prev_oc, price_df, spot_price=spot_price
-    )
+    trade_setups = analyzer.generate_trade_setups(latest_oc, prev_oc, price_df, spot_price=spot_price)
     dir_analysis = trade_setups["directional_analysis"]
 
     # --- 0. INSTITUTIONAL DIRECTION & SMART MONEY PULSE ---
@@ -1297,23 +1547,21 @@ def run_dashboard():
     st.markdown("---")
 
     # --- 1. CURRENT SMART OI VERDICT & OPTION BUYER'S PANEL ---
-    st.subheader("🚀 Option Buyer's Gamma & Short Covering Panel")
-
     ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
     pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
 
-    call_wall = ce_oc.loc[ce_oc["oi"].idxmax()]["strike"] if not ce_oc.empty else 0
-    put_wall = pe_oc.loc[pe_oc["oi"].idxmax()]["strike"] if not pe_oc.empty else 0
+    call_wall = ce_oc.loc[ce_oc["oi"].idxmax()]["strike"] if not ce_oc.empty and ce_oc["oi"].max() > 0 else 0
+    put_wall = pe_oc.loc[pe_oc["oi"].idxmax()]["strike"] if not pe_oc.empty and pe_oc["oi"].max() > 0 else 0
 
-    call_wall_oi = ce_oc.loc[ce_oc["oi"].idxmax()]["oi"] if not ce_oc.empty else 0
-    put_wall_oi = pe_oc.loc[pe_oc["oi"].idxmax()]["oi"] if not pe_oc.empty else 0
+    call_wall_oi = ce_oc.loc[ce_oc["oi"].idxmax()]["oi"] if not ce_oc.empty and ce_oc["oi"].max() > 0 else 0
+    put_wall_oi = pe_oc.loc[pe_oc["oi"].idxmax()]["oi"] if not pe_oc.empty and pe_oc["oi"].max() > 0 else 0
 
-    dist_to_call_wall = ((call_wall - spot_price) / spot_price) * 100 if spot_price else 0
-    dist_to_put_wall = ((spot_price - put_wall) / spot_price) * 100 if spot_price else 0
+    dist_to_call_wall = ((call_wall - spot_price) / spot_price) * 100 if spot_price and call_wall else 0
+    dist_to_put_wall = ((spot_price - put_wall) / spot_price) * 100 if spot_price and put_wall else 0
 
-    atm_strike = summary["atm_strike"]
-    ce_unwinding_atm = ce_oc[(ce_oc["strike"] == atm_strike) & (ce_oc["oi_change"] < 0)]
-    pe_unwinding_atm = pe_oc[(pe_oc["strike"] == atm_strike) & (pe_oc["oi_change"] < 0)]
+    atm_strike = summary["atm_strike"] if summary.get("atm_strike") else (round(spot_price / analyzer.strike_step) * analyzer.strike_step if spot_price else 0)
+    ce_unwinding_atm = ce_oc[(ce_oc["strike"] == atm_strike) & (ce_oc.get("oi_change", 0) < 0)]
+    pe_unwinding_atm = pe_oc[(pe_oc["strike"] == atm_strike) & (pe_oc.get("oi_change", 0) < 0)]
 
     total_ce_oi = latest_oc[latest_oc["option_type"] == "CE"]["oi"].sum()
     total_pe_oi = latest_oc[latest_oc["option_type"] == "PE"]["oi"].sum()
@@ -1345,10 +1593,10 @@ def run_dashboard():
     render_verdict_card(buyer_verdict, buyer_desc, buyer_color)
 
     # Calculate IV Status
-    atm_iv_val = latest_oc[latest_oc["strike"] == atm_strike]["iv"].mean() if not latest_oc.empty else None
+    atm_iv_val = latest_oc[latest_oc["strike"] == atm_strike]["iv"].mean() if "iv" in latest_oc.columns and not latest_oc.empty else None
     iv_status = "Neutral"
     iv_color = "#00b4d8"
-    if atm_iv_val:
+    if atm_iv_val and not np.isnan(atm_iv_val):
         if atm_iv_val < 12.0:
             iv_status = "Cheap Volatility"
             iv_color = "#00d084"
@@ -1369,15 +1617,23 @@ def run_dashboard():
 
     st.markdown("---")
 
-    # --- 2. TRANSITIONS & CHARTING ---
-    tab_chart, tab_transitions, tab_strikes, tab_pro_trader, tab_iv_greeks, tab_sniper = st.tabs([
+    # --- 2. DEEP-DIVE TABS ---
+    tab_divergence, tab_vol_profile, tab_chart, tab_transitions, tab_pro_trader, tab_iv_greeks, tab_sniper, tab_fo_pcr = st.tabs([
+        "⚡ Institutional Divergence & Traps",
+        "📊 Strike Volume & OI Profile",
         "📈 Price Action & Smart OI Overlay",
         "⏱️ Signal Transitions Timeline",
-        "🎯 Filtered Signal Strikes",
-        "🏦 Pro Trader Analytics",
+        "🏦 Pro Trader Analytics & Walls",
         "📊 IV Skew & Greeks",
-        "🎯 Sniper Reversals"
+        "🎯 Sniper Reversals",
+        "🎲 F&O Universe PCR Radar"
     ])
+
+    with tab_divergence:
+        render_tab_divergence_radar(divergence_data, spot_price, max_pain_strike, pcr, call_wall, put_wall)
+
+    with tab_vol_profile:
+        render_tab_volume_profile(volume_profile_df, spot_price, max_pain_strike)
 
     with tab_chart:
         render_tab_chart(price_df, snapshots, max_pain_strike, analyzer, selected_symbol_label)
@@ -1385,14 +1641,10 @@ def run_dashboard():
     with tab_transitions:
         render_tab_transitions(snapshots, price_df, analyzer)
 
-    with tab_strikes:
-        render_tab_strikes(signal_strikes)
-
-    # Render Institutional Walls (cumulative CE vs PE OI bar chart, placed outside/below tabs container)
-    render_institutional_walls(latest_oc, snapshots, summary, analyzer, signal_strikes)
-
     with tab_pro_trader:
         render_tab_pro_trader(latest_oc, snapshots, spot_price, analyzer, prev_oc, summary)
+        st.markdown("---")
+        render_institutional_walls(latest_oc, snapshots, summary, analyzer, signal_strikes)
 
     with tab_iv_greeks:
         pro_atm = pro_oc_analyzer.compute_atm_premium_analysis(
@@ -1402,6 +1654,9 @@ def run_dashboard():
 
     with tab_sniper:
         render_tab_sniper(snapshots, spot_price, analyzer)
+
+    with tab_fo_pcr:
+        render_tab_fo_pcr()
 
     # Render footer information help section
     render_footer_help()
@@ -1489,6 +1744,105 @@ def render_tab_sniper(snapshots: list, spot_price: float, analyzer: SmartOIAnaly
         import logging
         logging.getLogger(__name__).error(f"Error in Sniper Reversal scanner: {e}")
         st.error("The Sniper Reversal scanner encountered an issue. Please check the logs.")
+
+
+def render_tab_fo_pcr():
+    """Render the F&O Universe PCR & Overbought/Oversold Scanner in Smart OI Dashboard."""
+    st.subheader("🎲 F&O Stock Put-Call Ratio (PCR) & Overbought / Oversold Radar")
+    st.caption("Live Option Chain Analysis across ~200 F&O Stocks • Contrarian Short Squeezes & Reversal Risks")
+
+    col_p1, col_p2, col_p3 = st.columns([1.5, 1.5, 1.0])
+    with col_p1:
+        pcr_ob = st.slider("Overbought Threshold (>=)", 0.70, 1.50, 0.85, 0.05, key="smart_oi_pcr_ob")
+    with col_p2:
+        pcr_os = st.slider("Oversold Threshold (<=)", 0.30, 0.70, 0.55, 0.05, key="smart_oi_pcr_os")
+    with col_p3:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        refresh_btn = st.button("🔄 Scan Universe PCR", key="btn_smart_oi_pcr_scan", use_container_width=True)
+
+    if "smart_oi_pcr_results" not in st.session_state or refresh_btn:
+        with st.spinner("Fetching option chains across F&O stocks..."):
+            try:
+                screener = FOPCRScreener(overbought_threshold=pcr_ob, oversold_threshold=pcr_os)
+                st.session_state["smart_oi_pcr_results"] = screener.scan_universe_pcr(max_symbols=120)
+            except Exception as ex:
+                st.error(f"Error scanning F&O PCR: {ex}")
+                st.session_state["smart_oi_pcr_results"] = {"overbought": [], "oversold": [], "neutral": [], "all": []}
+
+    res_data = st.session_state.get("smart_oi_pcr_results", {})
+    all_stocks = res_data.get("all", [])
+
+    if not all_stocks:
+        st.info("No PCR data available. Click '🔄 Scan Universe PCR' to scan.")
+        return
+
+    ob_list = [s for s in all_stocks if s.pcr_oi >= pcr_ob]
+    os_list = [s for s in all_stocks if s.pcr_oi <= pcr_os]
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("🔴 Overbought (Put Heavy)", len(ob_list), help=f"PCR >= {pcr_ob:.2f}")
+    with k2:
+        st.metric("🟢 Oversold (Call Heavy / Squeeze)", len(os_list), help=f"PCR <= {pcr_os:.2f}")
+    with k3:
+        extreme_count = sum(1 for s in all_stocks if s.pcr_oi >= 1.00 or s.pcr_oi <= 0.45)
+        st.metric("💎 Extreme Setups", extreme_count)
+    with k4:
+        avg_val = np.mean([s.pcr_oi for s in all_stocks]) if all_stocks else 0.0
+        st.metric("⚖️ Average F&O PCR", f"{avg_val:.2f}")
+
+    sub_t1, sub_t2, sub_t3 = st.tabs([
+        f"🟢 Oversold / Squeeze Candidates ({len(os_list)})",
+        f"🔴 Overbought / Reversal Risk ({len(ob_list)})",
+        f"📋 All Stocks ({len(all_stocks)})"
+    ])
+
+    def _render_table(s_list: list, key: str):
+        if not s_list:
+            st.info("No stocks matching.")
+            return
+        df = pd.DataFrame([s.to_dict() for s in s_list])
+        cols = ["clean_symbol", "sector", "spot_price", "pcr_oi", "pcr_volume", "sentiment_state", "total_call_oi", "total_put_oi", "max_pain_strike", "highest_ce_oi_strike", "highest_pe_oi_strike", "contrarian_bias"]
+        renamed = df[cols].rename(columns={
+            "clean_symbol": "Symbol",
+            "sector": "Sector",
+            "spot_price": "Spot LTP",
+            "pcr_oi": "PCR (OI)",
+            "pcr_volume": "PCR (Vol)",
+            "sentiment_state": "Regime",
+            "total_call_oi": "Call OI",
+            "total_put_oi": "Put OI",
+            "max_pain_strike": "Max Pain",
+            "highest_ce_oi_strike": "CE Wall",
+            "highest_pe_oi_strike": "PE Wall",
+            "contrarian_bias": "Contrarian Bias"
+        })
+        st.dataframe(
+            renamed.style.format({
+                "Spot LTP": "₹{:.2f}",
+                "PCR (OI)": "{:.2f}",
+                "PCR (Vol)": "{:.2f}",
+                "Call OI": "{:,.0f}",
+                "Put OI": "{:,.0f}",
+                "Max Pain": "₹{:.1f}",
+                "CE Wall": "₹{:.1f}",
+                "PE Wall": "₹{:.1f}",
+            }).map(
+                lambda v: "background-color: rgba(34, 197, 94, 0.2); color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v <= 0.55 else ("background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v >= 0.85 else ""),
+                subset=["PCR (OI)"]
+            ),
+            use_container_width=True,
+            hide_index=True,
+            key=key
+        )
+
+    with sub_t1:
+        _render_table(os_list, "smart_oi_pcr_os_tbl")
+    with sub_t2:
+        _render_table(ob_list, "smart_oi_pcr_ob_tbl")
+    with sub_t3:
+        _render_table(all_stocks, "smart_oi_pcr_all_tbl")
+
 
 if __name__ == "__main__":
     run_dashboard()

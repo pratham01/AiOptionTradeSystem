@@ -38,6 +38,21 @@ class SmartOIAnalyzer:
             self.db_symbol = symbol
             self.strike_step = 50  # Default fallback
 
+    def update_strike_step_from_df(self, df: pd.DataFrame) -> float:
+        """Dynamically infer the underlying's strike step from the option chain."""
+        if df is not None and not df.empty and "strike" in df.columns:
+            strikes = sorted(df["strike"].dropna().unique())
+            if len(strikes) >= 2:
+                diffs = [round(strikes[i+1] - strikes[i], 2) for i in range(len(strikes)-1)]
+                pos_diffs = [d for d in diffs if d > 0]
+                if pos_diffs:
+                    import statistics
+                    try:
+                        self.strike_step = statistics.mode(pos_diffs)
+                    except Exception:
+                        self.strike_step = min(pos_diffs)
+        return self.strike_step
+
     def fetch_latest_snapshots(self, date_str: str, limit: int = 2) -> List[Tuple[datetime, pd.DataFrame]]:
         """
         Fetch the latest N snapshots from the database for a specific date.
@@ -617,5 +632,180 @@ class SmartOIAnalyzer:
             "intraday_setup": intraday_setup,
             "swing_setup": swing_setup,
             "directional_analysis": dir_analysis
+        }
+
+    def compute_strike_volume_profile(
+        self,
+        oc_df: pd.DataFrame,
+        spot_price: float | None = None
+    ) -> pd.DataFrame:
+        """
+        Computes strike-by-strike Volume and Open Interest profile,
+        including Volume-to-OI (V/OI) ratio and institutional stickiness.
+        """
+        if oc_df is None or oc_df.empty:
+            return pd.DataFrame()
+
+        df = oc_df.copy()
+        df["strike"] = pd.to_numeric(df.get("strike_price", df.get("strike", 0)), errors="coerce")
+        df["oi"] = pd.to_numeric(df.get("oi", 0), errors="coerce").fillna(0).astype(int)
+        df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0).astype(int)
+        df["option_type"] = df["option_type"].astype(str).str.upper()
+
+        ce_df = df[df["option_type"] == "CE"].set_index("strike")
+        pe_df = df[df["option_type"] == "PE"].set_index("strike")
+
+        all_strikes = sorted(set(ce_df.index.tolist() + pe_df.index.tolist()))
+        rows = []
+
+        atm_strike = min(all_strikes, key=lambda s: abs(s - spot_price)) if (all_strikes and spot_price) else 0.0
+
+        for s in all_strikes:
+            ce_oi = int(ce_df.loc[s, "oi"]) if s in ce_df.index else 0
+            pe_oi = int(pe_df.loc[s, "oi"]) if s in pe_df.index else 0
+            ce_vol = int(ce_df.loc[s, "volume"]) if s in ce_df.index else 0
+            pe_vol = int(pe_df.loc[s, "volume"]) if s in pe_df.index else 0
+
+            total_oi = ce_oi + pe_oi
+            total_vol = ce_vol + pe_vol
+            v_oi = total_vol / max(total_oi, 1)
+
+            if v_oi > 3.0:
+                stickiness = "CHURN (Speculative)"
+            elif v_oi < 0.8 and total_oi > 0:
+                stickiness = "STICKY (Institutional)"
+            else:
+                stickiness = "NORMAL"
+
+            rows.append({
+                "strike": s,
+                "ce_oi": ce_oi,
+                "pe_oi": pe_oi,
+                "net_oi": pe_oi - ce_oi,
+                "ce_vol": ce_vol,
+                "pe_vol": pe_vol,
+                "total_vol": total_vol,
+                "v_oi_ratio": round(v_oi, 2),
+                "stickiness": stickiness,
+                "is_atm": (s == atm_strike),
+            })
+
+        return pd.DataFrame(rows).sort_values("strike").reset_index(drop=True)
+
+    def detect_institutional_divergences(
+        self,
+        ohlcv_df: pd.DataFrame,
+        current_oc: pd.DataFrame,
+        prev_oc: pd.DataFrame | None = None,
+        spot_price: float | None = None
+    ) -> Dict[str, Any]:
+        """
+        Advanced Institutional Divergence & Trap Detector:
+        - Price vs PCR Divergence
+        - Breakout / Breakdown Trap Detector (Price breaks out but Call OI spikes, or breaks down but Put OI spikes)
+        - ATM Volume Delta & Taker Aggression
+        - Volume Delta Exhaustion
+        """
+        divergences = []
+        trap_alerts = []
+
+        if current_oc is None or current_oc.empty:
+            return {
+                "divergences": [],
+                "trap_alerts": [],
+                "atm_volume_delta": 0,
+                "atm_volume_ratio": 1.0,
+                "taker_aggression": "NEUTRAL",
+            }
+
+        df = current_oc.copy()
+        df["strike"] = pd.to_numeric(df.get("strike_price", df.get("strike", 0)), errors="coerce")
+        df["oi"] = pd.to_numeric(df.get("oi", 0), errors="coerce").fillna(0).astype(int)
+        df["volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0).astype(int)
+        df["option_type"] = df["option_type"].astype(str).str.upper()
+
+        ce_df = df[df["option_type"] == "CE"]
+        pe_df = df[df["option_type"] == "PE"]
+
+        all_strikes = sorted(set(ce_df["strike"].tolist() + pe_df["strike"].tolist()))
+        atm_strike = min(all_strikes, key=lambda s: abs(s - spot_price)) if (all_strikes and spot_price) else 0.0
+
+        # ATM Cluster strikes
+        step = self.strike_step or 50.0
+        atm_cluster = [atm_strike - step, atm_strike, atm_strike + step]
+
+        ce_atm_vol = ce_df[ce_df["strike"].isin(atm_cluster)]["volume"].sum()
+        pe_atm_vol = pe_df[pe_df["strike"].isin(atm_cluster)]["volume"].sum()
+        atm_vol_delta = int(ce_atm_vol - pe_atm_vol)
+        atm_vol_ratio = ce_atm_vol / max(pe_atm_vol, 1)
+
+        if atm_vol_ratio >= 1.50:
+            aggression = "AGGRESSIVE BULLISH (Call Takers)"
+        elif atm_vol_ratio <= 0.65:
+            aggression = "AGGRESSIVE BEARISH (Put Takers)"
+        else:
+            aggression = "NEUTRAL / BALANCED"
+
+        # Price vs PCR Divergence
+        total_ce_oi = ce_df["oi"].sum()
+        total_pe_oi = pe_df["oi"].sum()
+        pcr_oi = total_pe_oi / max(total_ce_oi, 1)
+
+        total_ce_vol = ce_df["volume"].sum()
+        total_pe_vol = pe_df["volume"].sum()
+        pcr_vol = total_pe_vol / max(total_ce_vol, 1)
+
+        # Leading Volume PCR Divergence
+        if pcr_vol > pcr_oi * 1.30 and pcr_oi < 0.90:
+            divergences.append("🟢 Bullish Volume PCR Leading Divergence: Put volume intensity is surging while OI PCR remains low (Smart Money Accumulation).")
+        elif pcr_vol < pcr_oi * 0.70 and pcr_oi > 1.10:
+            divergences.append("🔴 Bearish Volume PCR Leading Divergence: Call volume intensity is surging while OI PCR is high (Smart Money Distribution).")
+
+        # Price vs VWAP / Price Action Divergence
+        if ohlcv_df is not None and not ohlcv_df.empty and len(ohlcv_df) >= 5:
+            ohlcv = ohlcv_df.sort_values("timestamp").copy()
+            recent_bars = ohlcv.tail(15)
+            price_change = recent_bars["close"].iloc[-1] - recent_bars["close"].iloc[0]
+
+            if price_change < 0 and pcr_oi > 1.15:
+                divergences.append("🟢 Price vs PCR Bullish Divergence: Price is dropping into support but Put writing is expanding aggressively.")
+            elif price_change > 0 and pcr_oi < 0.65:
+                divergences.append("🔴 Price vs PCR Bearish Divergence: Price is pushing higher but Call writers are capping with heavy overhead walls.")
+
+            # Volume Delta Exhaustion
+            if price_change > 0 and atm_vol_delta < 0:
+                divergences.append("⚠️ Volume Delta Exhaustion: Price made higher highs but ATM Volume Delta is net negative.")
+
+        # Trap Detection (Requires previous snapshot or change data)
+        if prev_oc is not None and not prev_oc.empty:
+            prev_df = prev_oc.copy()
+            prev_df["strike"] = pd.to_numeric(prev_df.get("strike_price", prev_df.get("strike", 0)), errors="coerce")
+            prev_df["oi"] = pd.to_numeric(prev_df.get("oi", 0), errors="coerce").fillna(0).astype(int)
+            prev_df["option_type"] = prev_df["option_type"].astype(str).str.upper()
+
+            # Align
+            curr_ce = ce_df.set_index("strike")["oi"]
+            prev_ce = prev_df[prev_df["option_type"] == "CE"].set_index("strike")["oi"]
+            curr_pe = pe_df.set_index("strike")["oi"]
+            prev_pe = prev_df[prev_df["option_type"] == "PE"].set_index("strike")["oi"]
+
+            # Bull Trap: ATM or ATM+1 Call OI increased heavily (>10%) while spot tested resistance
+            if atm_strike in curr_ce.index and atm_strike in prev_ce.index:
+                ce_diff = curr_ce[atm_strike] - prev_ce[atm_strike]
+                if ce_diff > 10000 and spot_price and spot_price >= atm_strike:
+                    trap_alerts.append(f"⚠️ Potential BULL TRAP at Strike ₹{atm_strike:.0f}: Call OI expanded by +{ce_diff:,} contracts as price pushed higher (Institutional resistance dump).")
+
+            # Bear Trap: ATM or ATM-1 Put OI increased heavily (>10%) while spot tested support
+            if atm_strike in curr_pe.index and atm_strike in prev_pe.index:
+                pe_diff = curr_pe[atm_strike] - prev_pe[atm_strike]
+                if pe_diff > 10000 and spot_price and spot_price <= atm_strike:
+                    trap_alerts.append(f"⚡ Potential BEAR TRAP at Strike ₹{atm_strike:.0f}: Put OI expanded by +{pe_diff:,} contracts as price tested support (Institutional put writing absorption).")
+
+        return {
+            "divergences": divergences,
+            "trap_alerts": trap_alerts,
+            "atm_volume_delta": atm_vol_delta,
+            "atm_volume_ratio": round(atm_vol_ratio, 2),
+            "taker_aggression": aggression,
         }
 

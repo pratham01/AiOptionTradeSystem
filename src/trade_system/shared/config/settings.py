@@ -191,6 +191,7 @@ class Settings:
     enable_experimental_ict_stream: bool = False
     enable_orb_telegram_alerts: bool = True
     enable_fo_telegram_alerts: bool = False
+    enable_intraday_reversal_alerts: bool = False
 
     # Indicator settings
     indicator_config: IndicatorConfig = field(default_factory=IndicatorConfig)

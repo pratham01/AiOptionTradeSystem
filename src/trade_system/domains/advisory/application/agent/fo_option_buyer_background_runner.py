@@ -29,8 +29,8 @@ class FOOptionBuyerBackgroundRunner:
         self.breakout_screener = BreakoutScreener()
         self.last_alerts: dict[str, datetime] = {}
         
-        # Initialize notifier
-        telegram_cfg = self.settings.st_confirmed_telegram if self.settings.st_confirmed_telegram.enabled else self.settings.top_gainer_telegram
+        # Initialize notifier (F&O Stock Buyer routes to top_gainer or main telegram, NEVER ST confirmed)
+        telegram_cfg = self.settings.top_gainer_telegram if self.settings.top_gainer_telegram.enabled else self.settings.telegram
         if telegram_cfg.enabled:
             self.notifier = TelegramNotifier(telegram_cfg.bot_token, telegram_cfg.chat_id)
         else:
@@ -88,6 +88,10 @@ class FOOptionBuyerBackgroundRunner:
                 time.sleep(60)
 
     def send_alerts(self, recs: list[Recommendation], context: dict):
+        if not getattr(self.settings, "enable_fo_telegram_alerts", False):
+            LOGGER.debug("FO telegram alerts disabled (enable_fo_telegram_alerts=False). Skipping alert dispatch.")
+            return
+
         now = datetime.now()
         alerts_to_send = []
         
@@ -121,6 +125,10 @@ class FOOptionBuyerBackgroundRunner:
             LOGGER.info(f"Sent alerts for {len(alerts_to_send)} symbols.")
 
     def send_breakout_alerts(self, breakouts: list[dict]):
+        if not getattr(self.settings, "enable_fo_telegram_alerts", False):
+            LOGGER.debug("FO breakout telegram alerts disabled (enable_fo_telegram_alerts=False). Skipping alert dispatch.")
+            return
+
         now = datetime.now()
         alerts_to_send = []
         for b in breakouts:
