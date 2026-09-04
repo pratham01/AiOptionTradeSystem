@@ -40,17 +40,21 @@ class SmartOIAnalyzer:
 
     def update_strike_step_from_df(self, df: pd.DataFrame) -> float:
         """Dynamically infer the underlying's strike step from the option chain."""
-        if df is not None and not df.empty and "strike" in df.columns:
-            strikes = sorted(df["strike"].dropna().unique())
-            if len(strikes) >= 2:
-                diffs = [round(strikes[i+1] - strikes[i], 2) for i in range(len(strikes)-1)]
-                pos_diffs = [d for d in diffs if d > 0]
-                if pos_diffs:
-                    import statistics
-                    try:
-                        self.strike_step = statistics.mode(pos_diffs)
-                    except Exception:
-                        self.strike_step = min(pos_diffs)
+        if df is not None and not df.empty:
+            df = df.copy()
+            if "strike" not in df.columns and "strike_price" in df.columns:
+                df["strike"] = pd.to_numeric(df["strike_price"], errors="coerce")
+            if "strike" in df.columns:
+                strikes = sorted(df["strike"].dropna().unique())
+                if len(strikes) >= 2:
+                    diffs = [round(strikes[i+1] - strikes[i], 2) for i in range(len(strikes)-1)]
+                    pos_diffs = [d for d in diffs if d > 0]
+                    if pos_diffs:
+                        import statistics
+                        try:
+                            self.strike_step = statistics.mode(pos_diffs)
+                        except Exception:
+                            self.strike_step = min(pos_diffs)
         return self.strike_step
 
     def fetch_latest_snapshots(self, date_str: str, limit: int = 2) -> List[Tuple[datetime, pd.DataFrame]]:
@@ -102,6 +106,14 @@ class SmartOIAnalyzer:
         """
         if current_df.empty:
             return {"signal": "NEUTRAL", "signal_strikes": [], "summary": {}}
+
+        current_df = current_df.copy()
+        if "strike" not in current_df.columns and "strike_price" in current_df.columns:
+            current_df["strike"] = current_df["strike_price"]
+        if prev_df is not None and not prev_df.empty:
+            prev_df = prev_df.copy()
+            if "strike" not in prev_df.columns and "strike_price" in prev_df.columns:
+                prev_df["strike"] = prev_df["strike_price"]
 
         # Estimate spot price if not provided
         if spot_price is None:
@@ -261,15 +273,15 @@ class SmartOIAnalyzer:
             for _, row in signal_df_sorted.iterrows():
                 signal_strikes.append({
                     "strike": float(row["strike"]),
-                    "option_type": row["option_type"],
-                    "symbol": row["symbol"],
-                    "ltp": float(row["ltp"]),
-                    "oi": int(row["oi"]),
-                    "oi_change": int(row["oi_change"]),
-                    "oi_change_pct": float(row["oi_change_pct"]),
-                    "volume": int(row["volume"]),
-                    "buildup": row["buildup"],
-                    "action": row["action"],
+                    "option_type": row.get("option_type", "CE"),
+                    "symbol": row.get("symbol", self.symbol),
+                    "ltp": float(row.get("ltp", 0.0)),
+                    "oi": int(row.get("oi", 0)),
+                    "oi_change": int(row.get("oi_change", 0)),
+                    "oi_change_pct": float(row.get("oi_change_pct", 0.0)),
+                    "volume": int(row.get("volume", 0)),
+                    "buildup": row.get("buildup", "NEUTRAL"),
+                    "action": row.get("action", "HOLD"),
                 })
 
         return {
@@ -400,9 +412,17 @@ class SmartOIAnalyzer:
         """
         from trade_system.domains.analysis.application.analysis import pro_oc_analyzer
 
+        current_df = current_df.copy() if current_df is not None else pd.DataFrame()
+        if not current_df.empty and "strike" not in current_df.columns and "strike_price" in current_df.columns:
+            current_df["strike"] = pd.to_numeric(current_df["strike_price"], errors="coerce")
+        if prev_df is not None and not prev_df.empty:
+            prev_df = prev_df.copy()
+            if "strike" not in prev_df.columns and "strike_price" in prev_df.columns:
+                prev_df["strike"] = pd.to_numeric(prev_df["strike_price"], errors="coerce")
+
         smart_res = self.analyze_smart_oi(current_df, prev_df, spot_price=spot_price)
         summary = smart_res.get("summary", {})
-        spot = summary.get("spot_price", spot_price or (current_df["strike"].mean() if not current_df.empty else 0.0))
+        spot = summary.get("spot_price", spot_price or (current_df["strike"].mean() if not current_df.empty and "strike" in current_df.columns else 0.0))
 
         # 1. Pro Analytics
         gex_info = pro_oc_analyzer.compute_gex_profile(current_df, spot, self.strike_step)
@@ -437,6 +457,20 @@ class SmartOIAnalyzer:
         elif big_money.get("institutional_bias") == "INSTITUTIONAL BEARISH DISTRIBUTION":
             intraday_score -= 20
 
+        # AMD (Accumulation, Manipulation, Distribution) Cycle Engine
+        from trade_system.domains.analysis.application.analysis.amd_phase_engine import AMDPhaseEngine
+        amd_engine = AMDPhaseEngine()
+        amd_info = amd_engine.analyze(ohlcv_df, spot_price=spot, strike_step=self.strike_step)
+
+        if amd_info.phase == "MANIPULATION_SPRING":
+            intraday_score += 25
+        elif amd_info.phase == "MANIPULATION_UTAD":
+            intraday_score -= 25
+        elif amd_info.phase == "DISTRIBUTION_BULLISH":
+            intraday_score += 15
+        elif amd_info.phase == "DISTRIBUTION_BEARISH":
+            intraday_score -= 15
+
         # Clamp intraday score to [-100, 100]
         intraday_score = max(-100, min(100, intraday_score))
 
@@ -450,7 +484,7 @@ class SmartOIAnalyzer:
         elif intraday_score <= -20:
             intraday_direction = "MODERATE BEARISH"
         else:
-            intraday_direction = "NEUTRAL / RANGEBOUND"
+            intraday_direction = "NEUTRAL CHOP"
 
         # 3. Swing Direction Analysis (-100 to +100)
         swing_score = 0
@@ -499,7 +533,16 @@ class SmartOIAnalyzer:
             "wall_shift_status": f"Call Wall: {wall_shifts.get('call_wall_shift')} | Put Wall: {wall_shifts.get('put_wall_shift')}",
             "institutional_bias": big_money.get("institutional_bias"),
             "spot_price": spot,
-            "vwap": vwap_val
+            "vwap": vwap_val,
+            "amd_phase": amd_info.phase,
+            "amd_range_high": amd_info.range_high,
+            "amd_range_low": amd_info.range_low,
+            "amd_manipulation_level": amd_info.manipulation_level,
+            "amd_invalidation_stop": amd_info.invalidation_stop,
+            "amd_target_1": amd_info.target_1,
+            "amd_target_2": amd_info.target_2,
+            "amd_action": amd_info.recommended_action,
+            "amd_description": amd_info.description,
         }
 
     def generate_trade_setups(
@@ -513,9 +556,18 @@ class SmartOIAnalyzer:
         Generate actionable Intraday & Swing Trade Setups with exact Entry, Stop Loss, Target,
         Option Contract recommendation, and Risk-Reward ratio.
         """
+        current_df = current_df.copy() if current_df is not None else pd.DataFrame()
+        if not current_df.empty and "strike" not in current_df.columns and "strike_price" in current_df.columns:
+            current_df["strike"] = pd.to_numeric(current_df["strike_price"], errors="coerce")
+        if prev_df is not None and not prev_df.empty:
+            prev_df = prev_df.copy()
+            if "strike" not in prev_df.columns and "strike_price" in prev_df.columns:
+                prev_df["strike"] = pd.to_numeric(prev_df["strike_price"], errors="coerce")
+
         dir_analysis = self.analyze_market_direction(current_df, prev_df, ohlcv_df, spot_price)
         spot = dir_analysis["spot_price"]
-        atm_strike = round(spot / self.strike_step) * self.strike_step if spot else current_df["strike"].mean()
+        fallback_k = current_df["strike"].mean() if ("strike" in current_df.columns and not current_df.empty) else 0.0
+        atm_strike = round(spot / self.strike_step) * self.strike_step if spot else fallback_k
         vwap = dir_analysis.get("vwap") or spot
         call_wall = dir_analysis.get("call_wall") or (atm_strike + 2 * self.strike_step)
         put_wall = dir_analysis.get("put_wall") or (atm_strike - 2 * self.strike_step)

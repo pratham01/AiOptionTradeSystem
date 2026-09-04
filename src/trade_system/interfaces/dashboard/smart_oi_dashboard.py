@@ -51,6 +51,10 @@ def fetch_live_fyers_option_chain(symbol: str, strikecount: int = 15) -> Tuple[O
         if not options_chain:
             return None, 0.0, ""
         df = pd.DataFrame(options_chain)
+        if "strike" not in df.columns and "strike_price" in df.columns:
+            df["strike"] = pd.to_numeric(df["strike_price"], errors="coerce")
+        elif "strike_price" not in df.columns and "strike" in df.columns:
+            df["strike_price"] = pd.to_numeric(df["strike"], errors="coerce")
         spot_price = 0.0
         for item in options_chain:
             if item.get("underlying_value"):
@@ -304,6 +308,12 @@ def render_institutional_direction_pulse(dir_analysis: dict):
     swing_color = "#00d084" if "BULLISH" in swing_dir else ("#ff4d6d" if "BEARISH" in swing_dir else "#00b4d8")
     gex_color = "#ff4d6d" if "SHORT GAMMA" in gex_regime else ("#00d084" if "LONG GAMMA" in gex_regime else "#ffb703")
 
+    amd_phase = dir_analysis.get("amd_phase", "CONSOLIDATION")
+    amd_low = dir_analysis.get("amd_range_low", 0.0)
+    amd_high = dir_analysis.get("amd_range_high", 0.0)
+    amd_action = dir_analysis.get("amd_action", "STAND_ASIDE_ACCUMULATION")
+    amd_color = "#00f5d4" if "SPRING" in amd_phase else ("#ff4d6d" if "UTAD" in amd_phase else ("#70d6ff" if "DISTRIBUTION" in amd_phase else "#ffd166"))
+
     st.markdown(f"""
     <div style="background:#161b22; padding:18px 22px; border-radius:12px; border:1px solid #30363d; margin-bottom:20px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
@@ -325,6 +335,16 @@ def render_institutional_direction_pulse(dir_analysis: dict):
                 <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Dealer Gamma Regime</div>
                 <div style="font-size:1.05rem; font-weight:bold; color:{gex_color};">{gex_regime}</div>
                 <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Gamma Flip Level: <b>₹{gex_flip:,.0f}</b></div>
+            </div>
+        </div>
+        <div style="margin-top:12px; padding:10px 14px; background:#1e2130; border-radius:8px; display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <span style="font-size:0.8rem; color:#8b949e; text-transform:uppercase;">📦 Wyckoff / PO3 Cycle:</span>
+                <b style="color:{amd_color}; font-size:0.95rem; margin-left:8px;">{amd_phase}</b>
+                <span style="font-size:0.8rem; color:#c9d1d9; margin-left:12px;">Accumulation Range: ₹{amd_low:,.1f} — ₹{amd_high:,.1f}</span>
+            </div>
+            <div style="font-size:0.8rem; color:#f0f6fc; background:#30363d; padding:3px 8px; border-radius:4px;">
+                Action: <b>{amd_action}</b>
             </div>
         </div>
         <div style="margin-top:10px; font-size:0.8rem; color:#8b949e;">
@@ -479,7 +499,9 @@ def render_confluence_alert(confluence_data: dict):
 def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: float, analyzer: SmartOIAnalyzer, selected_symbol_label: str):
     """Render the Price Action & Smart OI candlestick overlay."""
     st.subheader("Price vs. Smart OI & technical levels")
-    if not price_df.empty:
+    has_candles = price_df is not None and not price_df.empty and "timestamp" in price_df.columns
+
+    if has_candles:
         from plotly.subplots import make_subplots
         
         # Create dual-axis Plotly Chart
@@ -496,12 +518,13 @@ def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: f
         ), secondary_y=False)
         
         # Add VWAP Line on primary y-axis
-        fig.add_trace(go.Scatter(
-            x=price_df['timestamp'],
-            y=price_df['vwap'],
-            line=dict(color="orange", width=2, dash="dash"),
-            name="VWAP"
-        ), secondary_y=False)
+        if "vwap" in price_df.columns:
+            fig.add_trace(go.Scatter(
+                x=price_df['timestamp'],
+                y=price_df['vwap'],
+                line=dict(color="orange", width=2, dash="dash"),
+                name="VWAP"
+            ), secondary_y=False)
         
         # Add Max Pain Horizontal Line
         fig.add_hline(
@@ -525,7 +548,7 @@ def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: f
             
             # Find close price
             close_item = price_df[price_df["timestamp"] <= ts_item]
-            item_spot = close_item.iloc[-1]["close"] if not close_item.empty else None
+            item_spot = close_item.iloc[-1]["close"] if not close_item.empty and "close" in close_item.columns else None
             res_item = analyzer.analyze_smart_oi(oc_item, prev_item, spot_price=item_spot)
             
             # Find matching price row
@@ -545,43 +568,22 @@ def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: f
         fig.add_trace(go.Scatter(
             x=sig_df['timestamp'],
             y=sig_df['net_oi_diff'],
-            line=dict(color="#00b4d8", width=3),
-            name="Net Writer OI (PE-CE)"
+            line=dict(color="#00f5d4", width=2),
+            name="Net Writer Flow (PE-CE OI)",
+            fill='tozeroy',
+            fillcolor='rgba(0, 245, 212, 0.1)'
         ), secondary_y=True)
-        
-        # Color coding signal periods on background
-        for i in range(len(sig_df)):
-            row = sig_df.iloc[i]
-            t_start = row["timestamp"]
-            t_end = sig_df.iloc[i+1]["timestamp"] if i < len(sig_df)-1 else price_df.iloc[-1]["timestamp"]
-            
-            # Pick background color based on signal
-            style = SIGNAL_STYLES.get(row["signal"], {"color": "#8b949e"})
-            bg_color = style["color"]
-            
-            # Add shaded region
-            fig.add_vrect(
-                x0=t_start, x1=t_end,
-                fillcolor=bg_color, opacity=0.04,
-                layer="below", line_width=0,
-            )
-            
+
         fig.update_layout(
-            title=f"{selected_symbol_label} Price vs Smart OI (PE-CE Net Positioning) Overlay",
-            xaxis_title="Time",
-            xaxis_rangeslider_visible=False,
-            height=550,
+            height=500,
             template="plotly_dark",
-            margin=dict(l=20, r=20, t=40, b=20),
+            margin=dict(l=20, r=20, t=30, b=20),
+            xaxis_rangeslider_visible=False,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
-        
-        fig.update_yaxes(title_text="Price (₹)", secondary_y=False)
-        fig.update_yaxes(title_text="Net PE-CE OI (Contracts)", secondary_y=True)
-        
-        st.plotly_chart(fig, use_container_width=True, key="price_smart_oi_chart")
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No intraday price data available to render the candlestick chart.")
+        st.info("ℹ️ Intraday candlestick price history is not available for this session. Real-time option chain analytics, volume profile, and Greek heatmaps below remain fully active.")
 
 
 def render_tab_transitions(snapshots: list, price_df: pd.DataFrame, analyzer: SmartOIAnalyzer):
@@ -592,18 +594,25 @@ def render_tab_transitions(snapshots: list, price_df: pd.DataFrame, analyzer: Sm
     # Calculate transition table
     transition_list = []
     last_sig = None
+    has_ts = price_df is not None and not price_df.empty and "timestamp" in price_df.columns
+
     for i in range(len(snapshots)):
         ts_item, oc_item = snapshots[i]
         prev_item = snapshots[i-1][1] if i > 0 else None
         
-        close_item = price_df[price_df["timestamp"] <= ts_item]
-        item_spot = close_item.iloc[-1]["close"] if not close_item.empty else None
+        item_spot = None
+        if has_ts:
+            close_item = price_df[price_df["timestamp"] <= ts_item]
+            if not close_item.empty and "close" in close_item.columns:
+                item_spot = close_item.iloc[-1]["close"]
+        
         res_item = analyzer.analyze_smart_oi(oc_item, prev_item, spot_price=item_spot)
         
         current_sig = res_item["signal"]
         if current_sig != last_sig:
+            time_str = ts_item.strftime("%H:%M:%S") if hasattr(ts_item, "strftime") else str(ts_item)
             transition_list.append({
-                "time": ts_item.strftime("%H:%M:%S"),
+                "time": time_str,
                 "signal": current_sig,
                 "spot": item_spot,
                 "reasons": f"Bullish flow: {res_item['summary']['bullish_oi_flow']:,} | Bearish flow: {res_item['summary']['bearish_oi_flow']:,} | Unwinding: {res_item['summary']['unwind_oi_flow']:,}"
@@ -1413,6 +1422,91 @@ def render_footer_help():
     """)
 
 
+def render_tab_causal_graph(
+    symbol: str,
+    spot_price: float,
+    latest_oc: pd.DataFrame,
+    call_wall: float,
+    put_wall: float,
+    max_pain: float,
+    strike_step: float = 50.0,
+):
+    """Render the In-Memory Option Causal Graph & What-If Shockwave Simulator."""
+    st.subheader("🕸️ Option Strike Causal Graph & What-If Shockwave Simulator")
+    st.caption(
+        "Interactive Directed Graph (DAG) modeling the causal web connecting Spot, India VIX, "
+        "heavyweight equities, institutional walls, and dealer gamma rehedging flows."
+    )
+
+    from trade_system.domains.analysis.application.analysis.option_causal_graph import OptionCausalGraph
+
+    graph_engine = OptionCausalGraph(symbol=symbol)
+    graph_engine.build_graph(
+        spot_price=spot_price,
+        oc_df=latest_oc,
+        vix_level=11.5,
+        strike_step=strike_step,
+        n_strikes=3,
+        call_wall=call_wall,
+        put_wall=put_wall,
+        max_pain=max_pain,
+    )
+
+    # Simulator Controls Card
+    with st.expander("⚡ Run What-If Scenario Stress Test (Shockwave Simulator)", expanded=True):
+        st.markdown("##### 🎛️ Shockwave Scenario Inputs")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            spot_shock = st.slider("Spot Shock (%)", -2.0, 2.0, 0.0, 0.1, key="shock_spot")
+        with c2:
+            vix_shock = st.slider("India VIX Shock (%)", -25.0, 25.0, 0.0, 1.0, key="shock_vix")
+        with c3:
+            hdfc_shock = st.slider("HDFC Bank Shock (%)", -3.0, 3.0, 0.0, 0.2, key="shock_hdfc")
+        with c4:
+            rel_shock = st.slider("Reliance Shock (%)", -3.0, 3.0, 0.0, 0.2, key="shock_rel")
+
+    # Run simulation
+    sim = graph_engine.simulate_shockwave(
+        spot_shock_pct=spot_shock,
+        vix_shock_pct=vix_shock,
+        constituent_shocks={"HDFCBANK": hdfc_shock, "RELIANCE": rel_shock},
+    )
+
+    # Shockwave KPI Metrics
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Projected Spot", f"₹{sim.projected_spot:,.2f}", f"{sim.spot_delta:+.2f} pts")
+    k2.metric("Dealer Futures Rehedge", f"₹{sim.dealer_hedge_flow_cr:,.1f} Cr", sim.dealer_hedge_direction.split()[0])
+    k3.metric("Call Wall Status", sim.call_wall_status)
+    k4.metric("Put Wall Status", sim.put_wall_status)
+
+    st.markdown("---")
+
+    # Render Plotly Graph
+    st.markdown("#### 🌐 Real-Time Interconnection Network Map")
+    fig = graph_engine.build_plotly_figure(sim)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Strike Impact Projection Table
+    st.markdown("#### 📋 Strike-by-Strike Price & Greeks Sensitivity Matrix")
+    if sim.strike_projections:
+        table_rows = []
+        for s in sim.strike_projections:
+            table_rows.append({
+                "Strike": f"{int(s.strike)} {s.option_type}",
+                "Type": s.option_type,
+                "Current LTP": f"₹{s.current_ltp:.2f}",
+                "Projected LTP": f"₹{s.projected_ltp:.2f}",
+                "Change (₹)": f"{s.ltp_change:+.2f}",
+                "Change (%)": f"{s.ltp_change_pct:+.1f}%",
+                "Delta (Δ)": f"{s.delta:.2f}",
+                "Gamma (Γ)": f"{s.gamma:.4f}",
+                "Vega (ν)": f"{s.vega:.2f}",
+                "Open Interest": f"{s.oi:,}",
+            })
+        df_table = pd.DataFrame(table_rows)
+        st.dataframe(df_table, use_container_width=True, hide_index=True)
+
+
 def run_dashboard():
     """Main function to run and render the Smart OI Dashboard."""
     # Main page titles
@@ -1508,6 +1602,17 @@ def run_dashboard():
 
     # Initialize SmartOI Analyzer & dynamically infer strike step
     analyzer = SmartOIAnalyzer(db_symbol)
+    if latest_oc is not None and not latest_oc.empty:
+        if "strike" not in latest_oc.columns and "strike_price" in latest_oc.columns:
+            latest_oc["strike"] = pd.to_numeric(latest_oc["strike_price"], errors="coerce")
+        elif "strike_price" not in latest_oc.columns and "strike" in latest_oc.columns:
+            latest_oc["strike_price"] = pd.to_numeric(latest_oc["strike"], errors="coerce")
+    if prev_oc is not None and not prev_oc.empty:
+        if "strike" not in prev_oc.columns and "strike_price" in prev_oc.columns:
+            prev_oc["strike"] = pd.to_numeric(prev_oc["strike_price"], errors="coerce")
+        elif "strike_price" not in prev_oc.columns and "strike" in prev_oc.columns:
+            prev_oc["strike_price"] = pd.to_numeric(prev_oc["strike"], errors="coerce")
+
     analyzer.update_strike_step_from_df(latest_oc)
 
     # Estimate spot price if not available
@@ -1617,10 +1722,10 @@ def run_dashboard():
 
     st.markdown("---")
 
-    # --- 2. DEEP-DIVE TABS ---
-    tab_divergence, tab_vol_profile, tab_chart, tab_transitions, tab_pro_trader, tab_iv_greeks, tab_sniper, tab_fo_pcr = st.tabs([
+    tab_divergence, tab_vol_profile, tab_causal_graph, tab_chart, tab_transitions, tab_pro_trader, tab_iv_greeks, tab_sniper, tab_fo_pcr = st.tabs([
         "⚡ Institutional Divergence & Traps",
         "📊 Strike Volume & OI Profile",
+        "🕸️ Strike Causal Graph & Shockwave",
         "📈 Price Action & Smart OI Overlay",
         "⏱️ Signal Transitions Timeline",
         "🏦 Pro Trader Analytics & Walls",
@@ -1634,6 +1739,17 @@ def run_dashboard():
 
     with tab_vol_profile:
         render_tab_volume_profile(volume_profile_df, spot_price, max_pain_strike)
+
+    with tab_causal_graph:
+        render_tab_causal_graph(
+            symbol=db_symbol,
+            spot_price=spot_price,
+            latest_oc=latest_oc,
+            call_wall=call_wall,
+            put_wall=put_wall,
+            max_pain=max_pain_strike,
+            strike_step=analyzer.strike_step,
+        )
 
     with tab_chart:
         render_tab_chart(price_df, snapshots, max_pain_strike, analyzer, selected_symbol_label)

@@ -24,6 +24,7 @@ st.sidebar.title("⚙️ Detection Parameters")
 pivot_len = st.sidebar.slider("Pivot Length", min_value=1, max_value=10, value=3, help="Bars on left and right for pivot detection.")
 vol_lookback = st.sidebar.slider("Volume Lookback", min_value=5, max_value=100, value=20, help="Period used to calculate relative volume changes.")
 max_obs = st.sidebar.slider("Max Recent Blocks", min_value=1, max_value=20, value=5, help="Maximum number of active order blocks to display.")
+bars_to_show = st.sidebar.slider("Bars to Display", min_value=30, max_value=250, value=100, step=10, help="Number of candles shown on the chart.")
 hide_overlapping = st.sidebar.checkbox("Hide Overlapping Blocks", value=False, help="Automatically remove overlapping order blocks of lower volume.")
 show_manipulation = st.sidebar.checkbox("Show Manipulation Bubbles", value=True, help="Track and flag institutional liquidity sweeps.")
 manip_size = st.sidebar.slider("Bubble Sensitivity", min_value=0.1, max_value=5.0, value=1.0, step=0.1, help="Adjust bubble sizing sensitivity based on sweep volume.")
@@ -123,18 +124,29 @@ else:
     history = detector.calculate(df_candles)
     active_obs = history[-1] if history else []
 
-    # Filter out recent 150-200 bars to keep the chart clean and readable
-    df_chart = df_candles.tail(150).copy()
+    # Filter recent N bars selected by user
+    df_chart = df_candles.tail(bars_to_show).copy()
+    
+    # Format time labels for categorical continuous axis (eliminates overnight and weekend blank gaps)
+    if selected_tf == "Daily":
+        df_chart["time_label"] = df_chart["timestamp"].dt.strftime("%d %b %Y")
+    else:
+        df_chart["time_label"] = df_chart["timestamp"].dt.strftime("%d %b %H:%M")
+
+    # Map timestamps to categorical strings
+    time_to_label = dict(zip(df_chart["timestamp"], df_chart["time_label"]))
     visible_timestamps = df_chart["timestamp"].tolist()
     min_time = visible_timestamps[0]
     max_time = visible_timestamps[-1]
+    first_label = df_chart["time_label"].iloc[0]
+    last_label = df_chart["time_label"].iloc[-1]
     
     # Build Plotly Chart
     fig = go.Figure()
 
-    # Candlestick Trace
+    # Candlestick Trace with proper TradingView palette
     fig.add_trace(go.Candlestick(
-        x=df_chart['timestamp'],
+        x=df_chart['time_label'],
         open=df_chart['open'],
         high=df_chart['high'],
         low=df_chart['low'],
@@ -152,9 +164,15 @@ else:
         if ob.breakout_time > max_time:
             continue
             
-        x_start = max(ob.breakout_time, min_time)
-        x_end = max_time
-        
+        # Match breakout time to categorical x coordinate
+        # If breakout happened before the visible chart window, start at first visible candle
+        if ob.breakout_time <= min_time:
+            x_start = first_label
+        else:
+            matched = [t for t in visible_timestamps if t >= ob.breakout_time]
+            x_start = time_to_label[matched[0]] if matched else first_label
+            
+        x_end = last_label
         color_fill = ob.css_color
         
         # Add background shape for the Order Block Range
@@ -165,8 +183,8 @@ else:
             y0=ob.low,
             y1=ob.high,
             fillcolor=color_fill,
-            opacity=0.1,
-            line=dict(width=1, color=color_fill),
+            opacity=0.15,
+            line=dict(width=1.2, color=color_fill),
             layer="below"
         )
         
@@ -181,36 +199,37 @@ else:
             hoverinfo="y+name"
         ))
 
-        # Add BOS/CHoCH structural label text
-        # Places label centered vertically on the block boundary
-        show_leg = not legend_added.get(ob.label_text, False)
-        fig.add_trace(go.Scatter(
-            x=[ob.breakout_time],
-            y=[ob.high if ob.is_bullish else ob.low],
-            mode="markers+text",
-            marker=dict(symbol="triangle-up" if ob.is_bullish else "triangle-down", size=8, color=ob.css_color),
-            text=[ob.label_text],
-            textposition="top center" if ob.is_bullish else "bottom center",
-            textfont=dict(color=ob.css_color, size=10, family="Courier New"),
-            name=ob.label_text,
-            showlegend=show_leg
-        ))
-        legend_added[ob.label_text] = True
+        # Add BOS/CHoCH structural label text at breakout candle
+        if ob.breakout_time in time_to_label:
+            lbl_x = time_to_label[ob.breakout_time]
+            show_leg = not legend_added.get(ob.label_text, False)
+            fig.add_trace(go.Scatter(
+                x=[lbl_x],
+                y=[ob.high if ob.is_bullish else ob.low],
+                mode="markers+text",
+                marker=dict(symbol="triangle-up" if ob.is_bullish else "triangle-down", size=9, color=ob.css_color),
+                text=[ob.label_text],
+                textposition="top center" if ob.is_bullish else "bottom center",
+                textfont=dict(color=ob.css_color, size=11, family="Courier New", weight="bold"),
+                name=ob.label_text,
+                showlegend=show_leg
+            ))
+            legend_added[ob.label_text] = True
 
         # Render Manipulation Sweeps (swept high/low wicks)
         if show_manipulation:
             for m in ob.manipulations:
-                if min_time <= m["timestamp"] <= max_time:
-                    # Draw sweep bubble/marker
+                m_ts = m["timestamp"]
+                if m_ts in time_to_label:
                     fig.add_trace(go.Scatter(
-                        x=[m["timestamp"]],
+                        x=[time_to_label[m_ts]],
                         y=[m["price"]],
                         mode="markers",
                         marker=dict(
                             symbol="circle",
                             size=14 if m["size"] == "huge" else (11 if m["size"] == "large" else (8 if m["size"] == "normal" else 5)),
                             color=ob.css_color,
-                            opacity=0.6,
+                            opacity=0.7,
                             line=dict(color="white", width=1)
                         ),
                         name="Liquidity Sweep",
@@ -221,13 +240,26 @@ else:
     # Layout formatting
     fig.update_layout(
         title=f"Volumetric Order Flow Structure [LuxAlgo] — {selected_symbol} ({selected_tf})",
-        xaxis_title="Timeline",
+        xaxis_title="Timeline (Trading Sessions)",
         yaxis_title="Price (₹)",
         xaxis_rangeslider_visible=False,
-        height=650,
+        height=680,
         template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(15,15,25,0.6)",
         margin=dict(l=30, r=30, t=50, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    fig.update_xaxes(
+        type="category",
+        nticks=16,
+        tickangle=-30,
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.06)"
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.06)"
     )
 
     st.plotly_chart(fig, use_container_width=True, key="volumetric_chart")

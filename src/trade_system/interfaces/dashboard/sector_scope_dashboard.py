@@ -17,15 +17,14 @@ from trade_system.domains.market_data.infrastructure.database.connection import 
 from sqlalchemy import text
 from trade_system.domains.market_data.infrastructure.data.fo_universe import get_sector_mapping, get_stocks_by_sector
 from trade_system.domains.analysis.application.analysis.breakout_screener import BreakoutScreener
-import importlib
-import trade_system.domains.analysis.application.analysis.intraday_edge_scorer
-import trade_system.domains.analysis.application.analysis.smart_entry_trigger
-importlib.reload(trade_system.domains.analysis.application.analysis.intraday_edge_scorer)
-importlib.reload(trade_system.domains.analysis.application.analysis.smart_entry_trigger)
 
 from trade_system.domains.analysis.application.analysis.intraday_edge_scorer import IntradayEdgeScorer
 from trade_system.domains.analysis.application.analysis.smart_entry_trigger import SmartEntryTrigger
-from trade_system.domains.analysis.application.analysis.reversal_scanner import DailyReversalScanner, DailyReversalSetup
+from trade_system.domains.analysis.application.analysis.reversal_scanner import (
+    DailyReversalScanner,
+    DailyReversalSetup,
+    _compute_rsi,
+)
 from trade_system.domains.analysis.application.analysis.breakout_breakdown_proximity_screener import (
     BreakoutBreakdownProximityScreener,
     ProximitySetup,
@@ -222,6 +221,19 @@ def _fetch_symbol_15m_cached(symbol: str, target_date_str: str) -> pd.DataFrame:
     except Exception as e:
         logger.warning("Failed to fetch 15m history for %s: %s", symbol, e)
     return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner="Computing Walk-Forward Reversal Model Backtest...")
+def get_cached_reversal_backtest(lookback_days: int = 60, min_prob: int = 60, target_date_str: str = "") -> dict:
+    """Run and cache walk-forward evaluation of Daily Reversal Radar recommendations."""
+    try:
+        from trade_system.domains.analysis.application.analysis.recommendation_evaluator import RecommendationEvaluator
+        evaluator = RecommendationEvaluator(lookback_days=lookback_days)
+        t_d = date.fromisoformat(target_date_str) if target_date_str else date.today()
+        return evaluator.evaluate_reversal_recommendations(min_probability=min_prob, target_date=t_d)
+    except Exception as exc:
+        logger.error("Error in get_cached_reversal_backtest: %s", exc, exc_info=True)
+        return {"error": str(exc)}
 
 
 available_dates = fetch_available_dates()
@@ -2348,6 +2360,88 @@ else:
 
             else:
                 st.info("No reversal setups match the current filters. Adjust your minimum probability or sector filter above.")
+
+            # ---- SUBSECTION: Historical Model Backtest & Attribution Scorecard ----
+            st.markdown("---")
+            st.markdown("""
+            <div class="section-header" style="margin-top: 1.2rem; margin-bottom: 0.8rem;">
+                <h3>📈 Historical Model Verification & Backtest Scorecard</h3>
+                <span class="badge" style="background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);">
+                    WALK-FORWARD VERIFICATION • REAL OUTCOME ATTRIBUTION
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+            st.caption("Evaluates how past reversal recommendations actually performed over a walk-forward holding period (Max 5 trading days to hit Target 1 vs Stop Loss).")
+
+            col_b1, col_b2, col_b3 = st.columns([1, 1, 1])
+            with col_b1:
+                b_lookback = st.selectbox("Historical Lookback", [30, 60, 90], index=1, format_func=lambda d: f"{d} Trading Days", key="b_lookback_sel")
+            with col_b2:
+                b_min_prob = st.selectbox("Min Recommendation Probability", [50, 55, 60, 70], index=2, format_func=lambda p: f"≥{p}% Probability", key="b_min_prob_sel")
+            with col_b3:
+                st.write("")
+                st.write("")
+                if st.button("🔄 Clear Cache & Re-evaluate", key="b_clear_cache_btn", use_container_width=True):
+                    get_cached_reversal_backtest.clear()
+                    st.rerun()
+
+            b_res = get_cached_reversal_backtest(
+                lookback_days=b_lookback,
+                min_prob=b_min_prob,
+                target_date_str=target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+            )
+
+            if b_res and "error" not in b_res:
+                # Metric row
+                bm1, bm2, bm3, bm4 = st.columns(4)
+                bm1.metric("🎯 Confirmed Trigger Rate", f"{b_res.get('trigger_rate_pct', 0)}%", f"{b_res.get('triggered_trades', 0)} / {b_res.get('total_recommendations', 0)} setups")
+                bm2.metric("🏆 Win Rate (Target 1 Hit)", f"{b_res.get('win_rate_pct', 0)}%", f"{b_res.get('wins', 0)} Wins / {b_res.get('losses', 0)} Losses")
+                bm3.metric("💰 Profit Factor", f"{b_res.get('profit_factor', 0):.2f}", f"Avg PnL: {b_res.get('avg_pnl_pct', 0):+.2f}%")
+                bm4.metric("🚀 Avg MFE / MAE", f"+{b_res.get('avg_mfe_pct', 0):.2f}%", f"Drawdown: {b_res.get('avg_mae_pct', 0):.2f}%", delta_color="normal")
+
+                # Confluence Attribution Table
+                st.markdown("##### 🔬 Confluence Edge Attribution (Which Patterns Win Most?)")
+                attr_data = b_res.get("confluence_attribution", [])
+                if attr_data:
+                    df_attr = pd.DataFrame(attr_data)
+                    st.dataframe(
+                        df_attr.style.format({
+                            "Win Rate %": "{:.1f}%",
+                            "Avg PnL %": "{:+.2f}%",
+                            "Trades": "{:,}"
+                        }).map(
+                            lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v >= 65 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 40 else ""),
+                            subset=["Win Rate %"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=min(320, len(df_attr) * 35 + 38)
+                    )
+                else:
+                    st.info("No confluence patterns met the sample size threshold.")
+
+                # Sample verified trade logs
+                trades_df = b_res.get("trades_df", pd.DataFrame())
+                if not trades_df.empty:
+                    with st.expander(f"📋 View Recent Verified Trades Ledger ({len(trades_df)} Trades)", expanded=False):
+                        disp_cols = ["date", "symbol", "direction", "probability", "entry_price", "stop_loss", "target_1", "outcome", "pnl_pct", "mfe_pct", "holding_days"]
+                        show_cols = [c for c in disp_cols if c in trades_df.columns]
+                        st.dataframe(
+                            trades_df[show_cols].tail(50).sort_values("date", ascending=False).style.format({
+                                "entry_price": "₹{:.2f}",
+                                "stop_loss": "₹{:.2f}",
+                                "target_1": "₹{:.2f}",
+                                "pnl_pct": "{:+.2f}%",
+                                "mfe_pct": "+{:.2f}%",
+                            }).map(
+                                lambda v: "color: #22c55e; font-weight:700" if v == "WIN" else ("color: #ef4444; font-weight:700" if v == "LOSS" else ""),
+                                subset=["outcome"]
+                            ),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+            else:
+                st.info(b_res.get("error", "Unable to compute historical backtest."))
 
         except Exception as rev_err:
             LOGGER.error("Error running Daily Reversal Scanner: %s", rev_err, exc_info=True)

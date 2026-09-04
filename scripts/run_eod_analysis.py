@@ -60,12 +60,31 @@ async def run_eod_workflow():
         except Exception as e:
             logger.error(f"Phase 2 failed: {e}")
 
+    # Phase 3: Daily Reversal Walk-Forward Backtest Verification
+    def run_reversal_backtest():
+        logger.info("Phase 3: Starting Daily Reversal Radar Walk-Forward Backtest...")
+        try:
+            from trade_system.domains.analysis.application.analysis.recommendation_evaluator import RecommendationEvaluator
+            evaluator = RecommendationEvaluator(lookback_days=60)
+            res = evaluator.evaluate_reversal_recommendations(min_probability=60)
+            if "error" not in res:
+                logger.info(
+                    f"✓ Phase 3 Complete: Trigger Rate {res['trigger_rate_pct']}% | "
+                    f"Win Rate {res['win_rate_pct']}% ({res['wins']}W / {res['losses']}L) | "
+                    f"Profit Factor {res['profit_factor']}"
+                )
+            else:
+                logger.warning(f"Phase 3 notice: {res.get('error')}")
+        except Exception as e:
+            logger.error(f"Phase 3 failed: {e}", exc_info=True)
+
     improver = PostMarketImproverAgent(broker=broker, settings=settings)
     
     try:
         await asyncio.gather(
             improver.run_post_market_analysis(),
-            asyncio.to_thread(run_strategy_scan)
+            asyncio.to_thread(run_strategy_scan),
+            asyncio.to_thread(run_reversal_backtest)
         )
         logger.info("✓ All post-market phases completed in parallel.")
     except Exception as e:
