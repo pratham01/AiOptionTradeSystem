@@ -513,7 +513,8 @@ class IndexPipeline:
                 f"{strike_info}"
             )
             try:
-                self.notifier.send(main_msg)
+                if getattr(self.settings, "enable_main_channel_supertrend_alerts", False):
+                    self.notifier.send(main_msg)
                 confirmed_msg = (
                     f"{color} <b>⚡ ST FLIP — {short_sym} {bar_time.strftime('%H:%M')}</b>\n"
                     f"Timeframe: <b>{self.strategy_tf}m Supertrend</b>\n"

@@ -8,6 +8,7 @@ if str(root_path) not in sys.path:
 
 import logging
 from datetime import datetime, date
+from typing import Any, Dict, List, Optional
 import pandas as pd
 import numpy as np
 
@@ -205,9 +206,28 @@ class OptionChainAnalyzer:
             'near_support': abs(spot-pe_wall) < 30
         }
 
-    def _calculate_max_pain(self, df):
-        # Simplified Max Pain calculation
-        return {'max_pain_strike': round(df['strike'].mean() / 50) * 50}
+    def _calculate_max_pain(self, df: pd.DataFrame) -> dict[str, Any]:
+        """Calculate true institutional Max Pain strike (minimum writer payout loss)."""
+        if df is None or df.empty or 'strike' not in df.columns or 'oi' not in df.columns or 'option_type' not in df.columns:
+            return {'max_pain_strike': 0.0}
+        
+        strikes = sorted(df['strike'].dropna().unique())
+        if not strikes:
+            return {'max_pain_strike': 0.0}
+
+        ce_df = df[df['option_type'] == 'CE'][['strike', 'oi']].dropna()
+        pe_df = df[df['option_type'] == 'PE'][['strike', 'oi']].dropna()
+        
+        losses = {}
+        for s in strikes:
+            ce_loss = ((s - ce_df['strike']).clip(lower=0) * ce_df['oi']).sum()
+            pe_loss = ((pe_df['strike'] - s).clip(lower=0) * pe_df['oi']).sum()
+            losses[s] = float(ce_loss + pe_loss)
+            
+        if losses:
+            min_strike = min(losses, key=losses.get)
+            return {'max_pain_strike': float(min_strike), 'total_loss': losses[min_strike]}
+        return {'max_pain_strike': float(strikes[len(strikes) // 2])}
 
     def _detect_institutional_activity(self, df, spot):
         # Classify based on Price vs OI Change

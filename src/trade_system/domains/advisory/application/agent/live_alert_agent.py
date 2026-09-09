@@ -38,6 +38,7 @@ class LiveAlertAgent:
         self.config = self.settings.indicator_config
         # OI History: symbol -> list of (timestamp, OptionChainAnalysis)
         self.oi_history: dict[str, list[tuple[datetime, Any]]] = {}
+        self.last_max_pain: dict[str, float] = {}
         self.execution_engine = None
         self.position_manager = None
         
@@ -332,12 +333,25 @@ class LiveAlertAgent:
                     )
                     self._debounce_send(symbol, "EXTREME_PCR_BEAR", extreme_msg, custom_debounce=3600)
 
+            # Direct check for Max Pain Level Shift
             curr_mp = _get(analysis, 'max_pain')
-            prev_mp = _get(past_15, 'max_pain')
-            curr_mp_val = _get(curr_mp, 'max_pain_strike') if isinstance(curr_mp, dict) else curr_mp
-            prev_mp_val = _get(prev_mp, 'max_pain_strike') if isinstance(prev_mp, dict) else prev_mp
-            if curr_mp_val and prev_mp_val and curr_mp_val != prev_mp_val:
-                alerts.append(f"• Max Pain Shift: {curr_mp_val - prev_mp_val:+.0f} pts")
+            curr_mp_val = float(_get(curr_mp, 'max_pain_strike') if isinstance(curr_mp, dict) else (curr_mp or 0.0))
+            metrics = _get(analysis, 'metrics')
+            spot_p = float(_get(metrics, 'spot_price') or _get(analysis, 'spot_price') or 0.0)
+            expiry_str = _get(analysis, 'expiry') or getattr(analysis, 'nearest_expiry', None)
+
+            if curr_mp_val > 0:
+                prev_mp = self.last_max_pain.get(symbol)
+                if prev_mp is not None and prev_mp > 0 and curr_mp_val != prev_mp:
+                    self.alert_max_pain_shift(
+                        symbol=symbol,
+                        new_max_pain=curr_mp_val,
+                        prev_max_pain=prev_mp,
+                        spot_price=spot_p if spot_p > 0 else None,
+                        expiry=expiry_str,
+                    )
+                    alerts.append(f"• Max Pain Shift: {curr_mp_val - prev_mp:+.0f} pts (₹{prev_mp:.0f} → ₹{curr_mp_val:.0f})")
+                self.last_max_pain[symbol] = curr_mp_val
 
             # Speculative Heat
             try:
@@ -369,6 +383,69 @@ class LiveAlertAgent:
                 self._debounce_send(symbol, "SUDDEN_OI", msg, custom_debounce=900)
         except Exception as exc:
             LOGGER.debug("OI change detection error: %s", exc)
+
+    def alert_max_pain_shift(
+        self,
+        symbol: str,
+        new_max_pain: float,
+        prev_max_pain: float,
+        spot_price: float | None = None,
+        expiry: str | None = None,
+        dte: int | None = None,
+    ) -> None:
+        """
+        Dispatches an immediate Telegram alert whenever the option chain Max Pain level shifts.
+        """
+        if new_max_pain <= 0 or prev_max_pain <= 0 or new_max_pain == prev_max_pain:
+            return
+
+        short_sym = symbol.split(":")[-1].replace("-INDEX", "").replace("-EQ", "")
+        pts_diff = new_max_pain - prev_max_pain
+        is_bullish = pts_diff > 0
+        direction_badge = "📈 Bullish (Floor Migrated Upward)" if is_bullish else "📉 Bearish (Ceiling Lowered Downward)"
+        diff_sign = f"+{pts_diff:,.1f}" if is_bullish else f"{pts_diff:,.1f}"
+
+        spot_str = f"₹{spot_price:,.2f}" if spot_price is not None else "N/A"
+        dist_str = ""
+        if spot_price is not None:
+            dist = spot_price - new_max_pain
+            dist_sign = f"+{dist:,.1f}" if dist >= 0 else f"{dist:,.1f}"
+            dist_str = f" ({dist_sign} pts from Max Pain)"
+
+        expiry_info = f"\n🗓️ <b>Expiry:</b> {expiry}" if expiry else ""
+        if dte is not None:
+            expiry_info += f" ({dte} DTE)"
+
+        if is_bullish:
+            implication = (
+                f"• <b>Smart Money Writers:</b> Heavy Put writing / Call short covering has pushed the strike of minimum writer payout HIGHER.\n"
+                f"• <b>Market Structure:</b> Price floor has risen. Dips towards ₹{new_max_pain:,.0f} likely to find strong support & magnetic absorption.\n"
+                f"• <b>Option Action:</b> Bullish bias. Favorable for ATM Call buying on pullbacks."
+            )
+        else:
+            implication = (
+                f"• <b>Smart Money Writers:</b> Heavy Call writing / Put long buildup has pushed the strike of minimum writer payout LOWER.\n"
+                f"• <b>Market Structure:</b> Price ceiling is lowering. Rallies towards ₹{new_max_pain:,.0f} face stiff institutional supply.\n"
+                f"• <b>Option Action:</b> Bearish bias. Favorable for ATM Put buying on bounces."
+            )
+
+        msg = (
+            f"🧲 <b>MAX PAIN LEVEL SHIFT — {short_sym}</b>\n\n"
+            f"🎯 <b>New Max Pain:</b> ₹{new_max_pain:,.1f}\n"
+            f"⏮️ <b>Previous Level:</b> ₹{prev_max_pain:,.1f}\n"
+            f"📊 <b>Shift Delta:</b> <b>{diff_sign} pts</b> ({direction_badge})\n"
+            f"📌 <b>Current Spot:</b> {spot_str}{dist_str}{expiry_info}\n\n"
+            f"💡 <b>Institutional Forensics:</b>\n"
+            f"{implication}\n\n"
+            f"⏰ <i>Time: {datetime.now(IST).strftime('%H:%M:%S IST')}</i>"
+        )
+
+        # Send alert via Telegram with a 60-second debounce to ensure instant delivery
+        self._debounce_send(symbol, "MAX_PAIN_SHIFT", msg, custom_debounce=60)
+        LOGGER.info(
+            "Max Pain shift alert triggered for %s: %s -> %s (%+0.1f pts)",
+            symbol, prev_max_pain, new_max_pain, pts_diff
+        )
 
     def _debounce_send(
         self,

@@ -1993,18 +1993,19 @@ class LiveMarketDataService:
                     LOGGER.warning(f"Failed to build strike info for trend alert: {e}")
 
             try:
-                # ── Main channel message (concise) ──────────────────────────────
-                main_msg = (
-                    f"{color} <b>{self._short_symbol(symbol)} {bar_time.strftime('%H:%M')}</b>\n"
-                    f"Direction changed to <b>{'UP' if current_trend == 1 else 'DOWN'}</b> ({self.strategy_timeframe_minutes}m)\n"
-                    f"15m Trend: <b>{st_15_dir_str}</b>\n"
-                    f"Close: ₹{close_price:.2f}\n"
-                    f"Supertrend: ₹{supertrend_val:.2f}\n"
-                    f"Confluence: <b>{confluence_label}</b>\n"
-                    f"Action: <b>{action}</b>"
-                    f"{strike_info}"
-                )
-                self.notifier.send(main_msg)
+                # ── Main channel message (disabled by default to keep channel clean) ──
+                if getattr(self.settings, "enable_main_channel_supertrend_alerts", False):
+                    main_msg = (
+                        f"{color} <b>{self._short_symbol(symbol)} {bar_time.strftime('%H:%M')}</b>\n"
+                        f"Direction changed to <b>{'UP' if current_trend == 1 else 'DOWN'}</b> ({self.strategy_timeframe_minutes}m)\n"
+                        f"15m Trend: <b>{st_15_dir_str}</b>\n"
+                        f"Close: ₹{close_price:.2f}\n"
+                        f"Supertrend: ₹{supertrend_val:.2f}\n"
+                        f"Confluence: <b>{confluence_label}</b>\n"
+                        f"Action: <b>{action}</b>"
+                        f"{strike_info}"
+                    )
+                    self.notifier.send(main_msg)
 
                 # ── ST_CONFIRMED channel — rich message with strike ST directions ─
                 confirmed_strike_block = strike_info  # reuse the CE/PE block built above

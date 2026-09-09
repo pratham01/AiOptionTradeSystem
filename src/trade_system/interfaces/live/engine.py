@@ -128,7 +128,8 @@ class TradeEngine:
             f"<b>Price:</b> {candle['close']:.2f}\n"
         )
         logger.info(f"SIGNAL: {symbol} trend changed to {dir_str}")
-        self.notifier.send_message(message)
+        if getattr(self.settings, "enable_main_channel_supertrend_alerts", False):
+            self.notifier.send_message(message)
 
     def stop(self):
         """Stops the trade engine."""

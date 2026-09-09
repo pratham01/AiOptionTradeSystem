@@ -11,7 +11,7 @@ defaults:
 # Strategy-specific alert templates and channel routing
 strategies:
   supertrend_flip:
-    enabled: true
+    enabled: false
     channel: "main"
     cooldown_seconds: 120
     template: |

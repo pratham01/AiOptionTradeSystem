@@ -23,7 +23,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "strategies": {
         "supertrend_flip": {
-            "enabled": True,
+            "enabled": False,
             "channel": "main",
             "cooldown_seconds": 120,
             "template": (

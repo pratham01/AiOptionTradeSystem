@@ -755,6 +755,63 @@ class ChiefTradingAgent:
             LOGGER.error("Failed to dispatch Telegram alert: %s", e)
             return False
 
+    def dispatch_max_pain_alert(
+        self,
+        symbol: str,
+        new_max_pain: float,
+        prev_max_pain: float,
+        spot_price: float,
+        market_structure: Dict[str, Any],
+    ) -> bool:
+        """Dispatch instant Telegram notification on option chain Max Pain level shift."""
+        try:
+            telegram_cfg = self.settings.telegram
+            if not telegram_cfg.enabled:
+                return False
+
+            notifier = TelegramNotifier(telegram_cfg.bot_token, telegram_cfg.chat_id)
+            short_sym = symbol.split(":")[-1].replace("-INDEX", "").replace("-EQ", "")
+            pts_diff = new_max_pain - prev_max_pain
+            is_bullish = pts_diff > 0
+            direction_badge = "📈 Bullish (Floor Migrated Upward)" if is_bullish else "📉 Bearish (Ceiling Lowered Downward)"
+            diff_sign = f"+{pts_diff:,.1f}" if is_bullish else f"{pts_diff:,.1f}"
+
+            dist = spot_price - new_max_pain
+            dist_sign = f"+{dist:,.1f}" if dist >= 0 else f"{dist:,.1f}"
+            dte = market_structure.get("days_to_expiry", "N/A")
+            phase = market_structure.get("expiry_phase", "ACTIVE")
+
+            if is_bullish:
+                implication = (
+                    f"• <b>Smart Money Writers:</b> Heavy Put writing / Call short covering has pushed the strike of minimum writer payout HIGHER.\n"
+                    f"• <b>Market Structure:</b> Underlying price floor has risen. Pullbacks toward ₹{new_max_pain:,.0f} likely to find institutional support & magnet pull.\n"
+                    f"• <b>Option Action:</b> Bullish bias. Favorable for ATM Call buying on dips."
+                )
+            else:
+                implication = (
+                    f"• <b>Smart Money Writers:</b> Heavy Call writing / Put long buildup has pushed the strike of minimum writer payout LOWER.\n"
+                    f"• <b>Market Structure:</b> Price ceiling is lowering. Bounces toward ₹{new_max_pain:,.0f} face heavy institutional resistance.\n"
+                    f"• <b>Option Action:</b> Bearish bias. Favorable for ATM Put buying on rallies."
+                )
+
+            message = (
+                f"🧲 <b>MAX PAIN LEVEL SHIFT — {short_sym}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🎯 <b>New Max Pain Strike:</b> <b>₹{new_max_pain:,.1f}</b>\n"
+                f"⏮️ <b>Previous Level:</b> ₹{prev_max_pain:,.1f}\n"
+                f"📊 <b>Shift Delta:</b> <b>{diff_sign} pts</b> ({direction_badge})\n"
+                f"📌 <b>Current Spot:</b> ₹{spot_price:,.2f} ({dist_sign} pts from Max Pain)\n"
+                f"⏳ <b>Expiry Dynamics:</b> {dte} DTE ({phase})\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 <b>Institutional Forensics:</b>\n"
+                f"{implication}\n\n"
+                f"⏰ <i>Time: {datetime.now().strftime('%H:%M:%S IST')}</i>"
+            )
+            return bool(notifier.send(message))
+        except Exception as e:
+            LOGGER.error("Failed to dispatch Max Pain alert for %s: %s", symbol, e)
+            return False
+
 
 class ContinuousChiefAgent:
     """
@@ -770,6 +827,7 @@ class ContinuousChiefAgent:
     ) -> None:
         self.agent = agent or ChiefTradingAgent()
         self.live_state_file = live_state_file or (Path(__file__).resolve().parents[6] / "data" / "chief_agent_live_state.json")
+        self.last_max_pain: Dict[str, float] = {}
         self.is_running = False
 
     def is_market_hours(self) -> bool:
@@ -795,6 +853,19 @@ class ContinuousChiefAgent:
             try:
                 sig, scorecard = self.agent.evaluate_symbol(sym, strikecount=15)
                 cycle_results[sym] = scorecard
+
+                # Check for Max Pain shift
+                ms = scorecard.get("market_structure", {})
+                spot = scorecard.get("spot_price", 0.0)
+                new_mp = ms.get("max_pain_strike", 0.0)
+                if new_mp > 0:
+                    prev_mp = self.last_max_pain.get(sym)
+                    if prev_mp is not None and prev_mp > 0 and new_mp != prev_mp:
+                        if dispatch_telegram:
+                            LOGGER.info("Continuous Chief Agent: Max Pain shifted for %s: %s -> %s", sym, prev_mp, new_mp)
+                            self.agent.dispatch_max_pain_alert(sym, new_mp, prev_mp, spot, ms)
+                    self.last_max_pain[sym] = new_mp
+
                 if sig:
                     qualified_signals.append(asdict(sig))
                     if dispatch_telegram:

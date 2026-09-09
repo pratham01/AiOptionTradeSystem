@@ -192,6 +192,7 @@ class Settings:
     enable_orb_telegram_alerts: bool = True
     enable_fo_telegram_alerts: bool = False
     enable_intraday_reversal_alerts: bool = False
+    enable_main_channel_supertrend_alerts: bool = False
 
     # Indicator settings
     indicator_config: IndicatorConfig = field(default_factory=IndicatorConfig)
@@ -365,6 +366,9 @@ class Settings:
             ),
             enable_fo_telegram_alerts=_parse_bool(
                 os.getenv("TELEGRAM_ENABLE_FO_ALERTS"), False
+            ),
+            enable_main_channel_supertrend_alerts=_parse_bool(
+                os.getenv("ENABLE_MAIN_CHANNEL_SUPERTREND_ALERTS"), False
             ),
             indicator_config=IndicatorConfig.from_env(),
             log_level=os.getenv("TRADE_SYSTEM_LOG_LEVEL", "INFO"),

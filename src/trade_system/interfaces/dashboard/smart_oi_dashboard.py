@@ -10,6 +10,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from trade_system.domains.analysis.application.analysis.smart_oi_analyzer import SmartOIAnalyzer
 from trade_system.domains.analysis.application.analysis import pro_oc_analyzer
+from trade_system.domains.analysis.application.analysis.market_structure_engine import (
+    MarketStructureEngine,
+    MarketStructureInfo,
+)
 from trade_system.domains.analysis.application.analysis.fo_pcr_screener import (
     FOPCRScreener,
     StockPCRInfo,
@@ -33,6 +37,26 @@ SIGNAL_STYLES = {
 def get_broker():
     """Return the shared cached broker instance."""
     return get_cached_broker()
+
+
+@st.cache_data(ttl=30)
+def fetch_live_vix_quote() -> Dict[str, Any]:
+    """Fetch live quote for India VIX."""
+    try:
+        broker = get_broker()
+        if not broker:
+            return {"ltp": 13.5, "ch": 0.0, "chp": 0.0}
+        q = broker.get_quotes(["NSE:INDIAVIX-INDEX"])
+        if q and "NSE:INDIAVIX-INDEX" in q:
+            val = q["NSE:INDIAVIX-INDEX"]
+            ltp = float(val.get("lp", 13.5) if isinstance(val, dict) else getattr(val, "ltp", 13.5))
+            ch = float(val.get("ch", 0.0) if isinstance(val, dict) else getattr(val, "ch", 0.0))
+            chp = float(val.get("chp", 0.0) if isinstance(val, dict) else getattr(val, "change_percent", getattr(val, "chp", 0.0)))
+            return {"ltp": ltp, "ch": ch, "chp": chp}
+        return {"ltp": 13.5, "ch": 0.0, "chp": 0.0}
+    except Exception as ex:
+        LOGGER.warning("Error fetching VIX quote: %s", ex)
+        return {"ltp": 13.5, "ch": 0.0, "chp": 0.0}
 
 
 @st.cache_data(ttl=15)
@@ -174,17 +198,42 @@ def load_db_price_data(symbol: str, target_date: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _clean_html(html_str: str) -> str:
+    """Strip leading and trailing whitespace from each line to prevent markdown parser code-block induction."""
+    return "\n".join(line.strip() for line in html_str.strip().splitlines())
+
+
 def inject_custom_css():
-    """Inject custom styles and CSS for status cards and transition timeline."""
-    st.markdown("""
+    """Inject custom styles and CSS for status cards, hero command bar, and battlefield profile."""
+    st.markdown(_clean_html("""
     <style>
-        .block-container { padding-top: 1rem !important; padding-bottom: 0rem !important; }
-        div[data-testid="stVerticalBlock"] > div { margin-top: -0.5rem !important; }
+        .block-container { padding-top: 2rem !important; padding-bottom: 2rem !important; }
+        div[data-testid="stVerticalBlock"] > div { margin-top: -0.25rem !important; }
+        
+        /* Hero Command Bar */
+        .hero-command-bar {
+            background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
+            padding: 16px 22px;
+            border-radius: 12px;
+            border: 1px solid #30363d;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+            margin-bottom: 20px;
+        }
+
+        /* Battlefield Cards */
+        .battlefield-card {
+            background: #1e2130;
+            padding: 14px 16px;
+            border-radius: 10px;
+            border: 1px solid #30363d;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.15);
+            margin-bottom: 12px;
+        }
         
         /* Smart Cards */
         .status-card {
             background: #1e2130;
-            padding: 20px;
+            padding: 18px;
             border-radius: 12px;
             border: 1px solid #30363d;
             text-align: center;
@@ -192,16 +241,18 @@ def inject_custom_css():
             margin-bottom: 15px;
         }
         .status-title {
-            font-size: 0.9rem;
+            font-size: 0.8rem;
             color: #8b949e;
-            margin-bottom: 5px;
+            margin-bottom: 4px;
             text-transform: uppercase;
             font-weight: 600;
+            letter-spacing: 0.5px;
         }
         .status-value {
-            font-size: 2rem;
+            font-size: 1.8rem;
             font-weight: bold;
-            margin-bottom: 5px;
+            margin-bottom: 4px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
         }
         .status-desc {
             font-size: 0.8rem;
@@ -231,7 +282,7 @@ def inject_custom_css():
             margin-top: 3px;
         }
     </style>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
 
 def calculate_price_vwap(price_df: pd.DataFrame) -> pd.DataFrame:
@@ -293,110 +344,590 @@ def determine_option_buyer_signal(
     return buyer_verdict, buyer_desc, buyer_color
 
 
-def render_institutional_direction_pulse(dir_analysis: dict):
-    """Render the top-level Institutional Market Direction & Gamma Pulse Meter."""
-    intra_dir = dir_analysis.get("intraday_direction", "NEUTRAL")
-    intra_score = dir_analysis.get("intraday_score", 0)
-    swing_dir = dir_analysis.get("swing_direction", "NEUTRAL")
-    swing_score = dir_analysis.get("swing_score", 0)
-    gex_regime = dir_analysis.get("gamma_regime", "NEUTRAL")
-    gex_flip = dir_analysis.get("gamma_flip_level", 0.0)
-    inst_bias = dir_analysis.get("institutional_bias", "NEUTRAL")
-    wall_status = dir_analysis.get("wall_shift_status", "")
+def render_hero_command_hub(
+    symbol_label: str,
+    db_symbol: str,
+    spot_price: float,
+    price_df: pd.DataFrame,
+    expiry_str: str,
+    dte: int,
+    gex_info: dict,
+    vix_quote: dict,
+    vix_regime: str,
+):
+    """Render the unified Hero Command Hub with Spot, Range, VWAP, Expiry & Regime Badge."""
+    vwap_val = price_df["vwap"].iloc[-1] if not price_df.empty and "vwap" in price_df.columns else spot_price
+    day_open = price_df["open"].iloc[0] if not price_df.empty and "open" in price_df.columns else spot_price
+    day_high = price_df["high"].max() if not price_df.empty and "high" in price_df.columns else spot_price
+    day_low = price_df["low"].min() if not price_df.empty and "low" in price_df.columns else spot_price
 
-    intra_color = "#00d084" if "BULLISH" in intra_dir else ("#ff4d6d" if "BEARISH" in intra_dir else "#ffb703")
-    swing_color = "#00d084" if "BULLISH" in swing_dir else ("#ff4d6d" if "BEARISH" in swing_dir else "#00b4d8")
-    gex_color = "#ff4d6d" if "SHORT GAMMA" in gex_regime else ("#00d084" if "LONG GAMMA" in gex_regime else "#ffb703")
+    net_chg = spot_price - day_open
+    net_chg_pct = (net_chg / day_open * 100) if day_open > 0 else 0.0
+    chg_color = "#00d084" if net_chg >= 0 else "#ff4d6d"
 
-    amd_phase = dir_analysis.get("amd_phase", "CONSOLIDATION")
-    amd_low = dir_analysis.get("amd_range_low", 0.0)
-    amd_high = dir_analysis.get("amd_range_high", 0.0)
-    amd_action = dir_analysis.get("amd_action", "STAND_ASIDE_ACCUMULATION")
-    amd_color = "#00f5d4" if "SPRING" in amd_phase else ("#ff4d6d" if "UTAD" in amd_phase else ("#70d6ff" if "DISTRIBUTION" in amd_phase else "#ffd166"))
+    tot_gex = gex_info.get("total_net_gex", 0.0) if gex_info else 0.0
 
-    st.markdown(f"""
-    <div style="background:#161b22; padding:18px 22px; border-radius:12px; border:1px solid #30363d; margin-bottom:20px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
-            <div style="font-size:1.1rem; font-weight:bold; color:#f0f6fc;">🏛️ Institutional Market Direction & Smart Money Pulse</div>
-            <div style="font-size:0.85rem; color:#8b949e; background:#21262d; padding:4px 10px; border-radius:6px;">{inst_bias}</div>
-        </div>
-        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px;">
-            <div style="background:#1e2130; padding:14px; border-radius:8px; border-left:5px solid {intra_color};">
-                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Intraday Directional Score</div>
-                <div style="font-size:1.4rem; font-weight:bold; color:{intra_color};">{intra_dir}</div>
-                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Score: <b>{intra_score:+d}</b> / 100</div>
-            </div>
-            <div style="background:#1e2130; padding:14px; border-radius:8px; border-left:5px solid {swing_color};">
-                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Swing Multi-Session Bias</div>
-                <div style="font-size:1.4rem; font-weight:bold; color:{swing_color};">{swing_dir}</div>
-                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Score: <b>{swing_score:+d}</b> / 100</div>
-            </div>
-            <div style="background:#1e2130; padding:14px; border-radius:8px; border-left:5px solid {gex_color};">
-                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Dealer Gamma Regime</div>
-                <div style="font-size:1.05rem; font-weight:bold; color:{gex_color};">{gex_regime}</div>
-                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">Gamma Flip Level: <b>₹{gex_flip:,.0f}</b></div>
-            </div>
-        </div>
-        <div style="margin-top:12px; padding:10px 14px; background:#1e2130; border-radius:8px; display:flex; justify-content:space-between; align-items:center;">
+    if tot_gex > 50.0:
+        regime_title = "PINNED RANGEBOUND (+GEX / LOW VOLATILITY / THETA BLEED)"
+        regime_badge_color = "#00d084"
+        regime_desc = "Dealers are Long Gamma: buying dips and selling rallies. Range-bound pinning & mean reversion favored."
+    elif tot_gex < -50.0:
+        regime_title = "GAMMA ACCELERATION (-GEX / SQUEEZE VELOCITY)"
+        regime_badge_color = "#ff4d6d"
+        regime_desc = "Dealers are Short Gamma: forced to buy rallies and sell flushes. High-velocity directional breakout moves."
+    else:
+        regime_title = "TRANSITIONAL CONSOLIDATION (GAMMA FLIP INFLECTION)"
+        regime_badge_color = "#ffb703"
+        regime_desc = "Market is testing the inflection barrier. Watch for volume expansion above or below the walls."
+
+    st.markdown(_clean_html(f"""
+    <div class="hero-command-bar">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
             <div>
-                <span style="font-size:0.8rem; color:#8b949e; text-transform:uppercase;">📦 Wyckoff / PO3 Cycle:</span>
-                <b style="color:{amd_color}; font-size:0.95rem; margin-left:8px;">{amd_phase}</b>
-                <span style="font-size:0.8rem; color:#c9d1d9; margin-left:12px;">Accumulation Range: ₹{amd_low:,.1f} — ₹{amd_high:,.1f}</span>
+                <div style="font-size:0.8rem; color:#8b949e; text-transform:uppercase; letter-spacing:1px; font-weight:600;">
+                    Institutional Order Flow • {db_symbol}
+                </div>
+                <div style="display:flex; align-items:baseline; gap:12px; margin-top:2px;">
+                    <span style="font-size:2.0rem; font-weight:800; color:#f0f6fc; font-family:monospace;">₹{spot_price:,.2f}</span>
+                    <span style="font-size:1.1rem; font-weight:bold; color:{chg_color}; font-family:monospace;">
+                        {net_chg:+,.2f} ({net_chg_pct:+.2f}%)
+                    </span>
+                </div>
             </div>
-            <div style="font-size:0.8rem; color:#f0f6fc; background:#30363d; padding:3px 8px; border-radius:4px;">
-                Action: <b>{amd_action}</b>
+            
+            <div style="display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
+                <div style="text-align:right;">
+                    <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Day Range (H / L)</div>
+                    <div style="font-size:0.95rem; font-weight:bold; color:#f0f6fc; font-family:monospace;">₹{day_high:,.0f} — ₹{day_low:,.0f}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Session VWAP</div>
+                    <div style="font-size:0.95rem; font-weight:bold; color:#ffb703; font-family:monospace;">₹{vwap_val:,.1f}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase;">Active Expiry</div>
+                    <div style="font-size:0.95rem; font-weight:bold; color:#00e6ff;">{expiry_str or 'Weekly'} ({dte} DTE)</div>
+                </div>
             </div>
         </div>
-        <div style="margin-top:10px; font-size:0.8rem; color:#8b949e;">
-            📊 <b>Wall Shifts:</b> {wall_status}
+
+        <div style="margin-top:14px; padding-top:12px; border-top:1px solid #21262d; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="font-size:0.75rem; color:#8b949e; text-transform:uppercase; font-weight:bold;">Market Regime:</span>
+                <span style="background:{regime_badge_color}22; color:{regime_badge_color}; border:1px solid {regime_badge_color}; padding:3px 10px; border-radius:6px; font-size:0.8rem; font-weight:bold;">
+                    {regime_title}
+                </span>
+            </div>
+            <div style="font-size:0.8rem; color:#8b949e;">
+                {regime_desc}
+            </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
 
-def render_trade_setups_panel(setups_dict: dict):
-    """Render Actionable Intraday & Swing Trade Setup Cards."""
-    intra = setups_dict.get("intraday_setup", {})
-    swing = setups_dict.get("swing_setup", {})
+def render_writer_battlefield_chart(
+    latest_oc: pd.DataFrame,
+    spot_price: float,
+    max_pain_strike: float,
+    call_wall: float,
+    put_wall: float,
+    strike_step: float,
+    snapshots: list,
+    pcr: float
+):
+    """
+    Render Pillar 1: The Writer Battlefield Map (Where Maximum Writers Are Seated).
+    Mirrored horizontal profile showing Put Writers on Left, Call Writers on Right,
+    with Spot, Max Pain, and Call/Put Wall callouts.
+    """
+    st.markdown("### 🏛️ The Writer Battlefield Map (Where Maximum Writers Are Seated)")
+    st.caption("Visualizes where smart money option writers have concentrated their risk capital. Writers defend these levels with delta hedging.")
 
-    st.subheader("🎯 Actionable Trade Setups: Intraday & Swing")
-    st.caption("AI-generated trade blueprints derived from Institutional Smart OI flow, Gamma regimes, and Technical confluence.")
+    if latest_oc is None or latest_oc.empty or spot_price <= 0:
+        st.info("Waiting for option chain data to render the Writer Battlefield Map...")
+        return
 
-    col1, col2 = st.columns(2)
+    # 1. Metric Callout Cards above Chart
+    dist_call = ((call_wall - spot_price) / spot_price * 100) if call_wall and spot_price else 0.0
+    dist_put = ((spot_price - put_wall) / spot_price * 100) if put_wall and spot_price else 0.0
+    dist_mp = (spot_price - max_pain_strike)
 
-    with col1:
+    ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
+    pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
+    call_wall_oi = ce_oc.loc[ce_oc["strike"] == call_wall, "oi"].sum() if not ce_oc.empty else 0
+    put_wall_oi = pe_oc.loc[pe_oc["strike"] == put_wall, "oi"].sum() if not pe_oc.empty else 0
+
+    pcr_status = "Oversold (Squeeze Risk)" if pcr < 0.7 else ("Overbought (Reversal Risk)" if pcr > 1.3 else "Neutral Zone")
+    pcr_color = "#00d084" if pcr < 0.7 else ("#ff4d6d" if pcr > 1.3 else "#ffb703")
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
         st.markdown(f"""
-        <div style="background:#1e2130; padding:18px; border-radius:12px; border-top:5px solid {intra.get('status_color', '#8b949e')}; border-left:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:15px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-size:0.8rem; color:#8b949e; font-weight:600; text-transform:uppercase;">⚡ Intraday Trade Blueprint</span>
-                <span style="font-size:0.8rem; background:#21262d; color:{intra.get('status_color')}; font-weight:bold; padding:2px 8px; border-radius:4px;">Conviction {intra.get('conviction_score')}</span>
+        <div class="battlefield-card" style="border-left: 5px solid #ff4d6d;">
+            <div class="status-title">🔴 Call Wall (Ceiling)</div>
+            <div class="status-value" style="color:#ff4d6d; font-size:1.5rem;">₹{call_wall:,.0f}</div>
+            <div class="status-desc">OI: <b>{call_wall_oi:,.0f}</b> | <b>+{dist_call:.2f}%</b> above Spot</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m2:
+        st.markdown(f"""
+        <div class="battlefield-card" style="border-left: 5px solid #00d084;">
+            <div class="status-title">🟢 Put Wall (Floor)</div>
+            <div class="status-value" style="color:#00d084; font-size:1.5rem;">₹{put_wall:,.0f}</div>
+            <div class="status-desc">OI: <b>{put_wall_oi:,.0f}</b> | <b>-{dist_put:.2f}%</b> below Spot</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m3:
+        st.markdown(f"""
+        <div class="battlefield-card" style="border-left: 5px solid #a855f7;">
+            <div class="status-title">🧲 Max Pain (Expiry Magnet)</div>
+            <div class="status-value" style="color:#a855f7; font-size:1.5rem;">₹{max_pain_strike:,.0f}</div>
+            <div class="status-desc">Distance from Spot: <b>{dist_mp:+.1f} pts</b></div>
+        </div>
+        """, unsafe_allow_html=True)
+    with m4:
+        st.markdown(f"""
+        <div class="battlefield-card" style="border-left: 5px solid {pcr_color};">
+            <div class="status-title">⚖️ Put-Call Ratio (PCR)</div>
+            <div class="status-value" style="color:{pcr_color}; font-size:1.5rem;">{pcr:.2f}</div>
+            <div class="status-desc">{pcr_status}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 2. View Toggle Controls
+    col_mode, col_range = st.columns([1.5, 1])
+    with col_mode:
+        view_metric = st.radio(
+            "Battlefield Perspective",
+            options=["Total Open Interest (Writers' Seated Positions)", "Intraday ΔOI (Today's Addition / Covering)"],
+            horizontal=True,
+            key="battlefield_perspective_mode"
+        )
+    with col_range:
+        num_strikes = st.slider("Strikes Range (± from ATM)", 6, 20, 12, 1, key="battlefield_range_slider")
+
+    # 3. Filter Strikes around ATM
+    atm_strike = round(spot_price / strike_step) * strike_step
+    min_strike = atm_strike - (num_strikes * strike_step)
+    max_strike = atm_strike + (num_strikes * strike_step)
+
+    df_filtered = latest_oc[(latest_oc["strike"] >= min_strike) & (latest_oc["strike"] <= max_strike)].copy()
+    if df_filtered.empty:
+        df_filtered = latest_oc.copy()
+
+    # Calculate Intraday dOI if needed
+    if "oich" in df_filtered.columns and not df_filtered["oich"].isna().all():
+        df_filtered["oi_change"] = pd.to_numeric(df_filtered["oich"], errors="coerce").fillna(0)
+    elif "oi_change" not in df_filtered.columns or df_filtered["oi_change"].isna().all():
+        first_oc = snapshots[0][1] if snapshots else None
+        if first_oc is not None and not first_oc.empty:
+            first_aligned = first_oc.set_index(["strike", "option_type"])
+            curr_aligned = df_filtered.set_index(["strike", "option_type"])
+            curr_aligned["oi_change"] = curr_aligned["oi"] - first_aligned["oi"]
+            curr_aligned["oi_change"] = curr_aligned["oi_change"].fillna(0)
+            df_filtered = curr_aligned.reset_index()
+        else:
+            df_filtered["oi_change"] = 0
+
+    strikes_sorted = sorted(df_filtered["strike"].unique())
+
+    # Build data arrays
+    put_vals = []
+    call_vals = []
+    put_hover = []
+    call_hover = []
+    is_doi = "Intraday ΔOI" in view_metric
+
+    for s in strikes_sorted:
+        pe_row = df_filtered[(df_filtered["strike"] == s) & (df_filtered["option_type"] == "PE")]
+        ce_row = df_filtered[(df_filtered["strike"] == s) & (df_filtered["option_type"] == "CE")]
+
+        pe_oi = pe_row["oi"].iloc[0] if not pe_row.empty and pd.notna(pe_row["oi"].iloc[0]) else 0
+        ce_oi = ce_row["oi"].iloc[0] if not ce_row.empty and pd.notna(ce_row["oi"].iloc[0]) else 0
+        pe_doi = pe_row["oi_change"].iloc[0] if not pe_row.empty and "oi_change" in pe_row.columns and pd.notna(pe_row["oi_change"].iloc[0]) else 0
+        ce_doi = ce_row["oi_change"].iloc[0] if not ce_row.empty and "oi_change" in ce_row.columns and pd.notna(ce_row["oi_change"].iloc[0]) else 0
+
+        if is_doi:
+            # Negative x for puts (left side of chart), positive x for calls (right side)
+            put_vals.append(- pe_doi)
+            call_vals.append(ce_doi)
+            put_hover.append(f"<b>Put Strike ₹{int(s):,}</b><br>Put ΔOI: {pe_doi:+,.0f}<br>Total Put OI: {pe_oi:,.0f}")
+            call_hover.append(f"<b>Call Strike ₹{int(s):,}</b><br>Call ΔOI: {ce_doi:+,.0f}<br>Total Call OI: {ce_oi:,.0f}")
+        else:
+            put_vals.append(- pe_oi)
+            call_vals.append(ce_oi)
+            put_hover.append(f"<b>Put Strike ₹{int(s):,} (Floor)</b><br>Total Put OI: {pe_oi:,.0f}<br>Put ΔOI: {pe_doi:+,.0f}")
+            call_hover.append(f"<b>Call Strike ₹{int(s):,} (Ceiling)</b><br>Total Call OI: {ce_oi:,.0f}<br>Call ΔOI: {ce_doi:+,.0f}")
+
+    # Plotly mirrored figure
+    fig = go.Figure()
+
+    # Left: Put Writers (Emerald Green)
+    put_color = "#00d084" if not is_doi else ["#00d084" if v <= 0 else "#ff9f1c" for v in put_vals]
+    fig.add_trace(go.Bar(
+        y=strikes_sorted,
+        x=put_vals,
+        orientation='h',
+        name="Put Writers (Floor / Support)",
+        marker=dict(color=put_color, line=dict(color="#00f5d4", width=1)),
+        hoverinfo="text",
+        hovertext=put_hover,
+    ))
+
+    # Right: Call Writers (Coral Red)
+    call_color = "#ff4d6d" if not is_doi else ["#ff4d6d" if v >= 0 else "#00b4d8" for v in call_vals]
+    fig.add_trace(go.Bar(
+        y=strikes_sorted,
+        x=call_vals,
+        orientation='h',
+        name="Call Writers (Ceiling / Resistance)",
+        marker=dict(color=call_color, line=dict(color="#ff758f", width=1)),
+        hoverinfo="text",
+        hovertext=call_hover,
+    ))
+
+    # Horizontal Line for Spot LTP
+    fig.add_hline(
+        y=spot_price,
+        line_dash="dash",
+        line_color="#ffb703",
+        line_width=2.5,
+        annotation_text=f"🟡 Spot LTP: ₹{spot_price:,.2f}",
+        annotation_position="top right",
+        annotation_font=dict(color="#ffb703", size=11, family="monospace"),
+    )
+
+    # Horizontal Line for Max Pain
+    fig.add_hline(
+        y=max_pain_strike,
+        line_dash="dot",
+        line_color="#a855f7",
+        line_width=2.5,
+        annotation_text=f"🧲 Max Pain: ₹{max_pain_strike:,.0f}",
+        annotation_position="bottom left",
+        annotation_font=dict(color="#a855f7", size=11, family="monospace"),
+    )
+
+    # Annotate Call Wall & Put Wall
+    if call_wall in strikes_sorted:
+        fig.add_annotation(
+            y=call_wall,
+            x=call_wall_oi if not is_doi else 0,
+            text=f"🔴 Call Wall (Ceiling ₹{int(call_wall):,})",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="#ff4d6d",
+            font=dict(color="#ffffff", size=10),
+            bgcolor="#ff4d6d",
+            bordercolor="#ffffff",
+            borderwidth=1,
+            ax=50,
+            ay=0
+        )
+
+    if put_wall in strikes_sorted:
+        fig.add_annotation(
+            y=put_wall,
+            x=-put_wall_oi if not is_doi else 0,
+            text=f"🟢 Put Wall (Floor ₹{int(put_wall):,})",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="#00d084",
+            font=dict(color="#ffffff", size=10),
+            bgcolor="#00d084",
+            bordercolor="#ffffff",
+            borderwidth=1,
+            ax=-50,
+            ay=0
+        )
+
+    # Calculate tick symmetric bounds
+    raw_max = max(max([abs(v) for v in put_vals] or [1]), max([abs(v) for v in call_vals] or [1])) * 1.15
+    max_x = max(raw_max, 1000)
+    tick_vals = [-max_x, -max_x * 0.5, 0, max_x * 0.5, max_x]
+    tick_text = [f"{abs(v)/1e6:.1f}M" if abs(v) >= 1e6 else (f"{abs(v)/1e3:.0f}K" if abs(v) >= 1e3 else f"{abs(v):.0f}") for v in tick_vals]
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=520,
+        margin=dict(l=30, r=30, t=30, b=30),
+        barmode='overlay',
+        xaxis=dict(
+            title="◄ Put Writers (Floor / Support)  |  Call Writers (Ceiling / Resistance) ►",
+            tickvals=tick_vals,
+            ticktext=tick_text,
+            range=[-max_x, max_x],
+            zeroline=True,
+            zerolinecolor="#ffffff",
+            zerolinewidth=1.5,
+            gridcolor="#21262d"
+        ),
+        yaxis=dict(
+            title="Strike Price",
+            tickformat="₹%,.0f",
+            gridcolor="#21262d"
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5,
+            bgcolor="rgba(22, 27, 34, 0.8)",
+            bordercolor="#30363d",
+            borderwidth=1
+        ),
+        hovermode="closest"
+    )
+
+    st.plotly_chart(fig, use_container_width=True, key="battlefield_mirrored_chart")
+
+    # Bottom Summary Callout
+    st.markdown(_clean_html(f"""
+    <div style="background:#161b22; padding:12px 18px; border-radius:8px; border:1px solid #30363d; font-size:0.9rem; color:#c9d1d9; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+        <div>
+            🔴 <b>Max Call Writers:</b> Seated at <b style="color:#ff4d6d;">₹{call_wall:,.0f}</b> ({call_wall_oi:,.0f} contracts) — <i>Institutional ceiling betting price stays below.</i>
+        </div>
+        <div>
+            🟢 <b>Max Put Writers:</b> Seated at <b style="color:#00d084;">₹{put_wall:,.0f}</b> ({put_wall_oi:,.0f} contracts) — <i>Institutional floor betting price stays above.</i>
+        </div>
+        <div>
+            🧲 <b>Expiry Magnet (Max Pain):</b> <b style="color:#a855f7;">₹{max_pain_strike:,.0f}</b> — <i>Gravitational anchor where writer profit is maximized.</i>
+        </div>
+    </div>
+    """), unsafe_allow_html=True)
+
+
+def render_vix_greeks_structure_matrix(
+    market_structure: Any,
+    gex_info: dict,
+    iv_skew: dict,
+    pro_atm: dict,
+    spot_price: float,
+    pcr: float,
+    vix_quote: dict,
+    dir_analysis: dict
+):
+    """
+    Render Pillar 2: How VIX, Market Structure, and Dealer Greeks (GEX)
+    Dictate the Overall Market Structure.
+    """
+    st.markdown("### ⚡ How VIX, Market Structure & Greeks Dictate The Market")
+    st.caption("Smart money positions are governed by volatility regimes and market maker gamma hedging constraints.")
+
+    c_left, c_right = st.columns(2)
+
+    with c_left:
+        # Left: Market Structure & Institutional Traps
+        amd_phase = dir_analysis.get("amd_phase", "CONSOLIDATION")
+        amd_low = dir_analysis.get("amd_range_low", 0.0)
+        amd_high = dir_analysis.get("amd_range_high", 0.0)
+        amd_action = dir_analysis.get("amd_action", "STAND_ASIDE_ACCUMULATION")
+        vwap = dir_analysis.get("vwap") or spot_price
+        vwap_status = "BULLISH (> VWAP)" if spot_price >= vwap else "BEARISH (< VWAP)"
+        vwap_color = "#00d084" if spot_price >= vwap else "#ff4d6d"
+
+        struct_state = getattr(market_structure, "structure_state", "CHOP_CONSOLIDATION") if market_structure else "CHOP_CONSOLIDATION"
+        struct_score = getattr(market_structure, "structure_score", 0) if market_structure else 0
+        struct_color = "#00d084" if "BULLISH" in struct_state else ("#ff4d6d" if "BEARISH" in struct_state else "#ffb703")
+
+        atm_delta = getattr(market_structure, "atm_volume_delta", 0) if market_structure else 0
+        taker_agg = getattr(market_structure, "taker_aggression", "Neutral") if market_structure else "Neutral"
+        wall_mig = getattr(market_structure, "wall_migration", "STABLE") if market_structure else "STABLE"
+        exp_phase = getattr(market_structure, "expiry_phase", "NORMAL") if market_structure else "NORMAL"
+        dte = getattr(market_structure, "days_to_expiry", 5) if market_structure else 5
+
+        st.markdown(_clean_html(f"""
+        <div style="background:#1e2130; padding:20px; border-radius:12px; border:1px solid #30363d; height:100%;">
+            <div style="font-size:1.1rem; font-weight:bold; color:#f0f6fc; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center;">
+                <span>🏛️ Market Structure & Institutional Flow</span>
+                <span style="font-size:0.8rem; background:#21262d; color:#58a6ff; padding:3px 8px; border-radius:4px; font-weight:normal;">Price Action Anchor</span>
             </div>
-            <div style="font-size:1.3rem; font-weight:bold; color:{intra.get('status_color')}; margin-bottom:6px;">{intra.get('type')} ({intra.get('direction')})</div>
-            <div style="background:#161b22; padding:10px; border-radius:6px; font-size:0.85rem; color:#f0f6fc; margin-bottom:10px;">
-                <b>Recommended Contract:</b> <span style="color:#ffb703; font-weight:bold;">{intra.get('option_contract')}</span><br>
-                <b>Trigger:</b> {intra.get('actionable_trigger')}
+            
+            <div style="margin-bottom:14px; padding:12px; background:#161b22; border-radius:8px; border-left:4px solid #58a6ff;">
+                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase; font-weight:bold;">📦 Wyckoff / Power-of-3 (AMD) Cycle</div>
+                <div style="font-size:1.1rem; font-weight:bold; color:#f0f6fc; margin:3px 0;">{amd_phase}</div>
+                <div style="font-size:0.85rem; color:#8b949e;">
+                    Accumulation Range: <b style="color:#c9d1d9;">₹{amd_low:,.1f} — ₹{amd_high:,.1f}</b><br>
+                    Prescribed Strategy: <b style="color:#ffb703;">{amd_action}</b>
+                </div>
             </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; font-size:0.8rem; text-align:center; margin-bottom:10px;">
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:14px;">
+                <div style="background:#161b22; padding:10px 12px; border-radius:8px; border-left:4px solid {vwap_color};">
+                    <div style="font-size:0.75rem; color:#8b949e;">VWAP Alignment</div>
+                    <div style="font-size:1.0rem; font-weight:bold; color:{vwap_color};">{vwap_status}</div>
+                    <div style="font-size:0.8rem; color:#c9d1d9;">VWAP: ₹{vwap:,.1f}</div>
+                </div>
+                <div style="background:#161b22; padding:10px 12px; border-radius:8px; border-left:4px solid {struct_color};">
+                    <div style="font-size:0.75rem; color:#8b949e;">Structure State</div>
+                    <div style="font-size:1.0rem; font-weight:bold; color:{struct_color};">{struct_state.replace('_', ' ')}</div>
+                    <div style="font-size:0.8rem; color:#c9d1d9;">Score: {struct_score:+d} / 25</div>
+                </div>
+            </div>
+
+            <div style="padding:12px; background:#161b22; border-radius:8px;">
+                <div style="font-size:0.75rem; color:#8b949e; text-transform:uppercase; font-weight:bold; margin-bottom:4px;">🎯 Institutional Order Flow Forensics</div>
+                <div style="font-size:0.85rem; color:#c9d1d9; line-height:1.5;">
+                    • <b>ATM Volume Delta:</b> {atm_delta:,d} contracts ({taker_agg})<br>
+                    • <b>Wall Migration:</b> {wall_mig}<br>
+                    • <b>Expiry Week Phase:</b> {exp_phase} ({dte} DTE)
+                </div>
+            </div>
+        </div>
+        """), unsafe_allow_html=True)
+
+    with c_right:
+        # Right: Volatility & Greeks Engine (How VIX & Greeks dictate the market)
+        vix_lvl = vix_quote.get("ltp", getattr(market_structure, "vix_level", 13.5) if market_structure else 13.5)
+        vix_chp = vix_quote.get("chp", getattr(market_structure, "vix_change_pct", 0.0) if market_structure else 0.0)
+        
+        # Determine VIX regime
+        if vix_lvl < 12.0:
+            vix_regime_label = "COMPLACENT (<12)"
+            vix_desc = "Low VIX compresses daily range. Options are cheap, but naked buyers face brutal theta decay without quick follow-through. Pinned action & false breakouts predominate."
+            vix_badge_color = "#00d084"
+        elif vix_lvl <= 16.0:
+            vix_regime_label = "NORMAL (12-16)"
+            vix_desc = "Balanced volatility. Range permits systematic directional breakout trends when backed by institutional volume."
+            vix_badge_color = "#00b4d8"
+        elif vix_lvl <= 22.0:
+            vix_regime_label = "ELEVATED (16-22)"
+            vix_desc = "Heightened volatility expansion. Option premiums are expensive; fast momentum swings require wider stop losses."
+            vix_badge_color = "#ffb703"
+        else:
+            vix_regime_label = "FEAR SPIKE (>22)"
+            vix_desc = "Extreme panic / fear pricing. Wide bid-ask spreads and severe IV crush risk after catalyst events."
+            vix_badge_color = "#ff4d6d"
+
+        # GEX
+        tot_gex = gex_info.get("total_net_gex", 0.0) if gex_info else 0.0
+        gex_flip = gex_info.get("gamma_flip_level", spot_price) if gex_info else spot_price
+
+        if tot_gex > 50.0:
+            gex_badge = "+GEX (LONG GAMMA)"
+            gex_color = "#00d084"
+            gex_impact = "Market Makers are LONG GAMMA. To remain delta-neutral, they sell into rallies and buy into dips. This suppresses volatility, causing mean-reversion, fake breakouts, and pinning between walls."
+        elif tot_gex < -50.0:
+            gex_badge = "-GEX (SHORT GAMMA)"
+            gex_color = "#ff4d6d"
+            gex_impact = "Market Makers are SHORT GAMMA. To remain delta-neutral, they must buy rising markets and sell falling markets. This accelerates volatility, fueling explosive short squeezes or liquidation waterfalls."
+        else:
+            gex_badge = "TRANSITIONAL GAMMA"
+            gex_color = "#ffb703"
+            gex_impact = f"Price is near the Gamma Flip Pivot (₹{gex_flip:,.0f}). Crosses above this strike dampen volatility; breaks below trigger volatility acceleration."
+
+        # IV Skew & ATM Straddle
+        skew_type = iv_skew.get("skew_type", "FLAT / NORMAL") if iv_skew else "FLAT / NORMAL"
+        skew_desc = "Institutions paying premium for downside crash protection." if "PUT" in skew_type else ("Call buying euphoria / upside FOMO." if "CALL" in skew_type else "Balanced put/call implied volatility surface.")
+        straddle_pr = pro_atm.get("straddle_premium", 0.0) if pro_atm else 0.0
+        exp_move = pro_atm.get("expected_move_pts", 0.0) if pro_atm else 0.0
+
+        st.markdown(_clean_html(f"""
+        <div style="background:#1e2130; padding:20px; border-radius:12px; border:1px solid #30363d; height:100%;">
+            <div style="font-size:1.1rem; font-weight:bold; color:#f0f6fc; margin-bottom:12px; display:flex; justify-content:space-between; align-items:center;">
+                <span>⚡ How VIX & Greeks Dictate Market Structure</span>
+                <span style="font-size:0.8rem; background:#21262d; color:#ffb703; padding:3px 8px; border-radius:4px; font-weight:normal;">Dealer Hedging Engine</span>
+            </div>
+
+            <!-- VIX Section -->
+            <div style="margin-bottom:14px; padding:12px; background:#161b22; border-radius:8px; border-left:4px solid {vix_badge_color};">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:0.75rem; color:#8b949e; text-transform:uppercase; font-weight:bold;">India VIX Regime</span>
+                    <span style="font-size:0.95rem; font-weight:bold; color:{vix_badge_color}; font-family:monospace;">VIX: {vix_lvl:.2f} ({vix_chp:+.2f}%)</span>
+                </div>
+                <div style="font-size:0.95rem; font-weight:bold; color:#f0f6fc; margin:2px 0;">{vix_regime_label}</div>
+                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:2px;">
+                    💡 <b>Market Impact:</b> {vix_desc}
+                </div>
+            </div>
+
+            <!-- GEX Section -->
+            <div style="margin-bottom:14px; padding:12px; background:#161b22; border-radius:8px; border-left:4px solid {gex_color};">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:0.75rem; color:#8b949e; text-transform:uppercase; font-weight:bold;">Dealer Gamma Exposure (GEX)</span>
+                    <span style="font-size:0.9rem; font-weight:bold; color:{gex_color}; font-family:monospace;">{gex_badge} ({tot_gex:+.1f} M)</span>
+                </div>
+                <div style="font-size:0.85rem; color:#8b949e; margin-top:2px;">
+                    Gamma Flip Strike: <b style="color:#ffb703; font-family:monospace;">₹{gex_flip:,.0f}</b>
+                </div>
+                <div style="font-size:0.8rem; color:#c9d1d9; margin-top:3px;">
+                    💡 <b>Market Impact:</b> {gex_impact}
+                </div>
+            </div>
+
+            <!-- Skew & Greeks Mini Grid -->
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                <div style="background:#161b22; padding:10px 12px; border-radius:8px;">
+                    <div style="font-size:0.75rem; color:#8b949e;">IV Skew Pattern</div>
+                    <div style="font-size:0.95rem; font-weight:bold; color:#f0f6fc;">{skew_type}</div>
+                    <div style="font-size:0.75rem; color:#8b949e; margin-top:2px;">{skew_desc}</div>
+                </div>
+                <div style="background:#161b22; padding:10px 12px; border-radius:8px;">
+                    <div style="font-size:0.75rem; color:#8b949e;">Expected Expiry Range</div>
+                    <div style="font-size:0.95rem; font-weight:bold; color:#00e6ff; font-family:monospace;">±₹{exp_move:,.1f}</div>
+                    <div style="font-size:0.75rem; color:#8b949e; margin-top:2px;">ATM Straddle: ₹{straddle_pr:,.1f}</div>
+                </div>
+            </div>
+        </div>
+        """), unsafe_allow_html=True)
+
+
+def render_actionable_trade_blueprint(
+    trade_setups: dict,
+    buyer_verdict: str,
+    buyer_desc: str,
+    buyer_color: str,
+    spot_price: float,
+    vwap: float
+):
+    """Render a clean, unified Actionable Trade Blueprint replacing multiple redundant cards."""
+    intra = trade_setups.get("intraday_setup", {})
+    swing = trade_setups.get("swing_setup", {})
+
+    st.markdown("### 🎯 Actionable Trading Blueprint")
+    st.caption("Real-time decision matrix synthesizing Writer Walls, Dealer GEX, and Intraday Taker Flow.")
+
+    b_col1, b_col2 = st.columns([1.2, 1])
+
+    with b_col1:
+        st.markdown(_clean_html(f"""
+        <div style="background:#1e2130; padding:18px; border-radius:12px; border-top:5px solid {intra.get('status_color', '#8b949e')}; border:1px solid #30363d; height:100%;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <span style="font-size:0.8rem; color:#8b949e; font-weight:600; text-transform:uppercase;">⚡ Primary Intraday Trade</span>
+                <span style="font-size:0.8rem; background:#21262d; color:{intra.get('status_color')}; font-weight:bold; padding:2px 8px; border-radius:4px;">Conviction: {intra.get('conviction_score')}</span>
+            </div>
+            <div style="font-size:1.35rem; font-weight:bold; color:{intra.get('status_color')}; margin-bottom:8px;">
+                {intra.get('direction')} — <span style="color:#ffb703;">{intra.get('option_contract')}</span>
+            </div>
+            <div style="background:#161b22; padding:10px 12px; border-radius:6px; font-size:0.85rem; color:#f0f6fc; margin-bottom:12px;">
+                <b>Action Trigger:</b> {intra.get('actionable_trigger')}
+            </div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap:8px; font-size:0.8rem; text-align:center; margin-bottom:10px;">
                 <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Entry Zone</span><br><b style="color:#f0f6fc;">{intra.get('entry_zone')}</b></div>
                 <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Stop Loss</span><br><b style="color:#ff4d6d;">{intra.get('stop_loss')}</b></div>
                 <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Target 1</span><br><b style="color:#00d084;">{intra.get('target_1')}</b></div>
+                <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">R : R</span><br><b style="color:#00e6ff;">{intra.get('risk_reward')}</b></div>
             </div>
             <div style="font-size:0.8rem; color:#c9d1d9; line-height:1.4;">
                 💡 <b>Rationale:</b> {intra.get('rationale')}
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """), unsafe_allow_html=True)
 
-    with col2:
-        st.markdown(f"""
-        <div style="background:#1e2130; padding:18px; border-radius:12px; border-top:5px solid {swing.get('status_color', '#8b949e')}; border-left:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:15px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <span style="font-size:0.8rem; color:#8b949e; font-weight:600; text-transform:uppercase;">🌊 Swing Trade Blueprint ({swing.get('timeframe')})</span>
-                <span style="font-size:0.8rem; background:#21262d; color:{swing.get('status_color')}; font-weight:bold; padding:2px 8px; border-radius:4px;">Conviction {swing.get('conviction_score')}</span>
+    with b_col2:
+        st.markdown(_clean_html(f"""
+        <div style="background:#1e2130; padding:18px; border-radius:12px; border-top:5px solid {swing.get('status_color', '#8b949e')}; border:1px solid #30363d; height:100%;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                <span style="font-size:0.8rem; color:#8b949e; font-weight:600; text-transform:uppercase;">🌊 Multi-Session Swing Setup</span>
+                <span style="font-size:0.8rem; background:#21262d; color:{swing.get('status_color')}; font-weight:bold; padding:2px 8px; border-radius:4px;">Conviction: {swing.get('conviction_score')}</span>
             </div>
-            <div style="font-size:1.3rem; font-weight:bold; color:{swing.get('status_color')}; margin-bottom:6px;">{swing.get('type')}</div>
-            <div style="background:#161b22; padding:10px; border-radius:6px; font-size:0.85rem; color:#f0f6fc; margin-bottom:10px;">
-                <b>Strategy:</b> <span style="color:#00e6ff; font-weight:bold;">{swing.get('recommended_strategy')}</span>
+            <div style="font-size:1.35rem; font-weight:bold; color:{swing.get('status_color')}; margin-bottom:8px;">
+                {swing.get('type')}
+            </div>
+            <div style="background:#161b22; padding:10px 12px; border-radius:6px; font-size:0.85rem; color:#f0f6fc; margin-bottom:12px;">
+                <b>Structure:</b> <span style="color:#00e6ff; font-weight:bold;">{swing.get('recommended_strategy')}</span>
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; font-size:0.8rem; text-align:center; margin-bottom:10px;">
                 <div style="background:#21262d; padding:6px; border-radius:4px;"><span style="color:#8b949e;">Entry Zone</span><br><b style="color:#f0f6fc;">{swing.get('entry_zone')}</b></div>
@@ -407,93 +938,7 @@ def render_trade_setups_panel(setups_dict: dict):
                 💡 <b>Rationale:</b> {swing.get('rationale')}
             </div>
         </div>
-        """, unsafe_allow_html=True)
-
-
-def render_verdict_card(buyer_verdict: str, buyer_desc: str, buyer_color: str):
-    """Render the Actionable Option Buyer Verdict card."""
-    st.markdown(f"""
-    <div style="background:#1e2130; padding:20px; border-radius:12px; border-left:8px solid {buyer_color}; border-top:1px solid #30363d; border-right:1px solid #30363d; border-bottom:1px solid #30363d; margin-bottom:20px;">
-        <div style="font-size:0.8rem; color:#8b949e; text-transform:uppercase; font-weight:600; margin-bottom:5px;">Actionable Option Buyer Verdict</div>
-        <div style="font-size:1.6rem; font-weight:bold; color:{buyer_color}; margin-bottom:8px;">{buyer_verdict}</div>
-        <div style="font-size:0.95rem; color:#c9d1d9; line-height:1.5;">{buyer_desc}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-
-def render_metrics_grid(
-    call_wall: float, call_wall_oi: float, dist_to_call_wall: float,
-    put_wall: float, put_wall_oi: float, dist_to_put_wall: float,
-    spot_price: float, max_pain_strike: float,
-    pcr: float, atm_iv_val: float, iv_status: str, iv_color: str
-):
-    """Render the key walls and PCR status card grid."""
-    def fmt(v, format_str, prefix="", suffix=""):
-        try:
-            if v is None or v != v: return "N/A"
-            return f"{prefix}{v:{format_str}}{suffix}"
-        except Exception:
-            return "N/A"
-
-    def fmt_int(v, prefix="", suffix=""):
-        try:
-            if v is None or v != v: return "N/A"
-            return f"{prefix}{int(v):,}{suffix}"
-        except Exception:
-            return "N/A"
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    with c1:
-        st.markdown(f"""
-        <div class="status-card" style="border-top: 5px solid #ff4d6d;">
-            <div class="status-title">🔴 Call Wall (Resistance)</div>
-            <div class="status-value" style="color: #ff4d6d; font-size:1.6rem;">{fmt(call_wall, ',.0f', prefix='₹')}</div>
-            <div class="status-desc">{fmt(dist_to_call_wall, '.2f', suffix='%')} away | OI: {fmt(call_wall_oi, ',.0f')}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c2:
-        st.markdown(f"""
-        <div class="status-card" style="border-top: 5px solid #00d084;">
-            <div class="status-title">🟢 Put Wall (Support)</div>
-            <div class="status-value" style="color: #00d084; font-size:1.6rem;">{fmt(put_wall, ',.0f', prefix='₹')}</div>
-            <div class="status-desc">{fmt(dist_to_put_wall, '.2f', suffix='%')} away | OI: {fmt(put_wall_oi, ',.0f')}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c3:
-        st.markdown(f"""
-        <div class="status-card" style="border-top: 5px solid #ffb703;">
-            <div class="status-title">Spot Price</div>
-            <div class="status-value" style="color: #ffb703; font-size:1.6rem;">{fmt(spot_price, ',.2f', prefix='₹')}</div>
-            <div class="status-desc">Max Pain Strike: {fmt_int(max_pain_strike, prefix='₹')}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with c4:
-        st.markdown(f"""
-        <div class="status-card" style="border-top: 5px solid {iv_color};">
-            <div class="status-title">PCR & Premium Cost</div>
-            <div class="status-value" style="color: {iv_color}; font-size:1.6rem;">{fmt(pcr, '.2f')}</div>
-            <div class="status-desc">{iv_status} ({fmt(atm_iv_val, '.1f', suffix='%')} IV)</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-
-def render_confluence_alert(confluence_data: dict):
-    """Render the confluence narrative alert box."""
-    if confluence_data:
-        st.write("")
-        alert_type = confluence_data["status"]
-        alert_color = "#00d084" if "BULLISH CONFLUENCE" in alert_type else ("#ff4d6d" if "BEARISH CONFLUENCE" in alert_type else ("#ffb703" if "DIVERGENCE" in alert_type else "#00b4d8"))
-        
-        st.markdown(f"""
-        <div style="background:#1e2130; padding:15px; border-radius:8px; border-left:6px solid {alert_color}; margin-bottom:20px;">
-            <h4 style="margin:0 0 5px 0; color:{alert_color};">{alert_type}</h4>
-            <p style="margin:0; color:#c9d1d9; font-size:0.95rem;">{confluence_data['narrative']}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        """), unsafe_allow_html=True)
 
 
 def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: float, analyzer: SmartOIAnalyzer, selected_symbol_label: str):
@@ -1643,15 +2088,23 @@ def run_dashboard():
     trade_setups = analyzer.generate_trade_setups(latest_oc, prev_oc, price_df, spot_price=spot_price)
     dir_analysis = trade_setups["directional_analysis"]
 
-    # --- 0. INSTITUTIONAL DIRECTION & SMART MONEY PULSE ---
-    render_institutional_direction_pulse(dir_analysis)
+    # Compute live VIX quote & Market Structure
+    vix_quote = fetch_live_vix_quote()
+    market_engine = MarketStructureEngine(broker=get_broker())
+    market_structure = market_engine.analyze(
+        symbol=db_symbol,
+        price_df=price_df,
+        oc_df=latest_oc,
+        vix_quote=vix_quote,
+        spot_price=spot_price
+    )
 
-    # --- 0.5 ACTIONABLE TRADE SETUPS (INTRADAY & SWING) ---
-    render_trade_setups_panel(trade_setups)
+    # Compute Pro Greeks, GEX & ATM Premium
+    pro_gex = pro_oc_analyzer.compute_gex_profile(latest_oc, spot_price, analyzer.strike_step)
+    pro_iv = pro_oc_analyzer.compute_iv_skew(latest_oc, spot_price, analyzer.strike_step)
+    pro_atm = pro_oc_analyzer.compute_atm_premium_analysis(latest_oc, spot_price, analyzer.strike_step)
 
-    st.markdown("---")
-
-    # --- 1. CURRENT SMART OI VERDICT & OPTION BUYER'S PANEL ---
+    # --- WALLS & METRICS CALCULATION ---
     ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
     pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
 
@@ -1694,53 +2147,80 @@ def run_dashboard():
         call_wall, put_wall, ce_unwinding_atm, pe_unwinding_atm, atm_strike
     )
 
-    # Render Verdict Panel Card
-    render_verdict_card(buyer_verdict, buyer_desc, buyer_color)
-
-    # Calculate IV Status
-    atm_iv_val = latest_oc[latest_oc["strike"] == atm_strike]["iv"].mean() if "iv" in latest_oc.columns and not latest_oc.empty else None
-    iv_status = "Neutral"
-    iv_color = "#00b4d8"
-    if atm_iv_val and not np.isnan(atm_iv_val):
-        if atm_iv_val < 12.0:
-            iv_status = "Cheap Volatility"
-            iv_color = "#00d084"
-        elif atm_iv_val > 17.0:
-            iv_status = "Expensive Premium"
-            iv_color = "#ff4d6d"
-
-    # Render Metrics Grid
-    render_metrics_grid(
-        call_wall, call_wall_oi, dist_to_call_wall,
-        put_wall, put_wall_oi, dist_to_put_wall,
-        spot_price, max_pain_strike,
-        pcr, atm_iv_val, iv_status, iv_color
+    # ── HERO COMMAND HUB ──────────────────────────────────────────
+    render_hero_command_hub(
+        selected_symbol_label,
+        db_symbol,
+        spot_price,
+        price_df,
+        expiry_str,
+        getattr(market_structure, 'days_to_expiry', 5),
+        pro_gex,
+        vix_quote,
+        getattr(market_structure, 'vix_regime', 'NORMAL')
     )
 
-    # Confluence Alert Box
-    render_confluence_alert(confluence_data)
+    # ── PILLAR 1: THE WRITER BATTLEFIELD MAP ─────────────────────
+    render_writer_battlefield_chart(
+        latest_oc=latest_oc,
+        spot_price=spot_price,
+        max_pain_strike=max_pain_strike,
+        call_wall=call_wall,
+        put_wall=put_wall,
+        strike_step=analyzer.strike_step,
+        snapshots=snapshots,
+        pcr=pcr
+    )
 
     st.markdown("---")
 
-    tab_divergence, tab_vol_profile, tab_causal_graph, tab_chart, tab_transitions, tab_pro_trader, tab_iv_greeks, tab_sniper, tab_fo_pcr = st.tabs([
-        "⚡ Institutional Divergence & Traps",
-        "📊 Strike Volume & OI Profile",
-        "🕸️ Strike Causal Graph & Shockwave",
-        "📈 Price Action & Smart OI Overlay",
-        "⏱️ Signal Transitions Timeline",
-        "🏦 Pro Trader Analytics & Walls",
-        "📊 IV Skew & Greeks",
-        "🎯 Sniper Reversals",
-        "🎲 F&O Universe PCR Radar"
+    # ── PILLAR 2: HOW VIX & GREEKS DICTATE MARKET STRUCTURE ──────
+    render_vix_greeks_structure_matrix(
+        market_structure=market_structure,
+        gex_info=pro_gex,
+        iv_skew=pro_iv,
+        pro_atm=pro_atm,
+        spot_price=spot_price,
+        pcr=pcr,
+        vix_quote=vix_quote,
+        dir_analysis=dir_analysis
+    )
+
+    st.markdown("---")
+
+    # ── PILLAR 3: ACTIONABLE TRADING BLUEPRINT ────────────────────
+    render_actionable_trade_blueprint(
+        trade_setups=trade_setups,
+        buyer_verdict=buyer_verdict,
+        buyer_desc=buyer_desc,
+        buyer_color=buyer_color,
+        spot_price=spot_price,
+        vwap=dir_analysis.get("vwap") or spot_price
+    )
+
+    st.markdown("---")
+
+    # ── 4 CONSOLIDATED DEEP-DIVE TABS ─────────────────────────────
+    tab_chain, tab_chart, tab_causal, tab_fo = st.tabs([
+        "📋 Full Option Chain & Greeks Grid",
+        "📈 Price Action, VWAP & Net Writer Flow",
+        "🕸️ Causal Graph & Volume Shockwave",
+        "🎲 F&O Universe PCR Heatmap"
     ])
 
-    with tab_divergence:
-        render_tab_divergence_radar(divergence_data, spot_price, max_pain_strike, pcr, call_wall, put_wall)
+    with tab_chain:
+        render_tab_pro_trader(latest_oc, snapshots, spot_price, analyzer, prev_oc, summary)
+        st.markdown("---")
+        render_tab_iv_greeks(latest_oc, spot_price, analyzer, pro_atm)
+        st.markdown("---")
+        render_institutional_walls(latest_oc, snapshots, summary, analyzer, signal_strikes)
 
-    with tab_vol_profile:
-        render_tab_volume_profile(volume_profile_df, spot_price, max_pain_strike)
+    with tab_chart:
+        render_tab_chart(price_df, snapshots, max_pain_strike, analyzer, selected_symbol_label)
+        st.markdown("---")
+        render_tab_transitions(snapshots, price_df, analyzer)
 
-    with tab_causal_graph:
+    with tab_causal:
         render_tab_causal_graph(
             symbol=db_symbol,
             spot_price=spot_price,
@@ -1750,28 +2230,12 @@ def run_dashboard():
             max_pain=max_pain_strike,
             strike_step=analyzer.strike_step,
         )
-
-    with tab_chart:
-        render_tab_chart(price_df, snapshots, max_pain_strike, analyzer, selected_symbol_label)
-
-    with tab_transitions:
-        render_tab_transitions(snapshots, price_df, analyzer)
-
-    with tab_pro_trader:
-        render_tab_pro_trader(latest_oc, snapshots, spot_price, analyzer, prev_oc, summary)
         st.markdown("---")
-        render_institutional_walls(latest_oc, snapshots, summary, analyzer, signal_strikes)
+        render_tab_volume_profile(volume_profile_df, spot_price, max_pain_strike)
+        st.markdown("---")
+        render_tab_divergence_radar(divergence_data, spot_price, max_pain_strike, pcr, call_wall, put_wall)
 
-    with tab_iv_greeks:
-        pro_atm = pro_oc_analyzer.compute_atm_premium_analysis(
-            latest_oc, spot_price, analyzer.strike_step
-        )
-        render_tab_iv_greeks(latest_oc, spot_price, analyzer, pro_atm)
-
-    with tab_sniper:
-        render_tab_sniper(snapshots, spot_price, analyzer)
-
-    with tab_fo_pcr:
+    with tab_fo:
         render_tab_fo_pcr()
 
     # Render footer information help section

@@ -185,6 +185,14 @@ source_mode = st.sidebar.selectbox(
 )
 show_pivots = st.sidebar.checkbox("Show Pivot Points", value=True)
 show_breaks = st.sidebar.checkbox("Show Broken S/R Markers", value=True)
+bars_to_show = st.sidebar.slider(
+    "Bars to Display",
+    min_value=30,
+    max_value=300,
+    value=100,
+    step=10,
+    help="Number of recent candlestick bars to display on the chart.",
+)
 
 # ── SYMBOL & TIMEFRAME SELECTORS ────────────────────────────────────────────
 col1, col2 = st.columns(2)
@@ -217,8 +225,13 @@ def load_candles(symbol: str, timeframe: str) -> pd.DataFrame:
     if timeframe == "Daily":
         query = text("""
             SELECT timestamp, open, high, low, close, volume
-            FROM ohlcv_daily
-            WHERE symbol = :symbol
+            FROM (
+                SELECT timestamp, open, high, low, close, volume
+                FROM ohlcv_daily
+                WHERE symbol = :symbol
+                ORDER BY timestamp DESC
+                LIMIT 1000
+            ) sub
             ORDER BY timestamp ASC
         """)
         try:
@@ -233,8 +246,13 @@ def load_candles(symbol: str, timeframe: str) -> pd.DataFrame:
     else:
         query = text("""
             SELECT timestamp, open, high, low, close, volume
-            FROM ohlcv_15m
-            WHERE symbol = :symbol AND timestamp >= date('now', '-35 days')
+            FROM (
+                SELECT timestamp, open, high, low, close, volume
+                FROM ohlcv_15m
+                WHERE symbol = :symbol
+                ORDER BY timestamp DESC
+                LIMIT 2000
+            ) sub
             ORDER BY timestamp ASC
         """)
         try:
@@ -274,10 +292,20 @@ else:
 
     snapshots = detector.calculate(df_candles)
 
-    # Use the last 200 bars for chart display
-    tail_n = min(200, len(df_candles))
+    # Use the selected number of recent bars for chart display
+    tail_n = min(bars_to_show, len(df_candles))
     df_chart = df_candles.tail(tail_n).copy()
     chart_start_idx = len(df_candles) - tail_n
+
+    # Format time labels for categorical continuous axis (eliminates overnight & weekend blank gaps)
+    if selected_tf == "Daily":
+        df_chart["time_label"] = df_chart["timestamp"].dt.strftime("%d %b %Y")
+    else:
+        df_chart["time_label"] = df_chart["timestamp"].dt.strftime("%d %b %H:%M")
+
+    time_to_label = dict(zip(df_chart["timestamp"], df_chart["time_label"]))
+    first_label = df_chart["time_label"].iloc[0]
+    last_label = df_chart["time_label"].iloc[-1]
 
     # Latest snapshot
     latest = snapshots[-1] if snapshots else None
@@ -288,12 +316,12 @@ else:
     # Candlestick
     fig.add_trace(
         go.Candlestick(
-            x=df_chart["timestamp"],
+            x=df_chart["time_label"],
             open=df_chart["open"],
             high=df_chart["high"],
             low=df_chart["low"],
             close=df_chart["close"],
-            name="Price",
+            name="Price Action",
             increasing_line_color="#089981",
             decreasing_line_color="#f23645",
         )
@@ -302,26 +330,26 @@ else:
     # Draw S/R channel rectangles from the latest snapshot
     if latest and latest.channels:
         color_map = {
-            "resistance": "rgba(255, 82, 82, 0.12)",
-            "support": "rgba(0, 230, 118, 0.12)",
-            "inside": "rgba(158, 158, 158, 0.12)",
+            "resistance": "rgba(255, 82, 82, 0.15)",
+            "support": "rgba(0, 230, 118, 0.15)",
+            "inside": "rgba(158, 158, 158, 0.15)",
         }
         border_map = {
-            "resistance": "rgba(255, 82, 82, 0.55)",
-            "support": "rgba(0, 230, 118, 0.55)",
-            "inside": "rgba(158, 158, 158, 0.55)",
+            "resistance": "rgba(255, 82, 82, 0.70)",
+            "support": "rgba(0, 230, 118, 0.70)",
+            "inside": "rgba(158, 158, 158, 0.70)",
         }
         for ch in latest.channels:
             fill_c = color_map.get(ch.channel_type, color_map["inside"])
             bord_c = border_map.get(ch.channel_type, border_map["inside"])
             fig.add_shape(
                 type="rect",
-                x0=df_chart["timestamp"].iloc[0],
-                x1=df_chart["timestamp"].iloc[-1],
+                x0=first_label,
+                x1=last_label,
                 y0=ch.low,
                 y1=ch.high,
                 fillcolor=fill_c,
-                line=dict(width=1, color=bord_c),
+                line=dict(width=1.5, color=bord_c),
                 layer="below",
             )
             # Label on right edge
@@ -332,15 +360,17 @@ else:
             )
             mid = (ch.high + ch.low) / 2
             fig.add_annotation(
-                x=df_chart["timestamp"].iloc[-1],
+                x=last_label,
                 y=mid,
-                text=f"{'R' if ch.channel_type == 'resistance' else 'S' if ch.channel_type == 'support' else '~'} "
+                text=f" {'R' if ch.channel_type == 'resistance' else 'S' if ch.channel_type == 'support' else '~'} "
                      f"{ch.high:.2f} – {ch.low:.2f}",
                 showarrow=False,
-                font=dict(size=9, color=label_color, family="Courier New"),
+                font=dict(size=10, color=label_color, family="Courier New", weight="bold"),
                 xanchor="left",
-                bgcolor="rgba(30,30,30,0.7)",
-                borderpad=2,
+                bgcolor="rgba(20,20,30,0.85)",
+                bordercolor=bord_c,
+                borderwidth=1,
+                borderpad=3,
             )
 
     # Pivot point markers
@@ -348,16 +378,21 @@ else:
         ph_x, ph_y, pl_x, pl_y = [], [], [], []
         for i in range(chart_start_idx, len(df_candles)):
             snap = snapshots[i]
-            ts = df_candles["timestamp"].iloc[i]
             if snap.pivot_high is not None:
                 # Pivot sits pivot_period bars back
-                piv_idx = max(0, i - pivot_period)
-                ph_x.append(df_candles["timestamp"].iloc[piv_idx])
-                ph_y.append(snap.pivot_high)
+                piv_idx = i - pivot_period
+                if piv_idx >= chart_start_idx:
+                    piv_ts = df_candles["timestamp"].iloc[piv_idx]
+                    if piv_ts in time_to_label:
+                        ph_x.append(time_to_label[piv_ts])
+                        ph_y.append(snap.pivot_high)
             if snap.pivot_low is not None:
-                piv_idx = max(0, i - pivot_period)
-                pl_x.append(df_candles["timestamp"].iloc[piv_idx])
-                pl_y.append(snap.pivot_low)
+                piv_idx = i - pivot_period
+                if piv_idx >= chart_start_idx:
+                    piv_ts = df_candles["timestamp"].iloc[piv_idx]
+                    if piv_ts in time_to_label:
+                        pl_x.append(time_to_label[piv_ts])
+                        pl_y.append(snap.pivot_low)
 
         if ph_x:
             fig.add_trace(
@@ -365,9 +400,9 @@ else:
                     x=ph_x,
                     y=ph_y,
                     mode="markers",
-                    marker=dict(symbol="triangle-down", size=8, color="#ff5252"),
+                    marker=dict(symbol="triangle-down", size=9, color="#ff5252"),
                     name="Pivot High",
-                    hovertemplate="PH ₹%{y:.2f}<extra></extra>",
+                    hovertemplate="Pivot High: ₹%{y:.2f}<extra></extra>",
                 )
             )
         if pl_x:
@@ -376,9 +411,9 @@ else:
                     x=pl_x,
                     y=pl_y,
                     mode="markers",
-                    marker=dict(symbol="triangle-up", size=8, color="#00e676"),
+                    marker=dict(symbol="triangle-up", size=9, color="#00e676"),
                     name="Pivot Low",
-                    hovertemplate="PL ₹%{y:.2f}<extra></extra>",
+                    hovertemplate="Pivot Low: ₹%{y:.2f}<extra></extra>",
                 )
             )
 
@@ -389,12 +424,14 @@ else:
             snap = snapshots[i]
             if snap.break_event:
                 ts = df_candles["timestamp"].iloc[i]
-                if snap.break_event.break_type == "resistance_broken":
-                    rb_x.append(ts)
-                    rb_y.append(df_candles["low"].iloc[i] * 0.999)
-                else:
-                    sb_x.append(ts)
-                    sb_y.append(df_candles["high"].iloc[i] * 1.001)
+                if ts in time_to_label:
+                    lbl = time_to_label[ts]
+                    if snap.break_event.break_type == "resistance_broken":
+                        rb_x.append(lbl)
+                        rb_y.append(df_candles["low"].iloc[i] * 0.999)
+                    else:
+                        sb_x.append(lbl)
+                        sb_y.append(df_candles["high"].iloc[i] * 1.001)
 
         if rb_x:
             fig.add_trace(
@@ -402,9 +439,9 @@ else:
                     x=rb_x,
                     y=rb_y,
                     mode="markers",
-                    marker=dict(symbol="triangle-up", size=10, color="#00e676"),
+                    marker=dict(symbol="triangle-up", size=11, color="#00e676", line=dict(width=1, color="white")),
                     name="Resistance Broken",
-                    hovertemplate="Resistance Broken<extra></extra>",
+                    hovertemplate="Resistance Broken: ₹%{y:.2f}<extra></extra>",
                 )
             )
         if sb_x:
@@ -413,23 +450,36 @@ else:
                     x=sb_x,
                     y=sb_y,
                     mode="markers",
-                    marker=dict(symbol="triangle-down", size=10, color="#ff5252"),
+                    marker=dict(symbol="triangle-down", size=11, color="#ff5252", line=dict(width=1, color="white")),
                     name="Support Broken",
-                    hovertemplate="Support Broken<extra></extra>",
+                    hovertemplate="Support Broken: ₹%{y:.2f}<extra></extra>",
                 )
             )
 
     fig.update_layout(
         title=f"Support & Resistance Channels — {selected_symbol} ({selected_tf})",
-        xaxis_title="Timeline",
+        xaxis_title="Timeline (Trading Sessions)",
         yaxis_title="Price (₹)",
         xaxis_rangeslider_visible=False,
-        height=650,
+        height=680,
         template="plotly_dark",
-        margin=dict(l=30, r=120, t=50, b=30),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(15,15,25,0.6)",
+        margin=dict(l=40, r=140, t=50, b=40),
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
         ),
+    )
+    fig.update_xaxes(
+        type="category",
+        nticks=16,
+        tickangle=-30,
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.06)",
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(255,255,255,0.06)",
     )
 
     st.plotly_chart(fig, use_container_width=True, key="sr_channel_chart")
@@ -475,9 +525,11 @@ else:
         if snap.break_event:
             be = snap.break_event
             emoji = "🟢 ↑" if be.break_type == "resistance_broken" else "🔴 ↓"
+            ts_val = pd.to_datetime(be.timestamp)
+            time_str = ts_val.strftime("%Y-%m-%d %H:%M") if selected_tf != "Daily" else ts_val.strftime("%Y-%m-%d")
             break_rows.append(
                 {
-                    "Time": be.timestamp.strftime("%Y-%m-%d %H:%M"),
+                    "Time": time_str,
                     "Event": f"{emoji} {be.break_type.replace('_', ' ').title()}",
                     "Level": f"{be.level_high:.2f} – {be.level_low:.2f}",
                     "Close (₹)": f"{be.close:.2f}",

@@ -30,6 +30,7 @@ pages = {
         st.Page(HERE / "bollinger_breakout_dashboard.py", title="Bollinger Breakout Lab", icon="⚡"),
         st.Page(HERE / "candlestick_pattern_dashboard.py", title="Candlestick Pattern Lab", icon="🕯️"),
         st.Page(HERE / "strategy_dashboard.py", title="Strategy Lab", icon="🧪"),
+        st.Page(HERE / "backtest_studio_dashboard.py", title="Backtest Studio", icon="🔬"),
         st.Page(HERE / "volumetric_order_flow_dashboard.py", title="Volumetric Order Flow", icon="📊"),
         st.Page(HERE / "sr_channels_dashboard.py", title="S/R Channels", icon="🏗️"),
         st.Page(HERE / "gamma_blast_dashboard.py", title="Gamma Blast Lab", icon="⚡"),
