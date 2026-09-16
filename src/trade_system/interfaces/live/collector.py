@@ -28,6 +28,7 @@ from trade_system.domains.market_data.infrastructure.data.storage import CsvData
 from trade_system.domains.strategy.application.indicators import calculate_supertrend
 from trade_system.domains.strategy.application.indicators.rsi_divergence import RsiDivergence
 from trade_system.domains.advisory.application.agent.live_alert_agent import LiveAlertAgent
+from trade_system.domains.advisory.application.agent.option_chain_monitor_agent import OptionChainMonitorAgent
 from trade_system.domains.analysis.application.analysis.mwpl_analyzer import MwplAnalyzer
 from trade_system.domains.advisory.application.agent.early_morning_agent import EarlyMorningAgent
 from trade_system.domains.advisory.application.agent.sniper_reversal_agent import SniperReversalAgent
@@ -160,6 +161,7 @@ class LiveMarketDataService:
         )
         
         self.alert_agent = LiveAlertAgent(settings=self.settings, notifier=self.notifier)
+        self.oc_monitor_agent = OptionChainMonitorAgent(settings=self.settings, notifier=self.notifier)
         self.mwpl_analyzer = MwplAnalyzer(settings=self.settings)
         self.early_morning_agent = EarlyMorningAgent(broker=self.broker)
         self.sniper_agent = SniperReversalAgent()
@@ -2489,6 +2491,18 @@ class LiveMarketDataService:
             # 2. Monitor for sudden forensics shifts (VOI, PCR, IV Skew)
             full_symbol = f"BSE:{symbol}-INDEX" if symbol == "SENSEX" else f"NSE:{symbol}-INDEX"
             self.alert_agent.monitor_option_chain_changes(full_symbol, analysis)
+
+            # 3. Dynamic Differential Data Change Forensics (Delta OI, Max Pain drift, Traps)
+            try:
+                self.oc_monitor_agent.process_snapshot(
+                    symbol=full_symbol,
+                    oc_df=current_df,
+                    spot_price=spot_price or 0.0,
+                    timestamp=now,
+                    expiry=getattr(analyzer, "nearest_expiry", None),
+                )
+            except Exception as _oc_err:
+                LOGGER.warning("OptionChainMonitorAgent processing failed for %s: %s", full_symbol, _oc_err)
 
             # Expiry Max Pain Alert at 2 PM (14:00 IST)
             if symbol in ["NIFTY50", "SENSEX"]:

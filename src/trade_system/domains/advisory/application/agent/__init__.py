@@ -14,6 +14,11 @@ from trade_system.domains.advisory.application.agent.chief_trading_agent import 
     ContinuousChiefAgent,
 )
 
+from trade_system.domains.advisory.application.agent.option_chain_monitor_agent import (
+    OptionChainMonitorAgent,
+    DynamicForensicResult,
+)
+
 __all__ = [
     "DecisionEngine",
     "Decision",
@@ -29,4 +34,6 @@ __all__ = [
     "ChiefTradingAgent",
     "ChiefTradeSignal",
     "ContinuousChiefAgent",
+    "OptionChainMonitorAgent",
+    "DynamicForensicResult",
 ]

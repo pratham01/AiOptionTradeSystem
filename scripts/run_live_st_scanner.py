@@ -34,10 +34,9 @@ class ContinuousStScanner:
     def __init__(self):
         self.settings = Settings.load()
         self.auth_service = FyersAuthService(self.settings)
-        self.notifier = TelegramNotifier(
-            self.settings.telegram.bot_token, 
-            self.settings.telegram.chat_id
-        )
+        bot_token = self.settings.st_confirmed_telegram.bot_token or self.settings.telegram.bot_token
+        chat_id = self.settings.st_confirmed_telegram.chat_id or self.settings.telegram.chat_id
+        self.notifier = TelegramNotifier(bot_token, chat_id)
         self.last_alert_sent: dict[str, datetime] = {}
         self.scan_interval_seconds = 3 * 60 # 3 minutes (aligned with db sync)
         self.is_running = True

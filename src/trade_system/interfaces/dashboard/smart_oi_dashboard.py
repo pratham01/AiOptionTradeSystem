@@ -22,6 +22,8 @@ from trade_system.domains.market_data.infrastructure.database.connection import 
 from trade_system.domains.market_data.infrastructure.data.fo_universe import get_fo_universe
 from trade_system.shared.config import Settings
 from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
+from trade_system.domains.advisory.application.agent.option_chain_monitor_agent import OptionChainMonitorAgent
+import json
 
 LOGGER = logging.getLogger(__name__)
 
@@ -2200,13 +2202,17 @@ def run_dashboard():
 
     st.markdown("---")
 
-    # ── 4 CONSOLIDATED DEEP-DIVE TABS ─────────────────────────────
-    tab_chain, tab_chart, tab_causal, tab_fo = st.tabs([
+    # ── 5 CONSOLIDATED DEEP-DIVE TABS ─────────────────────────────
+    tab_delta, tab_chain, tab_chart, tab_causal, tab_fo = st.tabs([
+        "⚡ Dynamic ΔOI & Writer Trap Monitor",
         "📋 Full Option Chain & Greeks Grid",
         "📈 Price Action, VWAP & Net Writer Flow",
         "🕸️ Causal Graph & Volume Shockwave",
         "🎲 F&O Universe PCR Heatmap"
     ])
+
+    with tab_delta:
+        render_tab_delta_monitor(selected_symbol_label, db_symbol, spot_price, latest_oc, snapshots, analyzer)
 
     with tab_chain:
         render_tab_pro_trader(latest_oc, snapshots, spot_price, analyzer, prev_oc, summary)
@@ -2422,6 +2428,202 @@ def render_tab_fo_pcr():
         _render_table(ob_list, "smart_oi_pcr_ob_tbl")
     with sub_t3:
         _render_table(all_stocks, "smart_oi_pcr_all_tbl")
+
+
+def render_tab_delta_monitor(
+    symbol_label: str,
+    db_symbol: str,
+    spot_price: float,
+    latest_oc: pd.DataFrame,
+    snapshots: list,
+    analyzer: SmartOIAnalyzer,
+):
+    """Render Dynamic Option Chain Data Change Forensics Tab."""
+    st.markdown("### ⚡ Dynamic Option Chain Data Change Forensics")
+    st.caption(
+        "Autonomous real-time tracking of strike-by-strike ΔOI velocity (dOI/dt), Max Pain migration drift, "
+        "and institutional writer traps vs genuine short squeeze breakouts."
+    )
+
+    clean_sym = db_symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").replace("-EQ", "")
+
+    # 1. Load live persisted agent state or compute on the fly
+    settings = Settings.load()
+    state_file = settings.data_dir / "option_chain_monitor_state.json"
+    res_data = None
+    if state_file.exists():
+        try:
+            with open(state_file) as f:
+                all_states = json.load(f)
+                res_data = all_states.get(clean_sym)
+        except Exception:
+            pass
+
+    if not res_data and snapshots and len(snapshots) >= 2:
+        try:
+            agent = OptionChainMonitorAgent(enable_telegram=False)
+            prior_ts, prior_df = snapshots[-2]
+            latest_ts, latest_df = snapshots[-1]
+            agent.process_snapshot(db_symbol, prior_df, spot_price=spot_price, timestamp=pd.to_datetime(prior_ts))
+            dyn_res = agent.process_snapshot(db_symbol, latest_df, spot_price=spot_price, timestamp=pd.to_datetime(latest_ts))
+            if dyn_res:
+                from dataclasses import asdict
+                res_data = asdict(dyn_res)
+                res_data["timestamp"] = dyn_res.timestamp.isoformat()
+        except Exception as e:
+            LOGGER.warning("Could not compute on-the-fly dynamic OC forensics: %s", e)
+
+    # 2. Render Forensic Status Bar
+    if res_data:
+        mp = res_data.get("max_pain", 0.0)
+        prev_mp = res_data.get("prev_max_pain", mp)
+        mp_shift = res_data.get("max_pain_shift_pts", 0.0)
+        pcr = res_data.get("pcr_oi", 1.0)
+        pcr_vel = res_data.get("pcr_velocity", 0.0)
+        top_ce_build = res_data.get("top_ce_build_strike", 0.0)
+        top_ce_oi = res_data.get("top_ce_build_oi", 0)
+        top_pe_build = res_data.get("top_pe_build_strike", 0.0)
+        top_pe_oi = res_data.get("top_pe_build_oi", 0)
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            shift_text = f"Shifted {mp_shift:+.0f} pts" if mp_shift != 0 else "Pinned / Steady"
+            shift_color = "#00d084" if mp_shift > 0 else ("#ff4d6d" if mp_shift < 0 else "#8b949e")
+            st.markdown(_clean_html(f"""
+                <div class="status-card">
+                    <div class="status-title">🧲 Max Pain Anchor</div>
+                    <div class="status-value" style="color: {shift_color}">₹{mp:,.0f}</div>
+                    <div class="status-desc">Prev: ₹{prev_mp:,.0f} ({shift_text})</div>
+                </div>
+            """), unsafe_allow_html=True)
+
+        with c2:
+            vel_sign = f"{pcr_vel:+.3f}/min"
+            vel_color = "#00d084" if pcr_vel > 0 else "#ff4d6d"
+            st.markdown(_clean_html(f"""
+                <div class="status-card">
+                    <div class="status-title">⚡ PCR Momentum (dPCR/dt)</div>
+                    <div class="status-value" style="color: {vel_color}">{pcr:.2f}</div>
+                    <div class="status-desc">Velocity: {vel_sign}</div>
+                </div>
+            """), unsafe_allow_html=True)
+
+        with c3:
+            st.markdown(_clean_html(f"""
+                <div class="status-card">
+                    <div class="status-title">🛑 Resistance Call Build</div>
+                    <div class="status-value" style="color: #ff4d6d">₹{int(top_ce_build):,}</div>
+                    <div class="status-desc">ΔOI: +{top_ce_oi:,} contracts</div>
+                </div>
+            """), unsafe_allow_html=True)
+
+        with c4:
+            st.markdown(_clean_html(f"""
+                <div class="status-card">
+                    <div class="status-title">🛡️ Support Put Build</div>
+                    <div class="status-value" style="color: #00d084">₹{int(top_pe_build):,}</div>
+                    <div class="status-desc">ΔOI: +{top_pe_oi:,} contracts</div>
+                </div>
+            """), unsafe_allow_html=True)
+
+        # 3. Active Institutional Traps & Squeezes
+        traps = res_data.get("traps", [])
+        squeezes = res_data.get("squeezes", [])
+        signals = res_data.get("signals", [])
+
+        st.markdown("#### 🚨 Active Institutional Microstructure Alerts")
+        if traps or squeezes:
+            for t in traps:
+                st.markdown(_clean_html(f"""
+                    <div style="background: rgba(255, 77, 109, 0.15); border-left: 4px solid #ff4d6d; padding: 12px; border-radius: 8px; margin-bottom: 10px;">
+                        {t}
+                    </div>
+                """), unsafe_allow_html=True)
+            for sq in squeezes:
+                st.markdown(_clean_html(f"""
+                    <div style="background: rgba(0, 208, 132, 0.15); border-left: 4px solid #00d084; padding: 12px; border-radius: 8px; margin-bottom: 10px;">
+                        {sq}
+                    </div>
+                """), unsafe_allow_html=True)
+        else:
+            st.info("⚖️ **Equilibrium State:** No institutional writer traps or squeeze breakouts currently triggered. Smart money positioning is orderly.")
+
+        # 4. Actionable Trade Setups
+        if signals:
+            st.markdown("#### 🎯 Actionable AI Derivatives Setups")
+            for sig in signals:
+                badge_col = "#00d084" if sig.get("bias") == "BULLISH" else "#ff4d6d"
+                st.markdown(_clean_html(f"""
+                    <div style="background: #1e2130; border: 1px solid #30363d; border-radius: 10px; padding: 16px; margin-bottom: 12px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-weight: 700; font-size: 1.1rem; color: {badge_col};">{sig.get('setup')}</span>
+                            <span style="background: {badge_col}; color: #000; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 0.75rem;">{sig.get('action')} • {sig.get('contract')}</span>
+                        </div>
+                        <div style="color: #c9d1d9; font-size: 0.9rem; margin-bottom: 8px;"><b>Thesis:</b> {sig.get('rationale')}</div>
+                        <div style="display: flex; gap: 20px; font-size: 0.85rem; color: #8b949e;">
+                            <span><b>Entry:</b> {sig.get('entry')}</span>
+                            <span><b>Stop Loss:</b> {sig.get('stop_loss')}</span>
+                            <span><b>Target 1:</b> {sig.get('target_1')}</span>
+                            <span><b>Target 2:</b> {sig.get('target_2')}</span>
+                            <span><b>Conviction:</b> {sig.get('confidence')}%</span>
+                        </div>
+                    </div>
+                """), unsafe_allow_html=True)
+
+    # 5. Strike-by-Strike Delta OI Chart
+    st.markdown("#### 📊 Strike-by-Strike ΔOI Velocity Distribution")
+    if snapshots and len(snapshots) >= 2:
+        prev_oc = snapshots[-2][1]
+        curr_oc = snapshots[-1][1]
+        if prev_oc is not None and curr_oc is not None and not prev_oc.empty and not curr_oc.empty:
+            p_m = prev_oc.set_index(["strike", "option_type"])["oi"]
+            c_m = curr_oc.set_index(["strike", "option_type"])["oi"]
+            delta_s = (c_m - p_m).fillna(0).reset_index()
+            
+            # Filter around ATM
+            step = analyzer.strike_step or 50.0
+            atm = round(spot_price / step) * step
+            min_s = atm - (10 * step)
+            max_s = atm + (10 * step)
+            delta_s = delta_s[(delta_s["strike"] >= min_s) & (delta_s["strike"] <= max_s)]
+
+            strikes_s = sorted(delta_s["strike"].unique())
+            ce_d = []
+            pe_d = []
+            for s in strikes_s:
+                ce_val = delta_s[(delta_s["strike"] == s) & (delta_s["option_type"] == "CE")]["oi"]
+                pe_val = delta_s[(delta_s["strike"] == s) & (delta_s["option_type"] == "PE")]["oi"]
+                ce_d.append(int(ce_val.iloc[0]) if not ce_val.empty else 0)
+                pe_d.append(int(pe_val.iloc[0]) if not pe_val.empty else 0)
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=strikes_s,
+                y=ce_d,
+                name="Call ΔOI (Resistance Addition / Covering)",
+                marker_color="#ff4d6d",
+            ))
+            fig.add_trace(go.Bar(
+                x=strikes_s,
+                y=pe_d,
+                name="Put ΔOI (Support Addition / Covering)",
+                marker_color="#00d084",
+            ))
+            fig.add_vline(x=spot_price, line_width=2, line_dash="dash", line_color="#f1fa8c", annotation_text=f"Spot ₹{spot_price:,.1f}")
+            fig.update_layout(
+                barmode="group",
+                plot_bgcolor="#0e1117",
+                paper_bgcolor="#0e1117",
+                font_color="#c9d1d9",
+                height=380,
+                margin=dict(l=20, r=20, t=30, b=20),
+                legend=dict(orientation="h", y=1.1, x=0.2),
+                xaxis=dict(title="Strike Price", gridcolor="#21262d"),
+                yaxis=dict(title="Contracts Added / Unwound", gridcolor="#21262d"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Requires at least 2 consecutive snapshots to compute real-time strike ΔOI velocity.")
 
 
 if __name__ == "__main__":

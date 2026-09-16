@@ -57,10 +57,17 @@ class SupertrendTouchAgent:
                         limit = 100 if resolution == "15" else 60
                         data = get_market_data(session, symbol, resolution, limit=limit)
                         if data and len(data) >= 20:
-                            df = pd.DataFrame([
+                            temp_df = pd.DataFrame([
                                 {"timestamp": d.timestamp, "open": d.open, "high": d.high, "low": d.low, "close": d.close, "volume": d.volume}
                                 for d in data
                             ]).sort_values("timestamp")
+                            # For intraday scans, ensure cache contains today's data; otherwise fallback to live API
+                            if resolution == "15" and not temp_df.empty:
+                                latest_dt = pd.to_datetime(temp_df.iloc[-1]["timestamp"]).date()
+                                if latest_dt == date.today():
+                                    df = temp_df
+                            else:
+                                df = temp_df
                     
                     # 2. Fallback to API if DB is empty or use_cache=False
                     if df.empty:

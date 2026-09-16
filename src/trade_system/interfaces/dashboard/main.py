@@ -21,6 +21,7 @@ pages = {
         st.Page(HERE / "broker_health_dashboard.py", title="Broker Health", icon="🔌"),
         st.Page(HERE / "market_mood_dashboard.py", title="Market Mood", icon="📊"),
         st.Page(HERE / "option_edge_dashboard.py", title="Option Edge", icon="⚡"),
+        st.Page(HERE / "btst_scanner_dashboard.py", title="BTST Scanner", icon="🌅"),
     ],
     "Research & Strategy": [
         st.Page(HERE / "greeks_exposure_dashboard.py", title="GEX & DEX Engine", icon="🧲"),
@@ -46,22 +47,47 @@ st.sidebar.title("🚀 Trade System V2")
 st.sidebar.caption("Autonomous Multi-Agent Swarm")
 st.sidebar.markdown("---")
 
-# Live Bot Status Indicator
-try:
-    from trade_system.shared.live_state import LiveStateReader
-    _reader = LiveStateReader()
-    if _reader.is_bot_running():
-        _health = _reader.get_system_health()
-        st.sidebar.success("🟢 Live Bot: **Running**")
-        if _health:
-            _db_written = _health.get("db_total_written", 0)
-            _db_queue = _health.get("db_queue_depth", 0)
-            st.sidebar.caption(f"DB writes: {_db_written:,} | Queue: {_db_queue}")
-    else:
-        st.sidebar.warning("🔴 Live Bot: **Offline**")
-        st.sidebar.caption("Dashboard using broker API fallback")
-except Exception:
-    st.sidebar.info("⚪ Live Bot: **Unknown**")
+# ── ST Flip Live Bot & Data Sanity Supervisor ───────────────────────────
+def _get_live_bot_health():
+    import urllib.request, json
+    try:
+        req = urllib.request.urlopen("http://localhost:9090/health", timeout=1.5)
+        return json.loads(req.read().decode())
+    except Exception:
+        return None
+
+def _start_live_bot():
+    import subprocess, sys
+    root_dir = Path(__file__).resolve().parent.parent.parent.parent
+    script_path = root_dir / "scripts" / "run_live_trading.py"
+    subprocess.Popen(
+        [sys.executable, str(script_path)],
+        cwd=str(root_dir),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+# Auto-start on application initial load
+if "live_bot_auto_checked" not in st.session_state:
+    st.session_state["live_bot_auto_checked"] = True
+    bot_health = _get_live_bot_health()
+    if not bot_health:
+        _start_live_bot()
+
+bot_health = _get_live_bot_health()
+if bot_health and bot_health.get("status") == "healthy":
+    st.sidebar.success("🟢 ST Flip Live Bot: **Running**")
+    ws_ok = bot_health.get("components", {}).get("websocket", {}).get("connected", False)
+    db_ok = bot_health.get("components", {}).get("database", {}).get("status", "") == "healthy"
+    st.sidebar.caption(f"⚡ WS: {'Connected' if ws_ok else 'Reconnecting'} | 🛡️ DB: {'Sanity OK' if db_ok else 'Checking'}")
+    st.sidebar.caption("📢 Alerts: **STFlip Channel**")
+else:
+    st.sidebar.warning("🔴 ST Flip Live Bot: **Offline**")
+    st.sidebar.caption("ST Flip alerts & tick stream inactive")
+    if st.sidebar.button("🚀 Start ST Flip Bot", key="start_bot_btn", use_container_width=True):
+        _start_live_bot()
+        st.rerun()
 
 # Global Auto-Refresh
 refresh_rate = st.sidebar.select_slider(

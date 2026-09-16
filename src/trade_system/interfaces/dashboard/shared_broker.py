@@ -112,12 +112,13 @@ def fetch_live_quotes(symbols):
 
     # 1. Try reading from the live state file (written by the live bot)
     reader = LiveStateReader()
-    if reader.is_fresh(max_age_seconds=15):
-        states = reader.get_current_prices(list(symbols))
-        if states and all(s in states for s in symbols):
-            quotes = {}
+    quotes = {}
+    remaining_symbols = list(symbols)
+    if reader.is_fresh(max_age_seconds=30):
+        states = reader.get_current_prices(remaining_symbols)
+        if states:
             for sym, s in states.items():
-                if sym not in symbols:
+                if sym not in remaining_symbols:
                     continue
                 exchange = sym.split(":")[0] if ":" in sym else "NSE"
                 quotes[sym] = MarketQuote(
@@ -139,17 +140,17 @@ def fetch_live_quotes(symbols):
                     ask_qty=0,
                     ltp=s.ltp,
                 )
-            return quotes
+            remaining_symbols = [s for s in symbols if s not in quotes]
+            if not remaining_symbols:
+                return quotes
 
-    # 2. Fallback to broker API (live bot not running)
+    # 2. Fallback to file cache
     import json
     from datetime import datetime, timedelta
     from pathlib import Path
     from trade_system.domains.trading.domain.ports.broker import MarketQuote
     
     cache_path = Path("data/live_quotes_cache.json")
-    
-    # Try reading from file cache first
     cached_quotes = {}
     use_cache = False
     
@@ -160,11 +161,10 @@ def fetch_live_quotes(symbols):
             cached_time_str = cache_data.get("timestamp")
             if cached_time_str:
                 cached_time = datetime.fromisoformat(cached_time_str)
-                # If cache is fresh (less than 60 seconds old), we can reuse it
+                # Fresh if less than 60 seconds old
                 if datetime.now() - cached_time < timedelta(seconds=60):
                     use_cache = True
                 
-                # Deserialize quotes
                 for sym, q_dict in cache_data.get("quotes", {}).items():
                     cached_quotes[sym] = MarketQuote(
                         symbol=q_dict["symbol"],
@@ -188,10 +188,15 @@ def fetch_live_quotes(symbols):
         except Exception:
             pass
             
-    if use_cache and all(s in cached_quotes for s in symbols):
-        return {s: cached_quotes[s] for s in symbols}
-        
-    # Otherwise, fetch from broker manager
+    if use_cache:
+        for s in remaining_symbols:
+            if s in cached_quotes:
+                quotes[s] = cached_quotes[s]
+        remaining_symbols = [s for s in symbols if s not in quotes]
+        if not remaining_symbols:
+            return quotes
+
+    # 3. If only a small delta is missing (or everything if no cache), fetch broker manager
     try:
         from trade_system.domains.trading.infrastructure.brokers.factory import get_broker_manager, reset_broker_manager
         from trade_system.shared.config import Settings
@@ -199,7 +204,6 @@ def fetch_live_quotes(symbols):
         settings = Settings.load()
         manager = get_broker_manager(settings)
         
-        # Check if the access token in settings has changed compared to the one in the manager
         fyers_broker_health = manager.brokers.get("fyers")
         if fyers_broker_health:
             current_token = settings.fyers.access_token
@@ -207,19 +211,24 @@ def fetch_live_quotes(symbols):
                 reset_broker_manager()
                 manager = get_broker_manager(settings)
                 
+        # Only query broker for remaining missing symbols
+        symbols_to_query = remaining_symbols if remaining_symbols else symbols
+        new_quotes = {}
         try:
-            quotes = manager.get_quotes(symbols)
+            new_quotes = manager.get_quotes(symbols_to_query)
         except Exception:
-            # If the broker manager fetch fails, reset and retry once
             reset_broker_manager()
             settings = Settings.load()
             manager = get_broker_manager(settings)
-            quotes = manager.get_quotes(symbols)
+            new_quotes = manager.get_quotes(symbols_to_query)
             
-        # Serialize and write to cache file
-        if quotes:
+        quotes.update(new_quotes)
+        # Merge all into cached_quotes for persistent file cache
+        cached_quotes.update(quotes)
+        
+        if cached_quotes:
             serialized_quotes = {}
-            for sym, q in quotes.items():
+            for sym, q in cached_quotes.items():
                 serialized_quotes[sym] = {
                     "symbol": q.symbol,
                     "exchange": q.exchange,
@@ -232,7 +241,7 @@ def fetch_live_quotes(symbols):
                     "volume": q.volume,
                     "change": q.change,
                     "change_percent": q.change_percent,
-                    "timestamp": q.timestamp.isoformat(),
+                    "timestamp": q.timestamp.isoformat() if hasattr(q.timestamp, 'isoformat') else str(q.timestamp),
                     "bid": q.bid,
                     "ask": q.ask,
                     "bid_qty": q.bid_qty,

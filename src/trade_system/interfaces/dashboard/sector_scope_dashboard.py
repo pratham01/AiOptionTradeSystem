@@ -116,6 +116,34 @@ st.markdown("""
         margin: 0.6rem 0;
         border: none;
     }
+
+    /* Modern Broker Navigation Tabs (Segmented Control) */
+    div[data-testid="stSegmentedControl"] {
+        margin-top: 0.6rem;
+        margin-bottom: 1.0rem;
+    }
+    div[data-testid="stSegmentedControl"] > div {
+        background: rgba(15, 23, 42, 0.75) !important;
+        padding: 4px !important;
+        border-radius: 12px !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) !important;
+        gap: 4px !important;
+    }
+    div[data-testid="stSegmentedControl"] button {
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        font-size: 0.84rem !important;
+        padding: 6px 14px !important;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+    div[data-testid="stSegmentedControl"] button[aria-checked="true"] {
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.45), rgba(168, 85, 247, 0.45)) !important;
+        border: 1px solid rgba(168, 85, 247, 0.75) !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        box-shadow: 0 4px 14px rgba(124, 58, 237, 0.4) !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -234,6 +262,64 @@ def get_cached_reversal_backtest(lookback_days: int = 60, min_prob: int = 60, ta
     except Exception as exc:
         logger.error("Error in get_cached_reversal_backtest: %s", exc, exc_info=True)
         return {"error": str(exc)}
+
+
+# =====================================================================
+# PERFORMANCE: Cached Quantitative Engine Scanners (Multi-Tier Caching)
+# =====================================================================
+
+@st.cache_data(ttl=180, show_spinner=False)
+def _cached_breakout_scan(
+    target_date_str: str,
+    top_sectors_count: int,
+    use_vwap: bool,
+    use_wick: bool,
+    use_index: bool,
+    use_sector: bool,
+    vol_surge: float,
+    use_52w: bool,
+    use_weekly: bool,
+    use_daily_st_touch: bool,
+    use_abnormal_vol: bool
+):
+    """Run and cache BreakoutScreener for 3 minutes to avoid 15s page stalls."""
+    screener = BreakoutScreener()
+    tgt_date = date.fromisoformat(target_date_str) if isinstance(target_date_str, str) else target_date_str
+    return screener.scan_for_breakouts(
+        top_sectors_count=top_sectors_count,
+        target_date=tgt_date,
+        use_vwap_filter=use_vwap,
+        use_wick_filter=use_wick,
+        use_index_filter=use_index,
+        use_sector_filter=use_sector,
+        vol_surge_threshold=vol_surge,
+        use_52w_filter=use_52w,
+        use_weekly_high_filter=use_weekly,
+        use_daily_st_touch_filter=use_daily_st_touch,
+        use_abnormal_vol_filter=use_abnormal_vol
+    )
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def _cached_edge_scan(horizon_code: str, target_date_str: str, _sector_perf=None, _stock_perf=None):
+    """Run and cache IntradayEdgeScorer for 3 minutes to eliminate 36s recalculations."""
+    scorer = IntradayEdgeScorer(horizon=horizon_code)
+    tgt_date = date.fromisoformat(target_date_str) if isinstance(target_date_str, str) else target_date_str
+    if horizon_code == "INTRADAY":
+        return scorer.scan(
+            target_date=tgt_date,
+            sector_perf=_sector_perf,
+            stock_perf=_stock_perf
+        )
+    return scorer.scan(target_date=tgt_date)
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def _cached_reversal_scan(target_date_str: str, min_probability: int = 40):
+    """Run and cache DailyReversalScanner for 3 minutes."""
+    reversal_scanner = DailyReversalScanner(min_probability=min_probability)
+    tgt_date = date.fromisoformat(target_date_str) if isinstance(target_date_str, str) else target_date_str
+    return reversal_scanner.scan(target_date=tgt_date, min_probability=min_probability)
 
 
 available_dates = fetch_available_dates()
@@ -1155,9 +1241,9 @@ else:
     st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
 
     # -------------------------------------------------------------
-    # 4. TABBED PANELS — Gainers/Losers | Chart | Scanner | Proximity | PCR | Reversals | Edge | Drill-Down | Squeeze | Cycle
+    # 4. TABBED PANELS — Lazy-Loaded Broker Tabs (Instant Loading)
     # -------------------------------------------------------------
-    tab_leaderboard, tab_chart, tab_scanner, tab_proximity, tab_pcr, tab_reversal, tab_edge, tab_drilldown, tab_compression, tab_cycle = st.tabs([
+    tab_options = [
         "📊 Gainers & Losers",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
@@ -1168,10 +1254,17 @@ else:
         "🔎 Sector Drill-Down",
         "📦 Volatility Squeeze",
         "📅 Off-Market Cycle Analyst"
-    ])
+    ]
+    active_tab = st.segmented_control(
+        "Navigation",
+        options=tab_options,
+        default="📊 Gainers & Losers",
+        label_visibility="collapsed",
+        key="sector_scope_nav_tab"
+    ) or "📊 Gainers & Losers"
 
     # ---- TAB 1: Gainers & Losers ----
-    with tab_leaderboard:
+    if active_tab == "📊 Gainers & Losers":
         col_gainers, col_losers = st.columns(2)
 
         with col_gainers:
@@ -1254,7 +1347,7 @@ else:
                 st.info("No stocks currently within 0.75% of intraday breakdown level.")
 
     # ---- TAB 2: Sector Chart ----
-    with tab_chart:
+    elif active_tab == "📈 Sector Chart":
         fig = go.Figure()
         colors = ['#22c55e' if v >= 0 else '#ef4444' for v in sector_perf['pChange']]
         fig.add_trace(go.Bar(
@@ -1287,7 +1380,7 @@ else:
             st.plotly_chart(fig, use_container_width=True)
 
     # ---- TAB 3: Breakout Scanner ----
-    with tab_scanner:
+    elif active_tab == "🚨 Breakout Scanner":
         with st.expander("⚙️ Scanner Filters & Strategies", expanded=True):
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
@@ -1343,16 +1436,19 @@ else:
         for s in selected_strategies:
             allowed_types.extend(strategy_map[s])
 
-        screener = BreakoutScreener()
         try:
-            alerts = screener.scan_for_breakouts(
-                top_sectors_count=3, target_date=target_date,
-                use_vwap_filter=use_vwap, use_wick_filter=use_wick,
-                use_index_filter=use_index, use_sector_filter=use_sector,
-                vol_surge_threshold=float(vol_surge),
-                use_52w_filter=use_52w, use_weekly_high_filter=use_weekly,
-                use_daily_st_touch_filter=use_daily_st_touch,
-                use_abnormal_vol_filter=use_abnormal_vol
+            alerts = _cached_breakout_scan(
+                target_date_str=target_date.isoformat(),
+                top_sectors_count=3,
+                use_vwap=use_vwap,
+                use_wick=use_wick,
+                use_index=use_index,
+                use_sector=use_sector,
+                vol_surge=float(vol_surge),
+                use_52w=use_52w,
+                use_weekly=use_weekly,
+                use_daily_st_touch=use_daily_st_touch,
+                use_abnormal_vol=use_abnormal_vol
             )
         except Exception as e:
             st.error(f"Error: {e}")
@@ -1623,7 +1719,7 @@ else:
                 st.error(f"Error loading Supertrend Radar: {st_err}")
 
     # ---- TAB: Multi-Touch Proximity (KEI Pattern Radar) ----
-    with tab_proximity:
+    elif active_tab == "🎯 Multi-Touch Proximity (KEI Pattern)":
         st.markdown("""
         <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
             <h3>🎯 Multi-Touch Support & Resistance Proximity Radar</h3>
@@ -1891,7 +1987,7 @@ else:
                     st.info(f"💡 **Forensics Summary:** {active_setup.analysis_summary} | Compression Score: **{active_setup.compression_score:.0f}/100** | 5d/20d ATR Ratio: **{active_setup.atr_ratio:.2f}x**")
 
     # ---- TAB: F&O Stock PCR Radar (Overbought / Oversold) ----
-    with tab_pcr:
+    elif active_tab == "🎲 F&O Stock PCR Radar (Overbought/Oversold)":
         st.markdown("""
         <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
             <h3>🎲 F&O Stock Put-Call Ratio (PCR) & Overbought / Oversold Radar</h3>
@@ -1927,15 +2023,20 @@ else:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             run_pcr_scan = st.button("🔄 Scan Live Option Chains", key="btn_run_pcr_scan", use_container_width=True)
 
-        # Cache/Session State for PCR Scan Data
-        if "pcr_scan_results" not in st.session_state or run_pcr_scan:
-            with st.spinner("Fetching live option chains & computing PCR across F&O universe..."):
+        # Cache/Session State for PCR Scan Data - Checks persistent snapshot first
+        if "pcr_scan_results" not in st.session_state:
+            cached_snapshot = FOPCRScreener.load_snapshot_cache(max_age_minutes=180)
+            if cached_snapshot:
+                st.session_state["pcr_scan_results"] = cached_snapshot
+
+        if run_pcr_scan or "pcr_scan_results" not in st.session_state:
+            with st.spinner("Fetching live option chains in parallel across F&O universe..."):
                 try:
                     pcr_screener = FOPCRScreener(
                         overbought_threshold=pcr_ob_thresh,
                         oversold_threshold=pcr_os_thresh,
                     )
-                    st.session_state["pcr_scan_results"] = pcr_screener.scan_universe_pcr(max_symbols=120)
+                    st.session_state["pcr_scan_results"] = pcr_screener.scan_universe_pcr(max_symbols=120, max_workers=8)
                 except Exception as pcr_exc:
                     st.error(f"Failed to scan F&O option chains: {pcr_exc}")
                     st.session_state["pcr_scan_results"] = {"overbought": [], "oversold": [], "neutral": [], "all": []}
@@ -2101,7 +2202,7 @@ else:
                 st.info(f"💡 **Institutional Forensics:** {target_stock.analysis_narrative} | CE Resistance Wall: **₹{target_stock.highest_ce_oi_strike:.1f}** | PE Support Wall: **₹{target_stock.highest_pe_oi_strike:.1f}** | Expiry: **{target_stock.nearest_expiry}**")
 
     # ---- TAB 4: Daily Reversal Radar ----
-    with tab_reversal:
+    elif active_tab == "🔄 Daily Reversal Radar":
         st.markdown("""
         <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
             <h3>🔄 Daily Reversal Probability Radar</h3>
@@ -2122,8 +2223,7 @@ else:
             """)
 
         try:
-            reversal_scanner = DailyReversalScanner(min_probability=40)
-            reversal_setups = reversal_scanner.scan(target_date=target_date, min_probability=40)
+            reversal_setups = _cached_reversal_scan(target_date_str=target_date.isoformat(), min_probability=40)
 
             # Reversal Filters
             col_rev_f1, col_rev_f2, col_rev_f3 = st.columns([1, 1, 1])
@@ -2448,7 +2548,7 @@ else:
             st.warning(f"Unable to compute Daily Reversals: {rev_err}")
 
     # ---- TAB 5: Sector Drill-Down ----
-    with tab_drilldown:
+    elif active_tab == "🔎 Sector Drill-Down":
         selected_sector = st.selectbox("Sector", options, key="selected_sector_drill")
         
         if selected_sector:
@@ -2606,7 +2706,7 @@ else:
                 st.caption("No stock data matching filters.")
 
     # ---- TAB 5: Volatility Squeeze ----
-    with tab_compression:
+    elif active_tab == "📦 Volatility Squeeze":
         st.subheader("📦 Volatility Compression & Squeeze Radar")
         st.caption("Scans F&O and liquid stocks for low-volatility coiling patterns (NR7, Inside Bars) that typically precede explosive moves.")
         
@@ -2714,7 +2814,7 @@ else:
                     st.info("No stock data returned from indicator scanning.")
 
     # ---- TAB 6: Intraday Edge Finder ----
-    with tab_edge:
+    elif active_tab == "⚡ Intraday Edge Finder":
         st.subheader("⚡ Multi-Layer Edge Finder")
         st.caption("Confluence-based scoring system analyzing 11 layers (Sector, Relative Strength, VWAP, Volume/CVD, Timing, Supertrend, Compression, Daily Trend/Regime, Key Levels, OBV Divergence, and Candle Quality) to find high-probability setups.")
         
@@ -2764,19 +2864,21 @@ else:
         # 2. Scanning and Scoring
         with st.spinner(f"Analyzing 11 confluence layers for {selected_horizon} setups..."):
             try:
-                scorer = IntradayEdgeScorer(horizon=horizon_code)
                 if horizon_code == "INTRADAY":
-                    edges = scorer.scan(
-                        target_date=target_date,
-                        sector_perf=sector_perf,
-                        stock_perf=merged_closes
+                    edges = _cached_edge_scan(
+                        horizon_code=horizon_code,
+                        target_date_str=target_date.isoformat(),
+                        _sector_perf=sector_perf,
+                        _stock_perf=merged_closes
                     )
                     df_base_trig = df_filtered
                 else:
-                    edges = scorer.scan(
-                        target_date=target_date
+                    edges = _cached_edge_scan(
+                        horizon_code=horizon_code,
+                        target_date_str=target_date.isoformat()
                     )
                     # Fetch base candles for triggers
+                    scorer = IntradayEdgeScorer(horizon=horizon_code)
                     lookback_days = 365 if horizon_code == "WEEKLY" else 1000
                     df_daily_all = scorer._fetch_daily_data(target_date, lookback_days=lookback_days)
                     if horizon_code == "WEEKLY":
@@ -3167,7 +3269,7 @@ else:
                             st.markdown(f'<div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:{bar_width}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
 
     # ---- TAB 7: Off-Market Cycle Analyst ----
-    with tab_cycle:
+    elif active_tab == "📅 Off-Market Cycle Analyst":
         st.markdown("### 📅 Time Cycles & Off-Market Analyst")
         st.caption("Quantitative swing cycle phase estimation and daily pivot calculation for off-market preparation.")
         

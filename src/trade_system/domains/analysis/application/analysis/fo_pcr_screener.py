@@ -12,9 +12,12 @@ Fetches live Option Chain data across the entire F&O stock universe to compute:
 """
 from __future__ import annotations
 
+import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -75,6 +78,29 @@ class StockPCRInfo:
             "highest_pe_oi_strike": round(self.highest_pe_oi_strike, 2),
             "analysis_narrative": self.analysis_narrative,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> StockPCRInfo:
+        return cls(
+            symbol=d["symbol"],
+            clean_symbol=d.get("clean_symbol", ""),
+            sector=d.get("sector", "GENERAL"),
+            spot_price=float(d.get("spot_price", 0.0)),
+            pcr_oi=float(d.get("pcr_oi", 0.0)),
+            pcr_volume=float(d.get("pcr_volume", 0.0)),
+            total_call_oi=int(d.get("total_call_oi", 0)),
+            total_put_oi=int(d.get("total_put_oi", 0)),
+            total_call_volume=int(d.get("total_call_volume", 0)),
+            total_put_volume=int(d.get("total_put_volume", 0)),
+            max_pain_strike=float(d.get("max_pain_strike", 0.0)),
+            sentiment_state=d.get("sentiment_state", "NEUTRAL"),
+            contrarian_bias=d.get("contrarian_bias", "NEUTRAL"),
+            nearest_expiry=d.get("nearest_expiry", ""),
+            atm_strike=float(d.get("atm_strike", 0.0)),
+            highest_ce_oi_strike=float(d.get("highest_ce_oi_strike", 0.0)),
+            highest_pe_oi_strike=float(d.get("highest_pe_oi_strike", 0.0)),
+            analysis_narrative=d.get("analysis_narrative", ""),
+        )
 
 
 class FOPCRScreener:
@@ -256,19 +282,70 @@ class FOPCRScreener:
             LOGGER.error("FOPCRScreener error for %s: %s", symbol, exc)
             return None
 
+    @staticmethod
+    def save_snapshot_cache(data: Dict[str, Any], filepath: str = "data/fo_pcr_scan_cache.json") -> bool:
+        """Save scan results to local JSON snapshot cache."""
+        try:
+            p = Path(filepath)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            serialized = {
+                "timestamp": data.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "overbought": [s.to_dict() if hasattr(s, "to_dict") else s for s in data.get("overbought", [])],
+                "oversold": [s.to_dict() if hasattr(s, "to_dict") else s for s in data.get("oversold", [])],
+                "neutral": [s.to_dict() if hasattr(s, "to_dict") else s for s in data.get("neutral", [])],
+                "all": [s.to_dict() if hasattr(s, "to_dict") else s for s in data.get("all", [])],
+            }
+            with open(p, "w") as f:
+                json.dump(serialized, f)
+            return True
+        except Exception as err:
+            LOGGER.warning("Failed to save PCR snapshot cache: %s", err)
+            return False
+
+    @staticmethod
+    def load_snapshot_cache(filepath: str = "data/fo_pcr_scan_cache.json", max_age_minutes: int = 120) -> Optional[Dict[str, Any]]:
+        """Load scan results from local JSON snapshot cache if fresh."""
+        try:
+            p = Path(filepath)
+            if not p.exists():
+                return None
+            with open(p, "r") as f:
+                raw = json.load(f)
+            ts_str = raw.get("timestamp")
+            if ts_str:
+                try:
+                    ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                    if datetime.now() - ts > timedelta(minutes=max_age_minutes):
+                        LOGGER.info("PCR snapshot cache is stale (%s)", ts_str)
+                        return None
+                except Exception:
+                    pass
+            return {
+                "timestamp": raw.get("timestamp", ""),
+                "overbought": [StockPCRInfo.from_dict(d) for d in raw.get("overbought", [])],
+                "oversold": [StockPCRInfo.from_dict(d) for d in raw.get("oversold", [])],
+                "neutral": [StockPCRInfo.from_dict(d) for d in raw.get("neutral", [])],
+                "all": [StockPCRInfo.from_dict(d) for d in raw.get("all", [])],
+            }
+        except Exception as err:
+            LOGGER.warning("Failed to load PCR snapshot cache: %s", err)
+            return None
+
     def scan_universe_pcr(
         self,
         symbols: Optional[List[str]] = None,
         max_symbols: Optional[int] = None,
+        max_workers: int = 8,
     ) -> Dict[str, Any]:
         """
         Scan full F&O universe or custom list to identify Overbought and Oversold stocks.
+        Uses ThreadPoolExecutor for concurrent option chain network requests.
         """
         target_symbols = symbols or get_fo_universe()
         if max_symbols:
             target_symbols = target_symbols[:max_symbols]
 
-        LOGGER.info("Scanning PCR for %d F&O stocks...", len(target_symbols))
+        LOGGER.info("Scanning PCR for %d F&O stocks with %d workers...", len(target_symbols), max_workers)
 
         broker = self._ensure_broker()
         # Pre-fetch quotes in batch (50 at a time)
@@ -286,13 +363,19 @@ class FOPCRScreener:
             LOGGER.debug("Failed batch quote fetch: %s", q_err)
 
         results: List[StockPCRInfo] = []
-        for i, sym in enumerate(target_symbols, 1):
-            spot = quotes_map.get(sym, 0.0)
-            info = self.fetch_stock_pcr(sym, spot_price=spot)
-            if info:
-                results.append(info)
-            if i % 30 == 0 or i == len(target_symbols):
-                LOGGER.info("PCR scan progress: %d/%d processed...", i, len(target_symbols))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_sym = {
+                executor.submit(self.fetch_stock_pcr, sym, 15, quotes_map.get(sym, 0.0)): sym
+                for sym in target_symbols
+            }
+            for future in as_completed(future_to_sym):
+                try:
+                    info = future.result()
+                    if info:
+                        results.append(info)
+                except Exception as exc:
+                    sym = future_to_sym[future]
+                    LOGGER.debug("PCR concurrent task error for %s: %s", sym, exc)
 
         overbought = [s for s in results if "OVERBOUGHT" in s.sentiment_state]
         oversold = [s for s in results if "OVERSOLD" in s.sentiment_state]
@@ -305,10 +388,12 @@ class FOPCRScreener:
         # Sort All by PCR descending
         results.sort(key=lambda s: s.pcr_oi, reverse=True)
 
-        return {
+        payload = {
             "overbought": overbought,
             "oversold": oversold,
             "neutral": neutral,
             "all": results,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        self.save_snapshot_cache(payload)
+        return payload
