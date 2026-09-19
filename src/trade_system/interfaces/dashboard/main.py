@@ -81,13 +81,45 @@ if bot_health and bot_health.get("status") == "healthy":
     ws_ok = bot_health.get("components", {}).get("websocket", {}).get("connected", False)
     db_ok = bot_health.get("components", {}).get("database", {}).get("status", "") == "healthy"
     st.sidebar.caption(f"⚡ WS: {'Connected' if ws_ok else 'Reconnecting'} | 🛡️ DB: {'Sanity OK' if db_ok else 'Checking'}")
-    st.sidebar.caption("📢 Alerts: **STFlip Channel**")
 else:
     st.sidebar.warning("🔴 ST Flip Live Bot: **Offline**")
     st.sidebar.caption("ST Flip alerts & tick stream inactive")
     if st.sidebar.button("🚀 Start ST Flip Bot", key="start_bot_btn", use_container_width=True):
         _start_live_bot()
         st.rerun()
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📢 STFlip Channel")
+
+# Load and display recent STFlip alerts
+alert_file = Path(__file__).resolve().parent.parent.parent.parent.parent / "data" / "stflip_alerts.json"
+if alert_file.exists():
+    try:
+        import json
+        with open(alert_file, "r") as f:
+            alerts = json.load(f)
+        
+        if alerts:
+            # Show the last 3 alerts, newest first
+            for alert in reversed(alerts[-3:]):
+                color = "green" if alert.get("direction", 0) == 1 else "red"
+                symbol = alert.get("symbol", "N/A").replace("NSE:", "").replace("-INDEX", "")
+                st.sidebar.markdown(f"""
+                <div style='padding: 8px; border-left: 4px solid {color}; background: rgba(128,128,128,0.1); margin-bottom: 8px; border-radius: 4px;'>
+                    <strong style='color: {color};'>{symbol}</strong><br/>
+                    <small>{alert.get('label', '')}</small><br/>
+                    <small style='opacity: 0.7;'>{alert.get('timestamp', '')[11:16]} | Spot: ₹{alert.get('spot_price', 0):.1f}</small>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with st.sidebar.expander("Show Latest Full Message"):
+                st.code(alerts[-1].get("message", ""), language="text")
+        else:
+            st.sidebar.caption("No recent STFlip alerts.")
+    except Exception:
+        st.sidebar.caption("Failed to load alerts.")
+else:
+    st.sidebar.caption("No recent STFlip alerts.")
 
 # Global Auto-Refresh
 refresh_rate = st.sidebar.select_slider(

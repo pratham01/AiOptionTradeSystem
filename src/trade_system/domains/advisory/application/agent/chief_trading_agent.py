@@ -39,6 +39,7 @@ from trade_system.domains.trading.infrastructure.brokers.legacy import (
 )
 from trade_system.shared.config import Settings
 from trade_system.shared.notifications.telegram import TelegramNotifier
+from trade_system.shared import TradeSuggestion
 
 LOGGER = logging.getLogger(__name__)
 
@@ -414,6 +415,42 @@ class ChiefTradingAgent:
 
         scorecard["qualified_signal"] = None
         return None, scorecard
+
+    def evaluate_candidate_suggestion(
+        self,
+        suggestion: TradeSuggestion,
+        force_evaluation: bool = False
+    ) -> Tuple[Optional[ChiefTradeSignal], Dict[str, Any]]:
+        """
+        Master evaluation pipeline that takes a pre-qualified candidate from
+        the Swarm (via TradeOrchestrator), validates it against the 5-pillar
+        institutional framework, checks budget, and either approves or vetoes it.
+        """
+        # Rather than scanning the universe, we evaluate the specific symbol
+        # proposed by the Analyst Agents (e.g. NiftyOptionBuyerAgent or FoStockSuggesterAgent).
+        
+        LOGGER.info(f"Chief Agent evaluating candidate: {suggestion.symbol} ({suggestion.direction.value})")
+        signal, scorecard = self.evaluate_symbol(
+            symbol=suggestion.symbol,
+            force_evaluation=force_evaluation
+        )
+        
+        # If Chief approves, we align the returned signal's direction 
+        # with the suggestion's direction (or reject if conflicting).
+        if signal:
+            is_bullish_sugg = suggestion.direction.value in ["BUY", "BUY_CALL"]
+            is_bullish_signal = signal.direction == "BUY_CALL"
+            
+            if is_bullish_sugg != is_bullish_signal:
+                LOGGER.warning(f"Chief Agent rejected {suggestion.symbol} due to directional conflict with Swarm.")
+                scorecard["veto_reasons"].append("Directional conflict between Analyst and Chief.")
+                return None, scorecard
+                
+            LOGGER.info(f"Chief Agent APPROVED candidate: {suggestion.symbol} (Score: {signal.confluence_score}/100)")
+        else:
+            LOGGER.info(f"Chief Agent REJECTED candidate: {suggestion.symbol}. Reason: {scorecard.get('reason', 'Low confluence or Veto')}")
+            
+        return signal, scorecard
 
     def _compute_confluence(
         self,

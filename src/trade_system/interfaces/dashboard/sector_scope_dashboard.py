@@ -812,6 +812,12 @@ else:
         else:
             pchange_df = pchange_db
 
+        # Append live snapshot to capture stocks breaking into top 10 mid-candle
+        live_time = pd.Timestamp.now().round("min")
+        live_pchanges = merged_df.set_index('symbol')['pChange']
+        aligned_live = live_pchanges.reindex(pchange_df.columns).fillna(0.0)
+        pchange_df.loc[live_time] = aligned_live
+
         # Rank across ALL symbols at each timestamp
         gainer_ranks = pchange_df.rank(axis=1, ascending=False, method='min')
         loser_ranks  = pchange_df.rank(axis=1, ascending=True,  method='min')
@@ -1253,7 +1259,8 @@ else:
         "⚡ Intraday Edge Finder",
         "🔎 Sector Drill-Down",
         "📦 Volatility Squeeze",
-        "📅 Off-Market Cycle Analyst"
+        "📅 Off-Market Cycle Analyst",
+        "🧪 Shadow Intelligence (Beta)"
     ]
     active_tab = st.segmented_control(
         "Navigation",
@@ -2036,7 +2043,7 @@ else:
                         overbought_threshold=pcr_ob_thresh,
                         oversold_threshold=pcr_os_thresh,
                     )
-                    st.session_state["pcr_scan_results"] = pcr_screener.scan_universe_pcr(max_symbols=120, max_workers=8)
+                    st.session_state["pcr_scan_results"] = pcr_screener.scan_universe_pcr(max_workers=8)
                 except Exception as pcr_exc:
                     st.error(f"Failed to scan F&O option chains: {pcr_exc}")
                     st.session_state["pcr_scan_results"] = {"overbought": [], "oversold": [], "neutral": [], "all": []}
@@ -3492,6 +3499,76 @@ else:
                         
             except Exception as ex_cycle:
                 st.warning(f"Error computing cycles: {ex_cycle}")
+
+    # ---- TAB 11: Shadow Intelligence ----
+    elif active_tab == "🧪 Shadow Intelligence (Beta)":
+        st.markdown("### 🧪 Shadow Intelligence (Beta)")
+        st.markdown("This tab displays 8-layer multi-timeframe signals computed entirely from the database without any API calls. It runs in shadow mode and logs data to `data/shadow_intelligence`.")
+        
+        # Look for the latest JSON file in data/shadow_intelligence for today
+        import json
+        import os
+        from datetime import date
+        from pathlib import Path
+        
+        today_str = date.today().strftime("%Y-%m-%d")
+        shadow_dir = Path("data/shadow_intelligence") / today_str
+        
+        if shadow_dir.exists() and shadow_dir.is_dir():
+            files = list(shadow_dir.glob("intel_*.json"))
+            if files:
+                latest_file = max(files, key=os.path.getmtime)
+                try:
+                    with open(latest_file, "r") as f:
+                        data = json.load(f)
+                    
+                    st.info(f"Loaded latest shadow run from: **{latest_file.name}** (Generated: {data.get('timestamp')})")
+                    
+                    summary = data.get("summary", {})
+                    cols = st.columns(4)
+                    cols[0].metric("🔥 Strong Momentum", summary.get("strong_momentum", 0))
+                    cols[1].metric("⚡ Building", summary.get("building", 0))
+                    cols[2].metric("⚠️ Reversal Warning", summary.get("reversal_warning", 0))
+                    cols[3].metric("💤 No Edge", summary.get("no_edge", 0))
+                    
+                    results = data.get("results", [])
+                    if results:
+                        st.markdown("#### 📡 Intelligence Signals")
+                        
+                        # Create a flat table
+                        table_data = []
+                        for r in results:
+                            row = {
+                                "Symbol": r["symbol"].replace("NSE:", "").replace("-EQ", ""),
+                                "Verdict": r["composite_verdict"],
+                                "Score": f"{r['composite_score']:.0f}/100",
+                            }
+                            # Add layers dynamically
+                            for layer in r["layers"]:
+                                row[layer["name"]] = layer["label"]
+                            table_data.append(row)
+                        
+                        df_intel = pd.DataFrame(table_data)
+                        
+                        # Highlight rows based on verdict
+                        def highlight_verdict(row):
+                            if "STRONG" in row["Verdict"]:
+                                return ["background-color: rgba(34, 197, 94, 0.2)"] * len(row)
+                            elif "REVERSAL" in row["Verdict"]:
+                                return ["background-color: rgba(239, 68, 68, 0.2)"] * len(row)
+                            return [""] * len(row)
+                            
+                        st.dataframe(
+                            df_intel.style.apply(highlight_verdict, axis=1),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                except Exception as e:
+                    st.error(f"Failed to load shadow intelligence data: {e}")
+            else:
+                st.warning("No shadow intelligence runs found for today.")
+        else:
+            st.warning(f"Shadow intelligence directory not found for {today_str}. Make sure the runner script is active.")
 
     # Footer
     st.caption("🧭 Sector Scope | AI Trade System V2 | Data refreshes every 60s")

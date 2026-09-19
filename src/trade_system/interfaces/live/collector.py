@@ -2712,6 +2712,37 @@ class LiveMarketDataService:
             ce_strikes,
             pe_strikes,
         )
+
+        # Save to local JSON for dashboard integration
+        try:
+            import json
+            import os
+            alert_file = self.settings.data_dir / "stflip_alerts.json"
+            alerts = []
+            if alert_file.exists():
+                with open(alert_file, "r") as f:
+                    try:
+                        alerts = json.load(f)
+                    except json.JSONDecodeError:
+                        pass
+            
+            alerts.append({
+                "timestamp": timestamp.isoformat(),
+                "symbol": symbol,
+                "direction": direction,
+                "label": label,
+                "spot_price": spot_price,
+                "message": msg
+            })
+            
+            # Keep only the last 20 alerts
+            alerts = alerts[-20:]
+            
+            with open(alert_file, "w") as f:
+                json.dump(alerts, f, indent=4)
+        except Exception as e:
+            LOGGER.error(f"Failed to save STFlip alert to JSON: {e}")
+
         return True
 
     def _build_option_chain_strike_lines(

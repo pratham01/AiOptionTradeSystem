@@ -31,6 +31,7 @@ from trade_system.domains.advisory.application.agent.fo_stock_suggester_agent im
 from trade_system.domains.advisory.application.agent.setup_validator_agent import SetupValidatorAgent
 from trade_system.domains.advisory.application.agent.conviction_fuser_agent import ConvictionFuserAgent
 from trade_system.domains.advisory.application.agent.skill_registry import SkillRegistry
+from trade_system.domains.advisory.application.agent.chief_trading_agent import ChiefTradingAgent
 from trade_system.domains.analysis.application.evolution.trade_logger import TradeLogger
 from trade_system.shared.config import Settings
 from trade_system.shared.ports.repository import LogRepository
@@ -59,6 +60,7 @@ class TradeOrchestrator:
         fo_suggester_agent: FoStockSuggesterAgent,
         setup_validator: SetupValidatorAgent,
         fuser_agent: ConvictionFuserAgent | None = None,
+        chief_agent: ChiefTradingAgent | None = None,
         event_bus: EventBus | None = None,
         max_trades_per_day: int = 2,
     ) -> None:
@@ -77,6 +79,7 @@ class TradeOrchestrator:
         self.fo_suggester_agent = fo_suggester_agent
         self.setup_validator = setup_validator
         self.fuser_agent = fuser_agent or ConvictionFuserAgent(max_trades_per_day=3)
+        self.chief_agent = chief_agent or ChiefTradingAgent()
         self.trade_logger = trade_logger
         self.skill_registry = skill_registry
 
@@ -166,8 +169,21 @@ class TradeOrchestrator:
                 )
                 
                 if suggestion:
-                    self._thought("NiftyOptionBuyerAgent", f"APPROVED: {suggestion.direction.value} setup found for {symbol} at {current_price}", action="APPROVED", symbol=symbol)
-                    plan.add_nifty(suggestion)
+                    self._thought("NiftyOptionBuyerAgent", f"CANDIDATE: {suggestion.direction.value} setup found for {symbol} at {current_price}. Handing to Chief.", action="EVALUATING", symbol=symbol)
+                    
+                    # Pass to Master Agent (Chief)
+                    self._thought("ChiefTradingAgent", f"Evaluating {symbol} candidate from Swarm...", action="EVALUATING", symbol=symbol)
+                    signal, scorecard = self.chief_agent.evaluate_candidate_suggestion(suggestion)
+                    
+                    if signal:
+                        self._thought("ChiefTradingAgent", f"APPROVED: {symbol} passed institutional veto. Score: {signal.confluence_score}/100", action="APPROVED", symbol=symbol)
+                        # Inject Chief's scoring into the suggestion tags
+                        suggestion.tags.append(f"chief_score_{signal.confluence_score}")
+                        suggestion.tags.append(f"chief_thesis: {signal.primary_thesis}")
+                        plan.add_nifty(suggestion)
+                    else:
+                        reason = scorecard.get("veto_reasons", ["Failed Confluence"])[-1]
+                        self._thought("ChiefTradingAgent", f"VETOED: {symbol} rejected by Chief. Reason: {reason}", action="REJECTED", symbol=symbol)
                 else:
                     self._thought("NiftyOptionBuyerAgent", f"No high-conviction setups found for {symbol}.", action="REJECTED")
 
@@ -199,8 +215,19 @@ class TradeOrchestrator:
                 if "next_day_watchlist" in sugg.tags:
                     self._thought("SwarmBrain", f"🔭 WATCHLIST HIT: {sugg.symbol} confirmed by real-time intraday data.", action="CONFLUENCE", symbol=sugg.symbol)
                 
-                plan.add_fo(sugg)
-                self._thought("SetupValidatorAgent", f"APPROVED: {sugg.symbol} added to plan.", action="APPROVED", symbol=sugg.symbol)
+                # Pass to Master Agent (Chief)
+                self._thought("ChiefTradingAgent", f"Evaluating {sugg.symbol} candidate from Swarm...", action="EVALUATING", symbol=sugg.symbol)
+                signal, scorecard = self.chief_agent.evaluate_candidate_suggestion(sugg)
+                
+                if signal:
+                    self._thought("ChiefTradingAgent", f"APPROVED: {sugg.symbol} passed institutional veto. Score: {signal.confluence_score}/100", action="APPROVED", symbol=sugg.symbol)
+                    sugg.tags.append(f"chief_score_{signal.confluence_score}")
+                    sugg.tags.append(f"chief_thesis: {signal.primary_thesis}")
+                    plan.add_fo(sugg)
+                    self._thought("SetupValidatorAgent", f"APPROVED: {sugg.symbol} added to plan.", action="APPROVED", symbol=sugg.symbol)
+                else:
+                    reason = scorecard.get("veto_reasons", ["Failed Confluence"])[-1] if scorecard.get("veto_reasons") else "Low Score"
+                    self._thought("ChiefTradingAgent", f"VETOED: {sugg.symbol} rejected by Chief. Reason: {reason}", action="REJECTED", symbol=sugg.symbol)
 
         # --- Step 5: Conviction Fuser & Discipline Enforcement ---
         self._thought("ConvictionFuserAgent", "Applying macro-confluence scoring and culling weak setups...", action="EVALUATING")
