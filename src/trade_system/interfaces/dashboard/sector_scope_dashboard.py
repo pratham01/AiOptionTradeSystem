@@ -1295,515 +1295,11 @@ else:
         st.session_state['selected_sector_drill'] = target_sector
 
     # -------------------------------------------------------------
-    # 3. SECTOR ROTATION RRG & ADVANCE/DECLINE SECTOR BOARD
-    # -------------------------------------------------------------
-    SECTOR_ICONS = {
-        "AUTO": "🚗",
-        "BANKING": "🏦",
-        "CAPITAL_GOODS": "⚙️",
-        "CEMENT": "🧱",
-        "CHEMICALS": "🧪",
-        "COMMODITIES": "📦",
-        "CONSUMER": "🛒",
-        "CONSR DURBL": "🛋️",
-        "DEFENCE": "🛡️",
-        "ENERGY": "⚡",
-        "FINANCE": "💳",
-        "FINNIFTY": "🏛️",
-        "FMCG": "🥫",
-        "HEALTHCARE": "🩺",
-        "INFRA": "🏗️",
-        "IT": "💻",
-        "MEDIA": "📺",
-        "METALS": "⛏️",
-        "MIDCAP": "📈",
-        "OIL_GAS": "⛽",
-        "PHARMA": "💊",
-        "POWER": "🔌",
-        "PSU BANK": "🏛️",
-        "PVT BANK": "🏦",
-        "REALTY": "🏢",
-        "SERVICES": "📦",
-        "TELECOM": "📡",
-    }
-
-    # Compute RRG and Breadth Data
-    today_15m_all = df[df['timestamp'].dt.date == target_date].copy() if not df.empty else pd.DataFrame()
-    rrg_map = SectorRRGEngine.compute_rrg(
-        today_15m_df=today_15m_all,
-        merged_closes=merged_closes,
-        tail_bars=4
-    )
-
-    adv_sectors = int((sector_perf['pChange'] > 0).sum())
-    dec_sectors = int((sector_perf['pChange'] < 0).sum())
-    tot_sectors = len(sector_perf)
-    adv_pct_sectors = round(adv_sectors / max(tot_sectors, 1) * 100)
-
-    adv_stocks = int((merged_closes['pChange'] > 0).sum())
-    dec_stocks = int((merged_closes['pChange'] < 0).sum())
-    tot_stocks = len(merged_closes)
-    breadth_ratio = round(adv_stocks / max(dec_stocks, 1), 2)
-    adv_stocks_pct = round(adv_stocks / max(tot_stocks, 1) * 100)
-    dec_stocks_pct = max(0, 100 - adv_stocks_pct)
-    bench_ret = rrg_map[list(rrg_map.keys())[0]].benchmark_return if rrg_map else 0.0
-
-    q_lead = len([p for p in rrg_map.values() if p.quadrant == "LEADING"])
-    q_weak = len([p for p in rrg_map.values() if p.quadrant == "WEAKENING"])
-    q_lag = len([p for p in rrg_map.values() if p.quadrant == "LAGGING"])
-    q_imp = len([p for p in rrg_map.values() if p.quadrant == "IMPROVING"])
-
-    # 1. Macro Market Breadth Pulse Strip (Executive Terminal Ribbon)
-    macro_ribbon_html = f"""<div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.92) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 10px; padding: 10px 16px; margin-bottom: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);">
-<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
-    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-        <span style="font-size: 0.95rem; font-weight: 800; color: #f8fafc; letter-spacing: 0.5px;">⚖️ MACRO BREADTH PULSE</span>
-        <span style="background: rgba(34, 197, 94, 0.18); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); font-size: 0.78rem; padding: 2px 10px; border-radius: 6px; font-weight: 700;">
-            {adv_sectors}/{tot_sectors} Advancing Sectors ({adv_pct_sectors}%)
-        </span>
-        <span style="background: rgba(239, 68, 68, 0.18); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); font-size: 0.78rem; padding: 2px 10px; border-radius: 6px; font-weight: 700;">
-            {dec_sectors} Declining Sectors
-        </span>
-    </div>
-    <div style="display: flex; align-items: center; gap: 14px; font-size: 0.82rem; color: #cbd5e1; flex-wrap: wrap;">
-        <span>F&O Stocks: <b style="color: #4ade80;">{adv_stocks} 🟢</b> / <b style="color: #f87171;">{dec_stocks} 🔴</b> (A/D Ratio: <b style="color: {'#4ade80' if breadth_ratio >= 1.0 else '#f87171'};">{breadth_ratio}</b>)</span>
-        <span style="color: #475569;">|</span>
-        <span>Nifty 50: <b style="color: {'#4ade80' if bench_ret >= 0 else '#f87171'};">{bench_ret:+.2f}%</b></span>
-        <span style="color: #475569;">|</span>
-        <span style="display: inline-flex; gap: 6px;">
-            <span style="background: rgba(34, 197, 94, 0.16); color: #4ade80; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🟢 {q_lead} Lead</span>
-            <span style="background: rgba(234, 179, 8, 0.16); color: #facc15; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🟡 {q_weak} Weak</span>
-            <span style="background: rgba(239, 68, 68, 0.16); color: #f87171; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🔴 {q_lag} Lag</span>
-            <span style="background: rgba(59, 130, 246, 0.16); color: #60a5fa; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🔵 {q_imp} Imp</span>
-        </span>
-    </div>
-</div>
-<div style="margin-top: 8px; height: 5px; width: 100%; background: #1e293b; border-radius: 9999px; display: flex; overflow: hidden;">
-    <div style="width: {adv_stocks_pct}%; background: linear-gradient(90deg, #10b981 0%, #22c55e 100%);"></div>
-    <div style="width: {dec_stocks_pct}%; background: linear-gradient(90deg, #ef4444 0%, #f43f5e 100%);"></div>
-</div>
-</div>"""
-    st.markdown(macro_ribbon_html, unsafe_allow_html=True)
-
-    col_board, col_stocks = st.columns([1.18, 0.82], gap="medium")
-
-    with col_board:
-        sb_h_c1, sb_h_c2 = st.columns([1.0, 2.0])
-        with sb_h_c1:
-            st.markdown("""<div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
-<span style="font-size:1.05rem; font-weight:800; color:#f8fafc;">🏆 SECTOR MATRIX</span>
-<span style="background:rgba(124,58,237,0.25); color:#a78bfa; border:1px solid rgba(124,58,237,0.45); font-size:0.68rem; padding:2px 7px; border-radius:4px; font-weight:800;">INSTITUTIONAL</span>
-</div>""", unsafe_allow_html=True)
-        with sb_h_c2:
-            sb_view = st.segmented_control(
-                "Sector View Mode",
-                options=[
-                    "🧭 StockMojo RRG",
-                    "📊 Advance / Decline Matrix",
-                    "🎴 Sector Deck"
-                ],
-                default="🧭 StockMojo RRG",
-                key="sb_view_mode_toggle",
-                label_visibility="collapsed"
-            ) or "🧭 StockMojo RRG"
-
-        # Active sector drill selector
-        active_idx = options.index(st.session_state.get('selected_sector_drill', options[0])) if st.session_state.get('selected_sector_drill') in options else 0
-
-        def _sec_label(s):
-            pt = rrg_map.get(s)
-            p_chg = sector_perf.set_index('sector').loc[s, 'pChange'] if s in sector_perf['sector'].values else 0.0
-            icon = SECTOR_ICONS.get(s, "📊")
-            quad_emoji = SectorRRGEngine.QUADRANT_CONFIG.get(pt.quadrant, {}).get("emoji", "") if pt else ""
-            quad_txt = pt.quadrant.title() if pt else ""
-            return f"{icon} {s} ({p_chg:+.2f}% | {quad_emoji} {quad_txt})"
-
-        active_sector = st.selectbox(
-            "Select Active Sector to Inspect",
-            options=options,
-            index=active_idx,
-            format_func=_sec_label,
-            key="sb_active_sector_picker",
-            label_visibility="collapsed"
-        )
-        st.session_state['selected_sector_drill'] = active_sector
-
-        # ---------------------------------------------------------
-        # VIEW 1: STOCKMOJO RELATIVE ROTATION GRAPH (RRG) + 4-QUADRANT DECK
-        # ---------------------------------------------------------
-        if sb_view == "🧭 StockMojo RRG":
-            fig_rrg = go.Figure()
-
-            r_vals = [p.rs_ratio for p in rrg_map.values()]
-            m_vals = [p.rs_momentum for p in rrg_map.values()]
-            for p in rrg_map.values():
-                for r_tail, m_tail in p.history_tail:
-                    r_vals.append(r_tail)
-                    m_vals.append(m_tail)
-
-            r_min, r_max = min(r_vals + [97.0]), max(r_vals + [103.0])
-            m_min, m_max = min(m_vals + [97.0]), max(m_vals + [103.0])
-            pad_r = max((r_max - r_min) * 0.12, 1.0)
-            pad_m = max((m_max - m_min) * 0.12, 1.0)
-            x_range = [r_min - pad_r, r_max + pad_r]
-            y_range = [m_min - pad_m, m_max + pad_m]
-
-            # Shaded Quadrants (StockMojo style pastel fills)
-            # Top-Right: Leading (Green)
-            fig_rrg.add_shape(type="rect", x0=100, y0=100, x1=x_range[1], y1=y_range[1],
-                              fillcolor="rgba(34, 197, 94, 0.08)", line_width=0, layer="below")
-            # Bottom-Right: Weakening (Amber)
-            fig_rrg.add_shape(type="rect", x0=100, y0=y_range[0], x1=x_range[1], y1=100,
-                              fillcolor="rgba(234, 179, 8, 0.08)", line_width=0, layer="below")
-            # Bottom-Left: Lagging (Red)
-            fig_rrg.add_shape(type="rect", x0=x_range[0], y0=y_range[0], x1=100, y1=100,
-                              fillcolor="rgba(239, 68, 68, 0.08)", line_width=0, layer="below")
-            # Top-Left: Improving (Blue)
-            fig_rrg.add_shape(type="rect", x0=x_range[0], y0=100, x1=100, y1=y_range[1],
-                              fillcolor="rgba(59, 130, 246, 0.08)", line_width=0, layer="below")
-
-            # Crosshairs at (100, 100)
-            fig_rrg.add_hline(y=100, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
-            fig_rrg.add_vline(x=100, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
-
-            # Institutional Quadrant Watermark Annotations
-            fig_rrg.add_annotation(x=x_range[1] - pad_r * 0.45, y=y_range[1] - pad_m * 0.35,
-                                   text="<b>LEADING</b>", showarrow=False, font=dict(color="rgba(34, 197, 94, 0.7)", size=13))
-            fig_rrg.add_annotation(x=x_range[1] - pad_r * 0.45, y=y_range[0] + pad_m * 0.35,
-                                   text="<b>WEAKENING</b>", showarrow=False, font=dict(color="rgba(234, 179, 8, 0.7)", size=13))
-            fig_rrg.add_annotation(x=x_range[0] + pad_r * 0.45, y=y_range[0] + pad_m * 0.35,
-                                   text="<b>LAGGING</b>", showarrow=False, font=dict(color="rgba(239, 68, 68, 0.7)", size=13))
-            fig_rrg.add_annotation(x=x_range[0] + pad_r * 0.45, y=y_range[1] - pad_m * 0.35,
-                                   text="<b>IMPROVING</b>", showarrow=False, font=dict(color="rgba(59, 130, 246, 0.7)", size=13))
-
-            colors = {
-                "LEADING": "#22c55e",
-                "WEAKENING": "#eab308",
-                "LAGGING": "#ef4444",
-                "IMPROVING": "#38bdf8"
-            }
-
-            for sec, pt in rrg_map.items():
-                c = colors.get(pt.quadrant, "#cbd5e1")
-                # Trajectory spline tail with progressive markers
-                if len(pt.history_tail) > 1:
-                    t_xs = [t[0] for t in pt.history_tail]
-                    t_ys = [t[1] for t in pt.history_tail]
-                    fig_rrg.add_trace(go.Scatter(
-                        x=t_xs, y=t_ys,
-                        mode="lines+markers",
-                        line=dict(color=c, width=1.8, shape="spline"),
-                        marker=dict(color=c, size=[4, 6, 8][:len(t_xs)], opacity=0.7),
-                        hoverinfo="skip",
-                        showlegend=False
-                    ))
-
-                # Primary Point Marker
-                is_active = (sec == active_sector)
-                m_size = 15 if is_active else 10
-                fig_rrg.add_trace(go.Scatter(
-                    x=[pt.rs_ratio],
-                    y=[pt.rs_momentum],
-                    mode="markers+text",
-                    name=sec,
-                    text=[f"<b>{sec}</b>"],
-                    textposition="top center",
-                    textfont=dict(size=9.5, color="#ffffff" if is_active else "#cbd5e1"),
-                    marker=dict(
-                        size=m_size,
-                        color=c,
-                        line=dict(color="#ffffff" if is_active else "rgba(255,255,255,0.45)", width=2.5 if is_active else 1.2)
-                    ),
-                    hovertemplate=(
-                        f"<b>{sec}</b> ({pt.quadrant})<br>"
-                        f"RS-Ratio: %{{x:.2f}}<br>"
-                        f"RS-Momentum: %{{y:.2f}}<br>"
-                        f"Return: {pt.sector_return:+.2f}%<br>"
-                        f"Advances: {pt.advances} | Declines: {pt.declines}<br>"
-                        f"Avg Vol Surge: {pt.avg_vol_surge:.1f}x<extra></extra>"
-                    ),
-                    showlegend=False
-                ))
-
-            fig_rrg.update_layout(
-                xaxis=dict(title="<b>RS-Ratio</b> (Strength vs Nifty 50)", range=x_range, zeroline=False, gridcolor="rgba(255,255,255,0.06)"),
-                yaxis=dict(title="<b>RS-Momentum</b> (Velocity)", range=y_range, zeroline=False, gridcolor="rgba(255,255,255,0.06)"),
-                template="plotly_dark",
-                height=390,
-                margin=dict(l=35, r=35, t=25, b=35)
-            )
-            st.plotly_chart(fig_rrg, use_container_width=True, key="sector_rrg_chart")
-
-            # -----------------------------------------------------
-            # StockMojo-Style 4-Quadrant Sector Deck (1:1 Column Deck)
-            # -----------------------------------------------------
-            q_cols = st.columns(4)
-            quadrant_configs = [
-                ("IMPROVING", "🔵 Improving", "#38bdf8", "rgba(56, 189, 248, 0.12)", q_cols[0]),
-                ("LEADING", "🟢 Leading", "#22c55e", "rgba(34, 197, 94, 0.12)", q_cols[1]),
-                ("WEAKENING", "🟡 Weakening", "#eab308", "rgba(234, 179, 8, 0.12)", q_cols[2]),
-                ("LAGGING", "🔴 Lagging", "#ef4444", "rgba(239, 68, 68, 0.12)", q_cols[3]),
-            ]
-
-            for q_key, q_title, q_border_c, q_bg_c, q_col in quadrant_configs:
-                with q_col:
-                    sec_in_quad = [s for s, p in rrg_map.items() if p.quadrant == q_key]
-                    sec_in_quad = sorted(sec_in_quad, key=lambda s: rrg_map[s].sector_return, reverse=True)
-                    
-                    st.markdown(f"""<div style="background:{q_bg_c}; border-top: 3px solid {q_border_c}; border-radius: 6px 6px 0 0; padding: 6px 8px; text-align: center; margin-bottom: 6px;">
-<span style="color:{q_border_c}; font-weight:800; font-size:0.80rem; letter-spacing:0.3px;">{q_title} ({len(sec_in_quad)})</span>
-</div>""", unsafe_allow_html=True)
-                    
-                    if not sec_in_quad:
-                        st.markdown("<div style='text-align:center; color:#64748b; font-size:0.75rem; padding:8px;'>None</div>", unsafe_allow_html=True)
-                    else:
-                        for s in sec_in_quad:
-                            p = rrg_map[s]
-                            icon = SECTOR_ICONS.get(s, "📊")
-                            is_act = (s == active_sector)
-                            act_style = "border: 1px solid #a78bfa; background: rgba(124, 58, 237, 0.25);" if is_act else "border: 1px solid rgba(148, 163, 184, 0.15); background: rgba(15, 23, 42, 0.65);"
-                            ret_c = "#4ade80" if p.sector_return >= 0 else "#f87171"
-                            
-                            st.markdown(f"""<div style="{act_style} border-radius: 6px; padding: 5px 8px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
-<span style="font-size: 0.78rem; font-weight: 700; color: #f8fafc;">{icon} {s}</span>
-<div style="display:flex; align-items:center; gap:5px;">
-    <span style="color: {ret_c}; font-weight: 700; font-size: 0.75rem;">{p.sector_return:+.1f}%</span>
-    <span style="color: #94a3b8; font-size: 0.68rem;">{p.advances}🟢/{p.declines}🔴</span>
-</div>
-</div>""", unsafe_allow_html=True)
-
-        # ---------------------------------------------------------
-        # VIEW 2: INSTITUTIONAL ADVANCE / DECLINE LEADERBOARD MATRIX
-        # ---------------------------------------------------------
-        elif sb_view == "📊 Advance / Decline Matrix":
-            st.markdown("""<div style="font-size:0.82rem; color:#94a3b8; margin-bottom:8px;">
-Ranked leaderboard tracking sector advance/decline breadth, relative strength regime, and leading driver stocks.
-</div>""", unsafe_allow_html=True)
-
-            ad_rows = []
-            for _, r in sector_perf.iterrows():
-                s = r['sector']
-                pt = rrg_map.get(s)
-                icon = SECTOR_ICONS.get(s, "📊")
-                sec_stocks = merged_closes[merged_closes['sector'] == s]
-                
-                # Driver stock (highest gainer) and Drag stock (worst decliner)
-                top_driver = "—"
-                drag_stock = "—"
-                if not sec_stocks.empty:
-                    top_stk = sec_stocks.sort_values('pChange', ascending=False).iloc[0]
-                    bot_stk = sec_stocks.sort_values('pChange', ascending=True).iloc[0]
-                    top_driver = f"{top_stk['symbol'].replace('NSE:', '').replace('-EQ', '')} ({top_stk['pChange']:+.1f}%)"
-                    drag_stock = f"{bot_stk['symbol'].replace('NSE:', '').replace('-EQ', '')} ({bot_stk['pChange']:+.1f}%)"
-
-                adv = pt.advances if pt else 0
-                dec = pt.declines if pt else 0
-                tot = pt.total_stocks if pt else 1
-                adv_pct = pt.advance_pct if pt else 50.0
-                quad = pt.quadrant if pt else "NEUTRAL"
-                rs_rat = pt.rs_ratio if pt else 100.0
-                rs_mom = pt.rs_momentum if pt else 100.0
-                avg_vs = pt.avg_vol_surge if pt else 1.0
-
-                q_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(quad, {"emoji": "⚪"})
-
-                ad_rows.append({
-                    "Sector": f"{icon} {s}",
-                    "Change %": r['pChange'],
-                    "RRG Quadrant": f"{q_cfg.get('emoji', '')} {quad.title()}",
-                    "RS Ratio": rs_rat,
-                    "RS Mom": rs_mom,
-                    "Breadth": f"{adv}🟢 / {dec}🔴 ({adv_pct:.0f}%)",
-                    "Top Driver": top_driver,
-                    "Drag Stock": drag_stock,
-                    "Vol Surge": f"{avg_vs:.1f}x"
-                })
-
-            ad_df = pd.DataFrame(ad_rows)
-            st.dataframe(
-                ad_df.style.format({
-                    "Change %": "{:+.2f}%",
-                    "RS Ratio": "{:.1f}",
-                    "RS Mom": "{:.1f}",
-                }).map(
-                    lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
-                    subset=["Change %"]
-                ),
-                use_container_width=True,
-                hide_index=True,
-                height=480
-            )
-
-        # ---------------------------------------------------------
-        # VIEW 3: COMPACT SECTOR CARDS DECK
-        # ---------------------------------------------------------
-        else:
-            cols_per_row = 2
-            sector_rows_list = list(sector_perf.iterrows())
-            n_sec_cards = len(sector_rows_list)
-
-            for row_start in range(0, n_sec_cards, cols_per_row):
-                cols = st.columns(cols_per_row)
-                for col_idx in range(cols_per_row):
-                    item_idx = row_start + col_idx
-                    if item_idx >= n_sec_cards:
-                        break
-                    _, row = sector_rows_list[item_idx]
-                    sec = row['sector']
-                    with cols[col_idx]:
-                        pt = rrg_map.get(sec)
-                        adv = pt.advances if pt else 0
-                        dec = pt.declines if pt else 0
-                        adv_pct = pt.advance_pct if pt else 50.0
-                        dec_pct = max(0.0, 100.0 - adv_pct)
-                        avg_vs = pt.avg_vol_surge if pt else 1.0
-                        quad = pt.quadrant if pt else "NEUTRAL"
-                        rs_rat = pt.rs_ratio if pt else 100.0
-
-                        is_positive = row['pChange'] >= 0
-                        ret_color = "#4ade80" if is_positive else "#f87171"
-                        ret_bg = "rgba(34, 197, 94, 0.15)" if is_positive else "rgba(239, 68, 68, 0.15)"
-                        arrow = "▲" if is_positive else "▼"
-                        icon = SECTOR_ICONS.get(sec, "📊")
-
-                        rrg_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(quad, {
-                            "badge_color": "#94a3b8", "bg_color": "rgba(148,163,184,0.1)", "emoji": "⚪"
-                        })
-
-                        is_active = (sec == active_sector)
-                        active_border = "border: 2px solid #8b5cf6; box-shadow: 0 0 12px rgba(139, 92, 246, 0.35);" if is_active else "border: 1px solid rgba(148, 163, 184, 0.15);"
-                        active_badge = "<span style='background:#7c3aed; color:#ffffff; font-size:0.62rem; padding:1px 5px; border-radius:3px; font-weight:800; margin-left:4px;'>ACTIVE</span>" if is_active else ""
-
-                        st.markdown(f"""<div style="background: rgba(15, 23, 42, 0.72); {active_border} border-left: 4px solid {ret_color}; border-radius: 8px; padding: 8px 10px; margin-bottom: 7px; transition: all 0.2s;">
-<div style="display:flex; justify-content:space-between; align-items:center;">
-    <span style="font-weight:700; font-size:0.88rem; color:#f8fafc;">{icon} {sec} {active_badge}</span>
-    <span style="font-weight:700; font-size:0.80rem; color:{ret_color}; background:{ret_bg}; padding:1px 6px; border-radius:4px;">
-        {arrow} {row['pChange']:+.2f}%
-    </span>
-</div>
-<div style="margin-top: 5px;">
-    <div style="display:flex; justify-content:space-between; font-size:0.70rem; color:#94a3b8; margin-bottom:2px;">
-        <span>Breadth: <b style="color:#4ade80;">{adv}🟢</b> / <b style="color:#f87171;">{dec}🔴</b></span>
-        <span style="color:#cbd5e1; font-weight:600;">{adv_pct:.0f}% Adv</span>
-    </div>
-    <div style="height:4px; width:100%; background:#1e293b; border-radius:2px; display:flex; overflow:hidden;">
-        <div style="width:{adv_pct}%; background:#22c55e;"></div>
-        <div style="width:{dec_pct}%; background:#ef4444;"></div>
-    </div>
-</div>
-<div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px; font-size:0.70rem;">
-    <span style="background:{rrg_cfg['bg_color']}; color:{rrg_cfg['badge_color']}; border:1px solid {rrg_cfg['badge_color']}44; padding:1px 5px; border-radius:4px; font-weight:700;">
-        {rrg_cfg['emoji']} {quad.title()} (RS:{rs_rat:.1f})
-    </span>
-    <span style="color:#94a3b8;">Vol: <b style="color:#e2e8f0;">{avg_vs:.1f}x</b></span>
-</div>
-</div>""", unsafe_allow_html=True)
-
-    with col_stocks:
-        if active_sector:
-            sector_stocks_df = merged_closes[merged_closes['sector'] == active_sector].copy()
-            if not sector_stocks_df.empty:
-                sector_stocks_df['Symbol'] = sector_stocks_df['symbol'].str.replace("NSE:", "").str.replace("-EQ", "")
-                sector_stocks_df = sector_stocks_df.sort_values('pChange', ascending=False)
-                sector_avg = sector_stocks_df['pChange'].mean()
-                
-                pt_active = rrg_map.get(active_sector)
-                quad_badge = ""
-                if pt_active:
-                    q_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(pt_active.quadrant, {})
-                    quad_badge = f"<span style='background:{q_cfg.get('bg_color', '')}; color:{q_cfg.get('badge_color', '')}; border:1px solid {q_cfg.get('badge_color', '')}44; font-size:0.68rem; padding:1px 6px; border-radius:4px; font-weight:700;'>{q_cfg.get('emoji', '')} {pt_active.quadrant.title()}</span>"
-
-                sec_icon = SECTOR_ICONS.get(active_sector, "📋")
-                
-                # Dedicated HTML header (zero leading indentation to prevent markdown raw code leakage)
-                header_html = f"""<div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.88) 0%, rgba(30, 41, 59, 0.75) 100%); border: 1px solid rgba(124, 58, 237, 0.4); border-radius: 8px; padding: 9px 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap:wrap; gap:6px;">
-<div style="display: flex; align-items: center; gap: 8px;">
-    <span style="font-size: 0.96rem; font-weight: 800; color: #f8fafc;">{sec_icon} {active_sector} Stocks</span>
-    <span style="background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-size: 0.70rem; padding: 1px 7px; border-radius: 9999px; font-weight: 700;">{len(sector_stocks_df)} Stocks</span>
-    {quad_badge}
-</div>
-<span style="color: {'#22c55e' if sector_avg >= 0 else '#ef4444'}; font-weight: 800; font-size: 0.88rem;">Avg: {sector_avg:+.2f}%</span>
-</div>"""
-                st.markdown(header_html, unsafe_allow_html=True)
-                
-                # Build vol surge & indicator labels for drill-down
-                def _vol_surge_label(vs):
-                    if vs >= 1.5:
-                        return f"🟢 {vs:.1f}x"
-                    elif vs >= 1.0:
-                        return f"🟡 {vs:.1f}x"
-                    elif vs > 0:
-                        return f"🔴 {vs:.1f}x"
-                    return "⚪ N/A"
-
-                sector_stocks_df['Vol Surge'] = sector_stocks_df['vol_surge'].apply(_vol_surge_label)
-
-                # Map Daily RSI & vs VWAP indicators
-                rsi_labels = []
-                vwap_labels = []
-                for sym in sector_stocks_df['symbol']:
-                    clean_s = sym.replace("NSE:", "").replace("-EQ", "")
-                    ind = _indicators.get(sym) or _indicators.get(clean_s) or {}
-                    rsi_v = ind.get('daily_rsi')
-                    vs_vwap = ind.get('vs_vwap')
-                    if rsi_v is None:
-                        rsi_labels.append("—")
-                    elif rsi_v >= 70:
-                        rsi_labels.append(f"🔥 {rsi_v:.0f}")
-                    elif rsi_v <= 30:
-                        rsi_labels.append(f"🧊 {rsi_v:.0f}")
-                    else:
-                        rsi_labels.append(f"{rsi_v:.0f}")
-
-                    if vs_vwap is None:
-                        vwap_labels.append("—")
-                    elif vs_vwap > 0:
-                        vwap_labels.append(f"↑ {vs_vwap:+.1f}%")
-                    else:
-                        vwap_labels.append(f"↓ {vs_vwap:+.1f}%")
-
-                sector_stocks_df['Daily RSI'] = rsi_labels
-                sector_stocks_df['vs VWAP'] = vwap_labels
-
-                # Instant constituent search filter
-                q_sym = st.text_input(
-                    "Filter stocks",
-                    placeholder=f"Filter {len(sector_stocks_df)} {active_sector} stocks...",
-                    key="sec_drill_sym_filter",
-                    label_visibility="collapsed"
-                )
-
-                filtered_sec_df = sector_stocks_df
-                if q_sym:
-                    filtered_sec_df = filtered_sec_df[filtered_sec_df['Symbol'].str.contains(q_sym.upper(), case=False)]
-
-                display_df = filtered_sec_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
-                display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
-                
-                st.dataframe(
-                    display_df.style.format({
-                        "LTP (₹)": "₹{:.2f}",
-                        "Change %": "{:+.2f}%"
-                    }).map(
-                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
-                        subset=["Change %"]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=450
-                )
-            else:
-                st.info(f"No stock data available for {active_sector}.")
-        else:
-            st.info("Select a sector from the board on the left.")
-
-    st.markdown('<div class="glow-divider"></div>', unsafe_allow_html=True)
-
-    # -------------------------------------------------------------
-    # 4. TABBED PANELS — Lazy-Loaded Broker Tabs (Instant Loading)
+    # TABBED PANELS — Lazy-Loaded Broker Tabs (Instant Loading)
     # -------------------------------------------------------------
     tab_options = [
         "📊 Gainers & Losers",
+        "🏆 Sector Matrix & RRG",
         "⚡ Intraday Flow & Reversals (Vol + OI)",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
@@ -2008,6 +1504,508 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                 )
             else:
                 st.info("No stocks currently within 0.75% of intraday breakdown level.")
+
+    # ---- TAB 2: Sector Matrix & RRG ----
+    elif active_tab == "🏆 Sector Matrix & RRG":
+        SECTOR_ICONS = {
+            "AUTO": "🚗",
+            "BANKING": "🏦",
+            "CAPITAL_GOODS": "⚙️",
+            "CEMENT": "🧱",
+            "CHEMICALS": "🧪",
+            "COMMODITIES": "📦",
+            "CONSUMER": "🛒",
+            "CONSR DURBL": "🛋️",
+            "DEFENCE": "🛡️",
+            "ENERGY": "⚡",
+            "FINANCE": "💳",
+            "FINNIFTY": "🏛️",
+            "FMCG": "🥫",
+            "HEALTHCARE": "🩺",
+            "INFRA": "🏗️",
+            "IT": "💻",
+            "MEDIA": "📺",
+            "METALS": "⛏️",
+            "MIDCAP": "📈",
+            "OIL_GAS": "⛽",
+            "PHARMA": "💊",
+            "POWER": "🔌",
+            "PSU BANK": "🏛️",
+            "PVT BANK": "🏦",
+            "REALTY": "🏢",
+            "SERVICES": "📦",
+            "TELECOM": "📡",
+        }
+
+        # Compute RRG and Breadth Data
+        today_15m_all = df[df['timestamp'].dt.date == target_date].copy() if not df.empty else pd.DataFrame()
+        rrg_map = SectorRRGEngine.compute_rrg(
+            today_15m_df=today_15m_all,
+            merged_closes=merged_closes,
+            tail_bars=4
+        )
+
+        adv_sectors = int((sector_perf['pChange'] > 0).sum())
+        dec_sectors = int((sector_perf['pChange'] < 0).sum())
+        tot_sectors = len(sector_perf)
+        adv_pct_sectors = round(adv_sectors / max(tot_sectors, 1) * 100)
+
+        adv_stocks = int((merged_closes['pChange'] > 0).sum())
+        dec_stocks = int((merged_closes['pChange'] < 0).sum())
+        tot_stocks = len(merged_closes)
+        breadth_ratio = round(adv_stocks / max(dec_stocks, 1), 2)
+        adv_stocks_pct = round(adv_stocks / max(tot_stocks, 1) * 100)
+        dec_stocks_pct = max(0, 100 - adv_stocks_pct)
+        bench_ret = rrg_map[list(rrg_map.keys())[0]].benchmark_return if rrg_map else 0.0
+
+        q_lead = len([p for p in rrg_map.values() if p.quadrant == "LEADING"])
+        q_weak = len([p for p in rrg_map.values() if p.quadrant == "WEAKENING"])
+        q_lag = len([p for p in rrg_map.values() if p.quadrant == "LAGGING"])
+        q_imp = len([p for p in rrg_map.values() if p.quadrant == "IMPROVING"])
+
+        # 1. Macro Market Breadth Pulse Strip (Executive Terminal Ribbon)
+        macro_ribbon_html = f"""<div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.92) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 10px; padding: 10px 16px; margin-bottom: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);">
+<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <span style="font-size: 0.95rem; font-weight: 800; color: #f8fafc; letter-spacing: 0.5px;">⚖️ MACRO BREADTH PULSE</span>
+        <span style="background: rgba(34, 197, 94, 0.18); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); font-size: 0.78rem; padding: 2px 10px; border-radius: 6px; font-weight: 700;">
+            {adv_sectors}/{tot_sectors} Advancing Sectors ({adv_pct_sectors}%)
+        </span>
+        <span style="background: rgba(239, 68, 68, 0.18); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); font-size: 0.78rem; padding: 2px 10px; border-radius: 6px; font-weight: 700;">
+            {dec_sectors} Declining Sectors
+        </span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 14px; font-size: 0.82rem; color: #cbd5e1; flex-wrap: wrap;">
+        <span>F&O Stocks: <b style="color: #4ade80;">{adv_stocks} 🟢</b> / <b style="color: #f87171;">{dec_stocks} 🔴</b> (A/D Ratio: <b style="color: {'#4ade80' if breadth_ratio >= 1.0 else '#f87171'};">{breadth_ratio}</b>)</span>
+        <span style="color: #475569;">|</span>
+        <span>Nifty 50: <b style="color: {'#4ade80' if bench_ret >= 0 else '#f87171'};">{bench_ret:+.2f}%</b></span>
+        <span style="color: #475569;">|</span>
+        <span style="display: inline-flex; gap: 6px;">
+            <span style="background: rgba(34, 197, 94, 0.16); color: #4ade80; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🟢 {q_lead} Lead</span>
+            <span style="background: rgba(234, 179, 8, 0.16); color: #facc15; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🟡 {q_weak} Weak</span>
+            <span style="background: rgba(239, 68, 68, 0.16); color: #f87171; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🔴 {q_lag} Lag</span>
+            <span style="background: rgba(59, 130, 246, 0.16); color: #60a5fa; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🔵 {q_imp} Imp</span>
+        </span>
+    </div>
+</div>
+<div style="margin-top: 8px; height: 5px; width: 100%; background: #1e293b; border-radius: 9999px; display: flex; overflow: hidden;">
+    <div style="width: {adv_stocks_pct}%; background: linear-gradient(90deg, #10b981 0%, #22c55e 100%);"></div>
+    <div style="width: {dec_stocks_pct}%; background: linear-gradient(90deg, #ef4444 0%, #f43f5e 100%);"></div>
+</div>
+</div>"""
+        st.markdown(macro_ribbon_html, unsafe_allow_html=True)
+
+        col_board, col_stocks = st.columns([1.18, 0.82], gap="medium")
+
+        with col_board:
+            sb_h_c1, sb_h_c2 = st.columns([1.0, 2.0])
+            with sb_h_c1:
+                st.markdown("""<div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+<span style="font-size:1.05rem; font-weight:800; color:#f8fafc;">🏆 SECTOR MATRIX</span>
+<span style="background:rgba(124,58,237,0.25); color:#a78bfa; border:1px solid rgba(124,58,237,0.45); font-size:0.68rem; padding:2px 7px; border-radius:4px; font-weight:800;">INSTITUTIONAL</span>
+</div>""", unsafe_allow_html=True)
+            with sb_h_c2:
+                sb_view = st.segmented_control(
+                    "Sector View Mode",
+                    options=[
+                        "🧭 StockMojo RRG",
+                        "📊 Advance / Decline Matrix",
+                        "🎴 Sector Deck"
+                    ],
+                    default="🧭 StockMojo RRG",
+                    key="sb_view_mode_toggle",
+                    label_visibility="collapsed"
+                ) or "🧭 StockMojo RRG"
+
+            # Active sector drill selector
+            active_idx = options.index(st.session_state.get('selected_sector_drill', options[0])) if st.session_state.get('selected_sector_drill') in options else 0
+
+            def _sec_label(s):
+                pt = rrg_map.get(s)
+                p_chg = sector_perf.set_index('sector').loc[s, 'pChange'] if s in sector_perf['sector'].values else 0.0
+                icon = SECTOR_ICONS.get(s, "📊")
+                quad_emoji = SectorRRGEngine.QUADRANT_CONFIG.get(pt.quadrant, {}).get("emoji", "") if pt else ""
+                quad_txt = pt.quadrant.title() if pt else ""
+                return f"{icon} {s} ({p_chg:+.2f}% | {quad_emoji} {quad_txt})"
+
+            active_sector = st.selectbox(
+                "Select Active Sector to Inspect",
+                options=options,
+                index=active_idx,
+                format_func=_sec_label,
+                key="sb_active_sector_picker",
+                label_visibility="collapsed"
+            )
+            st.session_state['selected_sector_drill'] = active_sector
+
+            # ---------------------------------------------------------
+            # VIEW 1: STOCKMOJO RELATIVE ROTATION GRAPH (RRG) + 4-QUADRANT DECK
+            # ---------------------------------------------------------
+            if sb_view == "🧭 StockMojo RRG":
+                fig_rrg = go.Figure()
+
+                r_vals = [p.rs_ratio for p in rrg_map.values()]
+                m_vals = [p.rs_momentum for p in rrg_map.values()]
+                for p in rrg_map.values():
+                    for r_tail, m_tail in p.history_tail:
+                        r_vals.append(r_tail)
+                        m_vals.append(m_tail)
+
+                r_min, r_max = min(r_vals + [97.0]), max(r_vals + [103.0])
+                m_min, m_max = min(m_vals + [97.0]), max(m_vals + [103.0])
+                pad_r = max((r_max - r_min) * 0.12, 1.0)
+                pad_m = max((m_max - m_min) * 0.12, 1.0)
+                x_range = [r_min - pad_r, r_max + pad_r]
+                y_range = [m_min - pad_m, m_max + pad_m]
+
+                # Shaded Quadrants (StockMojo style pastel fills)
+                # Top-Right: Leading (Green)
+                fig_rrg.add_shape(type="rect", x0=100, y0=100, x1=x_range[1], y1=y_range[1],
+                                  fillcolor="rgba(34, 197, 94, 0.08)", line_width=0, layer="below")
+                # Bottom-Right: Weakening (Amber)
+                fig_rrg.add_shape(type="rect", x0=100, y0=y_range[0], x1=x_range[1], y1=100,
+                                  fillcolor="rgba(234, 179, 8, 0.08)", line_width=0, layer="below")
+                # Bottom-Left: Lagging (Red)
+                fig_rrg.add_shape(type="rect", x0=x_range[0], y0=y_range[0], x1=100, y1=100,
+                                  fillcolor="rgba(239, 68, 68, 0.08)", line_width=0, layer="below")
+                # Top-Left: Improving (Blue)
+                fig_rrg.add_shape(type="rect", x0=x_range[0], y0=100, x1=100, y1=y_range[1],
+                                  fillcolor="rgba(59, 130, 246, 0.08)", line_width=0, layer="below")
+
+                # Crosshairs at (100, 100)
+                fig_rrg.add_hline(y=100, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
+                fig_rrg.add_vline(x=100, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
+
+                # Institutional Quadrant Watermark Annotations
+                fig_rrg.add_annotation(x=x_range[1] - pad_r * 0.45, y=y_range[1] - pad_m * 0.35,
+                                       text="<b>LEADING</b>", showarrow=False, font=dict(color="rgba(34, 197, 94, 0.7)", size=13))
+                fig_rrg.add_annotation(x=x_range[1] - pad_r * 0.45, y=y_range[0] + pad_m * 0.35,
+                                       text="<b>WEAKENING</b>", showarrow=False, font=dict(color="rgba(234, 179, 8, 0.7)", size=13))
+                fig_rrg.add_annotation(x=x_range[0] + pad_r * 0.45, y=y_range[0] + pad_m * 0.35,
+                                       text="<b>LAGGING</b>", showarrow=False, font=dict(color="rgba(239, 68, 68, 0.7)", size=13))
+                fig_rrg.add_annotation(x=x_range[0] + pad_r * 0.45, y=y_range[1] - pad_m * 0.35,
+                                       text="<b>IMPROVING</b>", showarrow=False, font=dict(color="rgba(59, 130, 246, 0.7)", size=13))
+
+                colors = {
+                    "LEADING": "#22c55e",
+                    "WEAKENING": "#eab308",
+                    "LAGGING": "#ef4444",
+                    "IMPROVING": "#38bdf8"
+                }
+
+                for sec, pt in rrg_map.items():
+                    c = colors.get(pt.quadrant, "#cbd5e1")
+                    # Trajectory spline tail with progressive markers
+                    if len(pt.history_tail) > 1:
+                        t_xs = [t[0] for t in pt.history_tail]
+                        t_ys = [t[1] for t in pt.history_tail]
+                        fig_rrg.add_trace(go.Scatter(
+                            x=t_xs, y=t_ys,
+                            mode="lines+markers",
+                            line=dict(color=c, width=1.8, shape="spline"),
+                            marker=dict(color=c, size=[4, 6, 8][:len(t_xs)], opacity=0.7),
+                            hoverinfo="skip",
+                            showlegend=False
+                        ))
+
+                    # Primary Point Marker
+                    is_active = (sec == active_sector)
+                    m_size = 15 if is_active else 10
+                    fig_rrg.add_trace(go.Scatter(
+                        x=[pt.rs_ratio],
+                        y=[pt.rs_momentum],
+                        mode="markers+text",
+                        name=sec,
+                        text=[f"<b>{sec}</b>"],
+                        textposition="top center",
+                        textfont=dict(size=9.5, color="#ffffff" if is_active else "#cbd5e1"),
+                        marker=dict(
+                            size=m_size,
+                            color=c,
+                            line=dict(color="#ffffff" if is_active else "rgba(255,255,255,0.45)", width=2.5 if is_active else 1.2)
+                        ),
+                        hovertemplate=(
+                            f"<b>{sec}</b> ({pt.quadrant})<br>"
+                            f"RS-Ratio: %{{x:.2f}}<br>"
+                            f"RS-Momentum: %{{y:.2f}}<br>"
+                            f"Return: {pt.sector_return:+.2f}%<br>"
+                            f"Advances: {pt.advances} | Declines: {pt.declines}<br>"
+                            f"Avg Vol Surge: {pt.avg_vol_surge:.1f}x<extra></extra>"
+                        ),
+                        showlegend=False
+                    ))
+
+                fig_rrg.update_layout(
+                    xaxis=dict(title="<b>RS-Ratio</b> (Strength vs Nifty 50)", range=x_range, zeroline=False, gridcolor="rgba(255,255,255,0.06)"),
+                    yaxis=dict(title="<b>RS-Momentum</b> (Velocity)", range=y_range, zeroline=False, gridcolor="rgba(255,255,255,0.06)"),
+                    template="plotly_dark",
+                    height=390,
+                    margin=dict(l=35, r=35, t=25, b=35)
+                )
+                st.plotly_chart(fig_rrg, use_container_width=True, key="sector_rrg_chart")
+
+                # -----------------------------------------------------
+                # StockMojo-Style 4-Quadrant Sector Deck (1:1 Column Deck)
+                # -----------------------------------------------------
+                q_cols = st.columns(4)
+                quadrant_configs = [
+                    ("IMPROVING", "🔵 Improving", "#38bdf8", "rgba(56, 189, 248, 0.12)", q_cols[0]),
+                    ("LEADING", "🟢 Leading", "#22c55e", "rgba(34, 197, 94, 0.12)", q_cols[1]),
+                    ("WEAKENING", "🟡 Weakening", "#eab308", "rgba(234, 179, 8, 0.12)", q_cols[2]),
+                    ("LAGGING", "🔴 Lagging", "#ef4444", "rgba(239, 68, 68, 0.12)", q_cols[3]),
+                ]
+
+                for q_key, q_title, q_border_c, q_bg_c, q_col in quadrant_configs:
+                    with q_col:
+                        sec_in_quad = [s for s, p in rrg_map.items() if p.quadrant == q_key]
+                        sec_in_quad = sorted(sec_in_quad, key=lambda s: rrg_map[s].sector_return, reverse=True)
+                        
+                        st.markdown(f"""<div style="background:{q_bg_c}; border-top: 3px solid {q_border_c}; border-radius: 6px 6px 0 0; padding: 6px 8px; text-align: center; margin-bottom: 6px;">
+<span style="color:{q_border_c}; font-weight:800; font-size:0.80rem; letter-spacing:0.3px;">{q_title} ({len(sec_in_quad)})</span>
+</div>""", unsafe_allow_html=True)
+                        
+                        if not sec_in_quad:
+                            st.markdown("<div style='text-align:center; color:#64748b; font-size:0.75rem; padding:8px;'>None</div>", unsafe_allow_html=True)
+                        else:
+                            for s in sec_in_quad:
+                                p = rrg_map[s]
+                                icon = SECTOR_ICONS.get(s, "📊")
+                                is_act = (s == active_sector)
+                                act_style = "border: 1px solid #a78bfa; background: rgba(124, 58, 237, 0.25);" if is_act else "border: 1px solid rgba(148, 163, 184, 0.15); background: rgba(15, 23, 42, 0.65);"
+                                ret_c = "#4ade80" if p.sector_return >= 0 else "#f87171"
+                                
+                                st.markdown(f"""<div style="{act_style} border-radius: 6px; padding: 5px 8px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+<span style="font-size: 0.78rem; font-weight: 700; color: #f8fafc;">{icon} {s}</span>
+<div style="display:flex; align-items:center; gap:5px;">
+    <span style="color: {ret_c}; font-weight: 700; font-size: 0.75rem;">{p.sector_return:+.1f}%</span>
+    <span style="color: #94a3b8; font-size: 0.68rem;">{p.advances}🟢/{p.declines}🔴</span>
+</div>
+</div>""", unsafe_allow_html=True)
+
+            # ---------------------------------------------------------
+            # VIEW 2: INSTITUTIONAL ADVANCE / DECLINE LEADERBOARD MATRIX
+            # ---------------------------------------------------------
+            elif sb_view == "📊 Advance / Decline Matrix":
+                st.markdown("""<div style="font-size:0.82rem; color:#94a3b8; margin-bottom:8px;">
+Ranked leaderboard tracking sector advance/decline breadth, relative strength regime, and leading driver stocks.
+</div>""", unsafe_allow_html=True)
+
+                ad_rows = []
+                for _, r in sector_perf.iterrows():
+                    s = r['sector']
+                    pt = rrg_map.get(s)
+                    icon = SECTOR_ICONS.get(s, "📊")
+                    sec_stocks = merged_closes[merged_closes['sector'] == s]
+                    
+                    # Driver stock (highest gainer) and Drag stock (worst decliner)
+                    top_driver = "—"
+                    drag_stock = "—"
+                    if not sec_stocks.empty:
+                        top_stk = sec_stocks.sort_values('pChange', ascending=False).iloc[0]
+                        bot_stk = sec_stocks.sort_values('pChange', ascending=True).iloc[0]
+                        top_driver = f"{top_stk['symbol'].replace('NSE:', '').replace('-EQ', '')} ({top_stk['pChange']:+.1f}%)"
+                        drag_stock = f"{bot_stk['symbol'].replace('NSE:', '').replace('-EQ', '')} ({bot_stk['pChange']:+.1f}%)"
+
+                    adv = pt.advances if pt else 0
+                    dec = pt.declines if pt else 0
+                    tot = pt.total_stocks if pt else 1
+                    adv_pct = pt.advance_pct if pt else 50.0
+                    quad = pt.quadrant if pt else "NEUTRAL"
+                    rs_rat = pt.rs_ratio if pt else 100.0
+                    rs_mom = pt.rs_momentum if pt else 100.0
+                    avg_vs = pt.avg_vol_surge if pt else 1.0
+
+                    q_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(quad, {"emoji": "⚪"})
+
+                    ad_rows.append({
+                        "Sector": f"{icon} {s}",
+                        "Change %": r['pChange'],
+                        "RRG Quadrant": f"{q_cfg.get('emoji', '')} {quad.title()}",
+                        "RS Ratio": rs_rat,
+                        "RS Mom": rs_mom,
+                        "Breadth": f"{adv}🟢 / {dec}🔴 ({adv_pct:.0f}%)",
+                        "Top Driver": top_driver,
+                        "Drag Stock": drag_stock,
+                        "Vol Surge": f"{avg_vs:.1f}x"
+                    })
+
+                ad_df = pd.DataFrame(ad_rows)
+                st.dataframe(
+                    ad_df.style.format({
+                        "Change %": "{:+.2f}%",
+                        "RS Ratio": "{:.1f}",
+                        "RS Mom": "{:.1f}",
+                    }).map(
+                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
+                        subset=["Change %"]
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=480
+                )
+
+            # ---------------------------------------------------------
+            # VIEW 3: COMPACT SECTOR CARDS DECK
+            # ---------------------------------------------------------
+            else:
+                cols_per_row = 2
+                sector_rows_list = list(sector_perf.iterrows())
+                n_sec_cards = len(sector_rows_list)
+
+                for row_start in range(0, n_sec_cards, cols_per_row):
+                    cols = st.columns(cols_per_row)
+                    for col_idx in range(cols_per_row):
+                        item_idx = row_start + col_idx
+                        if item_idx >= n_sec_cards:
+                            break
+                        _, row = sector_rows_list[item_idx]
+                        sec = row['sector']
+                        with cols[col_idx]:
+                            pt = rrg_map.get(sec)
+                            adv = pt.advances if pt else 0
+                            dec = pt.declines if pt else 0
+                            adv_pct = pt.advance_pct if pt else 50.0
+                            dec_pct = max(0.0, 100.0 - adv_pct)
+                            avg_vs = pt.avg_vol_surge if pt else 1.0
+                            quad = pt.quadrant if pt else "NEUTRAL"
+                            rs_rat = pt.rs_ratio if pt else 100.0
+
+                            is_positive = row['pChange'] >= 0
+                            ret_color = "#4ade80" if is_positive else "#f87171"
+                            ret_bg = "rgba(34, 197, 94, 0.15)" if is_positive else "rgba(239, 68, 68, 0.15)"
+                            arrow = "▲" if is_positive else "▼"
+                            icon = SECTOR_ICONS.get(sec, "📊")
+
+                            rrg_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(quad, {
+                                "badge_color": "#94a3b8", "bg_color": "rgba(148,163,184,0.1)", "emoji": "⚪"
+                            })
+
+                            is_active = (sec == active_sector)
+                            active_border = "border: 2px solid #8b5cf6; box-shadow: 0 0 12px rgba(139, 92, 246, 0.35);" if is_active else "border: 1px solid rgba(148, 163, 184, 0.15);"
+                            active_badge = "<span style='background:#7c3aed; color:#ffffff; font-size:0.62rem; padding:1px 5px; border-radius:3px; font-weight:800; margin-left:4px;'>ACTIVE</span>" if is_active else ""
+
+                            st.markdown(f"""<div style="background: rgba(15, 23, 42, 0.72); {active_border} border-left: 4px solid {ret_color}; border-radius: 8px; padding: 8px 10px; margin-bottom: 7px; transition: all 0.2s;">
+<div style="display:flex; justify-content:space-between; align-items:center;">
+    <span style="font-weight:700; font-size:0.88rem; color:#f8fafc;">{icon} {sec} {active_badge}</span>
+    <span style="font-weight:700; font-size:0.80rem; color:{ret_color}; background:{ret_bg}; padding:1px 6px; border-radius:4px;">
+        {arrow} {row['pChange']:+.2f}%
+    </span>
+</div>
+<div style="margin-top: 5px;">
+    <div style="display:flex; justify-content:space-between; font-size:0.70rem; color:#94a3b8; margin-bottom:2px;">
+        <span>Breadth: <b style="color:#4ade80;">{adv}🟢</b> / <b style="color:#f87171;">{dec}🔴</b></span>
+        <span style="color:#cbd5e1; font-weight:600;">{adv_pct:.0f}% Adv</span>
+    </div>
+    <div style="height:4px; width:100%; background:#1e293b; border-radius:2px; display:flex; overflow:hidden;">
+        <div style="width:{adv_pct}%; background:#22c55e;"></div>
+        <div style="width:{dec_pct}%; background:#ef4444;"></div>
+    </div>
+</div>
+<div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px; font-size:0.70rem;">
+    <span style="background:{rrg_cfg['bg_color']}; color:{rrg_cfg['badge_color']}; border:1px solid {rrg_cfg['badge_color']}44; padding:1px 5px; border-radius:4px; font-weight:700;">
+        {rrg_cfg['emoji']} {quad.title()} (RS:{rs_rat:.1f})
+    </span>
+    <span style="color:#94a3b8;">Vol: <b style="color:#e2e8f0;">{avg_vs:.1f}x</b></span>
+</div>
+</div>""", unsafe_allow_html=True)
+
+        with col_stocks:
+            if active_sector:
+                sector_stocks_df = merged_closes[merged_closes['sector'] == active_sector].copy()
+                if not sector_stocks_df.empty:
+                    sector_stocks_df['Symbol'] = sector_stocks_df['symbol'].str.replace("NSE:", "").str.replace("-EQ", "")
+                    sector_stocks_df = sector_stocks_df.sort_values('pChange', ascending=False)
+                    sector_avg = sector_stocks_df['pChange'].mean()
+                    
+                    pt_active = rrg_map.get(active_sector)
+                    quad_badge = ""
+                    if pt_active:
+                        q_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(pt_active.quadrant, {})
+                        quad_badge = f"<span style='background:{q_cfg.get('bg_color', '')}; color:{q_cfg.get('badge_color', '')}; border:1px solid {q_cfg.get('badge_color', '')}44; font-size:0.68rem; padding:1px 6px; border-radius:4px; font-weight:700;'>{q_cfg.get('emoji', '')} {pt_active.quadrant.title()}</span>"
+
+                    sec_icon = SECTOR_ICONS.get(active_sector, "📋")
+                    
+                    # Dedicated HTML header (zero leading indentation to prevent markdown raw code leakage)
+                    header_html = f"""<div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.88) 0%, rgba(30, 41, 59, 0.75) 100%); border: 1px solid rgba(124, 58, 237, 0.4); border-radius: 8px; padding: 9px 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap:wrap; gap:6px;">
+<div style="display: flex; align-items: center; gap: 8px;">
+    <span style="font-size: 0.96rem; font-weight: 800; color: #f8fafc;">{sec_icon} {active_sector} Stocks</span>
+    <span style="background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-size: 0.70rem; padding: 1px 7px; border-radius: 9999px; font-weight: 700;">{len(sector_stocks_df)} Stocks</span>
+    {quad_badge}
+</div>
+<span style="color: {'#22c55e' if sector_avg >= 0 else '#ef4444'}; font-weight: 800; font-size: 0.88rem;">Avg: {sector_avg:+.2f}%</span>
+</div>"""
+                    st.markdown(header_html, unsafe_allow_html=True)
+                    
+                    # Build vol surge & indicator labels for drill-down
+                    def _vol_surge_label(vs):
+                        if vs >= 1.5:
+                            return f"🟢 {vs:.1f}x"
+                        elif vs >= 1.0:
+                            return f"🟡 {vs:.1f}x"
+                        elif vs > 0:
+                            return f"🔴 {vs:.1f}x"
+                        return "⚪ N/A"
+
+                    sector_stocks_df['Vol Surge'] = sector_stocks_df['vol_surge'].apply(_vol_surge_label)
+
+                    # Map Daily RSI & vs VWAP indicators
+                    rsi_labels = []
+                    vwap_labels = []
+                    for sym in sector_stocks_df['symbol']:
+                        clean_s = sym.replace("NSE:", "").replace("-EQ", "")
+                        ind = _indicators.get(sym) or _indicators.get(clean_s) or {}
+                        rsi_v = ind.get('daily_rsi')
+                        vs_vwap = ind.get('vs_vwap')
+                        if rsi_v is None:
+                            rsi_labels.append("—")
+                        elif rsi_v >= 70:
+                            rsi_labels.append(f"🔥 {rsi_v:.0f}")
+                        elif rsi_v <= 30:
+                            rsi_labels.append(f"🧊 {rsi_v:.0f}")
+                        else:
+                            rsi_labels.append(f"{rsi_v:.0f}")
+
+                        if vs_vwap is None:
+                            vwap_labels.append("—")
+                        elif vs_vwap > 0:
+                            vwap_labels.append(f"↑ {vs_vwap:+.1f}%")
+                        else:
+                            vwap_labels.append(f"↓ {vs_vwap:+.1f}%")
+
+                    sector_stocks_df['Daily RSI'] = rsi_labels
+                    sector_stocks_df['vs VWAP'] = vwap_labels
+
+                    # Instant constituent search filter
+                    q_sym = st.text_input(
+                        "Filter stocks",
+                        placeholder=f"Filter {len(sector_stocks_df)} {active_sector} stocks...",
+                        key="sec_drill_sym_filter",
+                        label_visibility="collapsed"
+                    )
+
+                    filtered_sec_df = sector_stocks_df
+                    if q_sym:
+                        filtered_sec_df = filtered_sec_df[filtered_sec_df['Symbol'].str.contains(q_sym.upper(), case=False)]
+
+                    display_df = filtered_sec_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
+                    display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
+                    
+                    st.dataframe(
+                        display_df.style.format({
+                            "LTP (₹)": "₹{:.2f}",
+                            "Change %": "{:+.2f}%"
+                        }).map(
+                            lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
+                            subset=["Change %"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        height=450
+                    )
+                else:
+                    st.info(f"No stock data available for {active_sector}.")
+            else:
+                st.info("Select a sector from the board on the left.")
 
     # ---- TAB: Intraday Smart Flow & Reversal Radar ----
     elif active_tab == "⚡ Intraday Flow & Reversals (Vol + OI)":
