@@ -113,6 +113,7 @@ class IndexPipeline:
         ict_ms: dict | None = None,
         # Option chain snapshot access (latest analysis keyed by short_sym)
         oc_snapshot_getter=None,
+        autonomous_router=None,
     ) -> None:
         self.settings = settings
         self.alert_agent = alert_agent
@@ -134,6 +135,10 @@ class IndexPipeline:
         self.ict_liq = ict_liq or {}
         self.ict_ms = ict_ms or {}
         self._oc_snapshot_getter = oc_snapshot_getter
+        self.autonomous_router = autonomous_router
+
+        from trade_system.domains.strategy.application.strategies.smc_strategy import SmartMoneyConceptStrategy
+        self.smc_strategy = SmartMoneyConceptStrategy()
 
         # Institutional Intraday Reversal Strategy
         self.institutional_reversal = InstitutionalIntradayReversalStrategy(
@@ -292,6 +297,10 @@ class IndexPipeline:
             if self.settings.enable_intraday_reversal_alerts:
                 self._check_institutional_reversal(symbol, adjusted)
 
+            # Institutional SMC Autonomous Execution Check
+            if self.autonomous_router and not adjusted.empty and len(adjusted) >= 20:
+                self._check_smc_autonomous_execution(symbol, adjusted)
+
         # --- ICT Stream ---
         if self.settings.enable_experimental_ict_stream:
             self._run_ict_stream(symbol, adjusted)
@@ -351,6 +360,20 @@ class IndexPipeline:
         # Full ICT logic remains in collector.py during transition period.
         # This stub allows the pipeline to be used without breaking anything.
         pass
+
+    def _check_smc_autonomous_execution(self, symbol: str, adjusted: pd.DataFrame) -> None:
+        """Evaluates Photon SMC & JeaFx Supply/Demand setup and auto-routes if realigned."""
+        try:
+            clean_sym = symbol.replace("NSE:", "").replace("BSE:", "").replace("-INDEX", "").replace("-EQ", "")
+            oc_analysis = None
+            if self._oc_snapshot_getter:
+                _, oc_analysis = self._oc_snapshot_getter(clean_sym)
+            setup = self.smc_strategy.analyze_symbol(symbol, adjusted, oc_analysis=oc_analysis)
+            if setup and setup.confluence_score >= 70.0 and setup.is_internal_realigned:
+                current_price = float(adjusted.iloc[-1]["close"])
+                self.autonomous_router.route_smc_setup(setup, current_price=current_price)
+        except Exception as exc:
+            LOGGER.debug("SMC autonomous check error for %s: %s", symbol, exc)
 
     # ------------------------------------------------------------------
     # SuperTrend trend-change detection

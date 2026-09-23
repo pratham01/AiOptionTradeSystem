@@ -49,7 +49,7 @@ class ExecutionEngine:
             return None
             
         # 3. Prepare Order Payload
-        side = 1 if signal.direction == TradeDirection.LONG else -1
+        side = 1 if signal.direction in (TradeDirection.LONG, TradeDirection.CALL) or getattr(signal.direction, "value", "") in ("LONG", "CALL", "BUY") else -1
         order_type = 2 # 2 = Limit Order (1 = Market, but limit is safer. Can parameterize)
         product_type = "INTRADAY" # Fyers specific
         

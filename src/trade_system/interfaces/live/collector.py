@@ -66,6 +66,7 @@ from trade_system.domains.strategy.application.indicators.support_resistance_cha
 from trade_system.domains.trading.application.execution.execution_engine import ExecutionEngine
 from trade_system.domains.trading.application.execution.position_manager import PositionManager
 from trade_system.domains.advisory.application.agent.risk_manager import RiskManager
+from trade_system.domains.trading.application.execution.autonomous_router import AutonomousExecutionRouter
 
 # ---------------------------------------------------------------------------
 # NEW: Modular DDD pipeline imports (Phase 6+7 wiring)
@@ -173,6 +174,12 @@ class LiveMarketDataService:
         self.risk_manager = RiskManager()
         self.execution_engine = ExecutionEngine(broker=self.broker, risk_manager=self.risk_manager, settings=self.settings)
         self.position_manager = PositionManager(broker=self.broker, risk_manager=self.risk_manager, settings=self.settings)
+        self.autonomous_router = AutonomousExecutionRouter(
+            execution_engine=self.execution_engine,
+            position_manager=self.position_manager,
+            risk_manager=self.risk_manager,
+            settings=self.settings,
+        )
         
         # Inject execution components into agents that support autonomous trading
         self.alert_agent.set_execution_engine(self.execution_engine, self.position_manager)
@@ -307,6 +314,7 @@ class LiveMarketDataService:
                 self.oc_analyzers[clean_sym].get_option_chain_df() if clean_sym in self.oc_analyzers else self.prev_oc_df.get(clean_sym),
                 self.latest_oc_analysis.get(clean_sym)
             ),
+            autonomous_router=self.autonomous_router,
         )
 
         # FoPipeline: lightweight analytics for F&O equity symbols
@@ -2333,6 +2341,21 @@ class LiveMarketDataService:
                         breakouts = self.breakout_screener.scan_for_breakouts(use_sector_filter=False)
                         if breakouts:
                             self._send_breakout_alerts(breakouts)
+                            if self.autonomous_router:
+                                for b in breakouts:
+                                    if "-INDEX" in b.get("symbol", ""):
+                                        direction = 1 if b.get("direction", "LONG") == "LONG" else -1
+                                        curr_price = float(b.get("price", 0))
+                                        range_low = float(b.get("range_low", curr_price * 0.995))
+                                        range_high = float(b.get("range_high", curr_price * 1.005))
+                                        self.autonomous_router.route_midday_breakout(
+                                            symbol=b["symbol"],
+                                            direction=direction,
+                                            current_price=curr_price,
+                                            coil_range_low=range_low,
+                                            coil_range_high=range_high,
+                                            notes=f"Breakout {b.get('direction')} via Midday Screener",
+                                        )
                 except Exception as e:
                     LOGGER.error(f"Error in breakout screener loop: {e}")
                 
@@ -2506,6 +2529,12 @@ class LiveMarketDataService:
             except Exception as _oc_err:
                 LOGGER.warning("OptionChainMonitorAgent processing failed for %s: %s", full_symbol, _oc_err)
 
+            # 4. StockMojo Smart OI Divergence Engine & Autonomous Execution
+            try:
+                self._check_smart_oi_divergence_execution(full_symbol, symbol, spot_price, now)
+            except Exception as _div_err:
+                LOGGER.debug("Smart OI divergence check failed for %s: %s", full_symbol, _div_err)
+
             # Expiry Max Pain Alert at 2 PM (14:00 IST)
             if symbol in ["NIFTY50", "SENSEX"]:
                 today_str = now.strftime("%d-%m-%Y")
@@ -2528,6 +2557,52 @@ class LiveMarketDataService:
                                 self.expiry_max_pain_sent[symbol] = now.date()
             
         self.prev_oc_df[symbol] = current_df.copy()
+
+    def _check_smart_oi_divergence_execution(
+        self, full_symbol: str, short_symbol: str, spot_price: Optional[float], now: datetime
+    ) -> None:
+        if not self.autonomous_router or not spot_price or spot_price <= 0:
+            return
+
+        from trade_system.domains.analysis.application.analysis.stockmojo_smart_oi_engine import (
+            aggregate_option_snapshots,
+            resample_intraday_data,
+            detect_price_volume_divergences,
+        )
+        from trade_system.domains.market_data.infrastructure.database.repository import load_option_chain_snapshots
+
+        try:
+            today_str = now.strftime("%Y-%m-%d")
+            with Session(self.engine) as session:
+                oc_rows = load_option_chain_snapshots(session, short_symbol, today_str)
+            if not oc_rows or len(oc_rows) < 5:
+                return
+
+            oc_df = pd.DataFrame(oc_rows)
+            agg_df = aggregate_option_snapshots(oc_df)
+            price_df = self.minute_data.get(full_symbol)
+            if price_df is None or price_df.empty or len(price_df) < 5:
+                return
+
+            aligned_df = resample_intraday_data(price_df, agg_df, timeframe="3m")
+            if aligned_df.empty or len(aligned_df) < 5:
+                return
+
+            divergences = detect_price_volume_divergences(aligned_df)
+            if not divergences:
+                return
+
+            # Check if the latest divergence occurred recently (within 15 min)
+            latest_div = divergences[-1]
+            last_bar_time = aligned_df.index[-1]
+            if abs((last_bar_time - latest_div.timestamp).total_seconds()) <= 900:
+                self.autonomous_router.route_divergence_signal(
+                    symbol=full_symbol,
+                    signal=latest_div,
+                    current_price=spot_price,
+                )
+        except Exception as exc:
+            LOGGER.debug("Smart OI divergence evaluation error for %s: %s", full_symbol, exc)
 
     def _get_option_chain_analyzer(self, symbol: str):
         if symbol in self.oc_analyzers:

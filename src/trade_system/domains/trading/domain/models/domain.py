@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
+import uuid
 
 
 # ---------------------------------------------------------------------------
@@ -34,9 +35,11 @@ class TradeHorizon(Enum):
 
 
 class TradeDirection(Enum):
-    """Option trade direction."""
+    """Trade direction for options, futures, and equity."""
     CALL = "CALL"   # Bullish — buy CE
     PUT = "PUT"     # Bearish — buy PE
+    LONG = "LONG"   # Bullish — buy equity / futures
+    SHORT = "SHORT" # Bearish — short equity / futures
 
 
 class MarketRegime(Enum):
@@ -78,23 +81,37 @@ class MarketData:
 # Signal (raw indicator signal)
 # ---------------------------------------------------------------------------
 
-@dataclass(slots=True)
+@dataclass
 class Signal:
-    id: str
     symbol: str
-    timestamp: datetime
-    signal_type: SignalType
     price: float
+    direction: Optional[TradeDirection] = None
+    signal_type: Optional[SignalType] = None
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    timestamp: datetime = field(default_factory=datetime.utcnow)
     confidence: float = 0.0
     source: str = "unknown"
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.direction is not None and self.signal_type is None:
+            if self.direction in (TradeDirection.CALL, TradeDirection.LONG) or getattr(self.direction, "value", "") in ("CALL", "LONG", "BUY"):
+                self.signal_type = SignalType.ENTRY_LONG
+            else:
+                self.signal_type = SignalType.ENTRY_SHORT
+        elif self.direction is None:
+            if self.signal_type in (SignalType.ENTRY_LONG, SignalType.EXIT_SHORT):
+                self.direction = TradeDirection.LONG
+            else:
+                self.direction = TradeDirection.SHORT
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "symbol": self.symbol,
-            "timestamp": self.timestamp.isoformat(),
-            "signal_type": self.signal_type.value,
+            "timestamp": self.timestamp.isoformat() if hasattr(self.timestamp, "isoformat") else str(self.timestamp),
+            "signal_type": self.signal_type.value if hasattr(self.signal_type, "value") else str(self.signal_type),
+            "direction": self.direction.value if hasattr(self.direction, "value") else str(self.direction),
             "price": self.price,
             "confidence": self.confidence,
             "source": self.source,

@@ -30,6 +30,9 @@ from trade_system.domains.analysis.application.analysis.stockmojo_smart_oi_engin
     format_indian_number,
     DivergenceSignal,
 )
+from trade_system.interfaces.dashboard.autonomous_execution_dashboard import _load_autonomous_state, _get_live_position_manager
+from trade_system.domains.trading.application.execution.autonomous_router import AutonomousExecutionRouter
+from trade_system.domains.trading.application.execution.execution_engine import ExecutionEngine
 import json
 
 LOGGER = logging.getLogger(__name__)
@@ -1019,28 +1022,86 @@ def render_stockmojo_smart_oi_terminal(
         if not div_indices.empty and (len(aligned_df) - 1 - div_indices[0]) <= 10:
             recent_div = latest_div
 
-    # Executive Divergence Forensics Banner
+    # Active Autonomous Position Banner
+    auto_state = _load_autonomous_state()
+    active_positions = auto_state.get("active_positions", [])
+    matching_pos = None
+    for p in active_positions:
+        p_sym = p.get("symbol", "")
+        if (db_symbol and db_symbol in p_sym) or (symbol_label and symbol_label in p_sym):
+            matching_pos = p
+            break
+
+    if matching_pos:
+        p_side = matching_pos.get("direction", "LONG")
+        p_qty = matching_pos.get("quantity", 0)
+        p_entry = matching_pos.get("entry_price", 0.0)
+        p_sl = matching_pos.get("current_stop_loss", 0.0)
+        p_tp2 = matching_pos.get("target_2", 0.0)
+        p_unrealized = (cur_spot - p_entry) * p_qty if p_side == "LONG" else (p_entry - cur_spot) * p_qty
+        p_unrealized_pct = ((cur_spot - p_entry) / p_entry * 100.0) if p_side == "LONG" else ((p_entry - cur_spot) / p_entry * 100.0)
+        p_be = matching_pos.get("is_breakeven_locked", False)
+        be_badge = "🛡️ BREAKEVEN LOCKED" if p_be else "TARGET 1 HUNTING"
+        p_side_color = "#00e676" if p_side == "LONG" else "#ff3b30"
+
+        pos_col1, pos_col2 = st.columns([4.2, 0.8])
+        with pos_col1:
+            st.markdown(_clean_html(f"""
+                <div style="background: linear-gradient(90deg, rgba(0, 230, 118, 0.12), rgba(15, 23, 42, 0.7)); border: 1px solid rgba(0, 230, 118, 0.4); border-radius: 8px; padding: 10px 16px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between;">
+                    <div style="font-size: 13px; color: #f0f6fc;">
+                        ⚡ <b>ACTIVE AUTONOMOUS POSITION:</b> <span style="color: {p_side_color}; font-weight: 800;">{p_side} {p_qty} Qty</span> @ ₹{p_entry:,.1f} &nbsp;|&nbsp;
+                        LTP: <b>₹{cur_spot:,.1f}</b> &nbsp;|&nbsp;
+                        PnL: <b style="color: {'#00e676' if p_unrealized>=0 else '#ff3b30'};">₹{p_unrealized:+,.2f} ({p_unrealized_pct:+.2f}%)</b> &nbsp;|&nbsp;
+                        SL: ₹{p_sl:,.1f} &nbsp;|&nbsp; TP2: ₹{p_tp2:,.1f}
+                    </div>
+                    <span style="background: rgba(0, 230, 118, 0.25); color: #00e676; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700;">
+                        {be_badge}
+                    </span>
+                </div>
+            """), unsafe_allow_html=True)
+        with pos_col2:
+            if st.button("🛑 Close Position", key="term_close_pos_btn", use_container_width=True):
+                pm = _get_live_position_manager()
+                pm.manual_close_position(matching_pos["symbol"], exit_price=cur_spot, reason="TERMINAL_MANUAL_CLOSE")
+                st.toast(f"Closed {matching_pos['symbol']} at ₹{cur_spot:,.1f}!", icon="✅")
+                st.rerun()
+
+    # Executive Divergence Forensics Banner + Quick Execution Action
     if recent_div:
-        if recent_div.divergence_type == "BEARISH_DIVERGENCE":
-            st.markdown(_clean_html(f"""
-                <div style="background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px; padding: 12px 18px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <div style="font-weight: 700; color: #ef4444; font-size: 14px; letter-spacing: 0.3px;">🚨 INSTITUTIONAL BEARISH DIVERGENCE (BULL TRAP ALERT)</div>
-                        <div style="color: #cbd5e1; font-size: 12.5px; margin-top: 3px;">{recent_div.description}</div>
+        is_bearish = recent_div.divergence_type == "BEARISH_DIVERGENCE"
+        b_col1, b_col2 = st.columns([4.2, 0.8])
+        with b_col1:
+            if is_bearish:
+                st.markdown(_clean_html(f"""
+                    <div style="background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px; padding: 12px 18px; display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <div style="font-weight: 700; color: #ef4444; font-size: 14px; letter-spacing: 0.3px;">🚨 INSTITUTIONAL BEARISH DIVERGENCE (BULL TRAP ALERT)</div>
+                            <div style="color: #cbd5e1; font-size: 12.5px; margin-top: 3px;">{recent_div.description}</div>
+                        </div>
+                        <div style="background: #ef4444; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;">DISTRIBUTION</div>
                     </div>
-                    <div style="background: #ef4444; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;">DISTRIBUTION</div>
-                </div>
-            """), unsafe_allow_html=True)
-        else:
-            st.markdown(_clean_html(f"""
-                <div style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 8px; padding: 12px 18px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between;">
-                    <div>
-                        <div style="font-weight: 700; color: #10b981; font-size: 14px; letter-spacing: 0.3px;">🔥 INSTITUTIONAL BULLISH DIVERGENCE (SMART ABSORPTION)</div>
-                        <div style="color: #cbd5e1; font-size: 12.5px; margin-top: 3px;">{recent_div.description}</div>
+                """), unsafe_allow_html=True)
+            else:
+                st.markdown(_clean_html(f"""
+                    <div style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 8px; padding: 12px 18px; display: flex; align-items: center; justify-content: space-between;">
+                        <div>
+                            <div style="font-weight: 700; color: #10b981; font-size: 14px; letter-spacing: 0.3px;">🔥 INSTITUTIONAL BULLISH DIVERGENCE (SMART ABSORPTION)</div>
+                            <div style="color: #cbd5e1; font-size: 12.5px; margin-top: 3px;">{recent_div.description}</div>
+                        </div>
+                        <div style="background: #10b981; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;">ABSORPTION</div>
                     </div>
-                    <div style="background: #10b981; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;">ABSORPTION</div>
-                </div>
-            """), unsafe_allow_html=True)
+                """), unsafe_allow_html=True)
+        with b_col2:
+            btn_txt = "⚡ Auto-Execute Put" if is_bearish else "⚡ Auto-Execute Call"
+            btn_type = "secondary" if is_bearish else "primary"
+            if st.button(btn_txt, key="exec_div_action_btn", type=btn_type, use_container_width=True):
+                pm = _get_live_position_manager()
+                engine = ExecutionEngine(broker=pm.broker, risk_manager=pm.risk_manager)
+                router = AutonomousExecutionRouter(execution_engine=engine, position_manager=pm, risk_manager=pm.risk_manager)
+                sym_full = f"NSE:{symbol_label}-INDEX" if "-INDEX" not in symbol_label else symbol_label
+                router.route_divergence_signal(symbol=sym_full, signal=recent_div, current_price=cur_spot)
+                st.toast(f"Executed Autonomous Divergence Trade for {sym_full}!", icon="🚀")
+                st.rerun()
     else:
         net_flow_color = "#10b981" if latest_net_oi_chg > 0 else ("#ef4444" if latest_net_oi_chg < 0 else "#94a3b8")
         st.markdown(_clean_html(f"""
@@ -1295,6 +1356,92 @@ def render_stockmojo_smart_oi_terminal(
         )
         fig_right_bottom.update_yaxes(title_text="Ratio", showgrid=True, gridcolor="rgba(51, 65, 85, 0.25)")
         st.plotly_chart(fig_right_bottom, use_container_width=True)
+
+    # 5. Multi-Strike OI Migration & Distribution Heatmap
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    _render_multistrike_oi_heatmap(snapshots, cur_spot)
+
+
+def _render_multistrike_oi_heatmap(snapshots: Any, spot_price: float) -> None:
+    """Renders Multi-Strike Net Open Interest Heatmap (PE - CE) across snapshot timestamps."""
+    if not snapshots:
+        return
+
+    df = pd.DataFrame(snapshots) if isinstance(snapshots, list) else snapshots.copy()
+    if df.empty or "strike_price" not in df.columns or "open_interest" not in df.columns:
+        return
+
+    with st.expander("🔥 Multi-Strike Net OI Migration Heatmap (Institutional Wall Tracking)", expanded=True):
+        st.caption("Visualizes dynamic strike-by-strike Call vs Put OI accumulation over time. Green = Put Support (PE > CE), Red = Call Resistance (CE > PE).")
+
+        # Filter to ±10 strikes around spot
+        if "strike_price" in df.columns and spot_price > 0:
+            strikes = sorted(df["strike_price"].unique())
+            nearest_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot_price))
+            start_idx = max(0, nearest_idx - 10)
+            end_idx = min(len(strikes), nearest_idx + 11)
+            target_strikes = set(strikes[start_idx:end_idx])
+            df = df[df["strike_price"].isin(target_strikes)].copy()
+
+        # Normalize timestamp to HH:MM
+        if "timestamp" in df.columns:
+            df["time_label"] = pd.to_datetime(df["timestamp"]).dt.strftime("%H:%M")
+
+        # Pivot to get PE OI - CE OI per strike and timestamp
+        pe_sub = df[df["option_type"].str.upper() == "PE"]
+        ce_sub = df[df["option_type"].str.upper() == "CE"]
+        if pe_sub.empty or ce_sub.empty:
+            return
+
+        pe_df = pe_sub.groupby(["strike_price", "time_label"])["open_interest"].sum().unstack(fill_value=0)
+        ce_df = ce_sub.groupby(["strike_price", "time_label"])["open_interest"].sum().unstack(fill_value=0)
+
+        # Net OI: PE - CE
+        net_matrix = pe_df.subtract(ce_df, fill_value=0)
+        if net_matrix.empty:
+            return
+
+        # Sort strikes ascending
+        net_matrix = net_matrix.sort_index(ascending=True)
+
+        fig = go.Figure(data=go.Heatmap(
+            z=net_matrix.values,
+            x=list(net_matrix.columns),
+            y=[f"₹{int(s)}" for s in net_matrix.index],
+            colorscale=[
+                [0.0, "#ff3b30"],      # Heavy Call Resistance (CE dominates)
+                [0.45, "#7f1d1d"],
+                [0.5, "#1e293b"],      # Equilibrium
+                [0.55, "#064e3b"],
+                [1.0, "#00e676"]       # Heavy Put Support (PE dominates)
+            ],
+            zmid=0,
+            colorbar=dict(title="Net OI (PE-CE)", tickfont=dict(size=10)),
+            hovertemplate="Strike: %{y}<br>Time: %{x}<br>Net OI: %{z:,.0f}<extra></extra>"
+        ))
+
+        # Add Spot Price horizontal marker line
+        nearest_strike = min(net_matrix.index, key=lambda s: abs(s - spot_price))
+        fig.add_hline(
+            y=f"₹{int(nearest_strike)}",
+            line_dash="dot",
+            line_color="#38bdf8",
+            line_width=2,
+            annotation_text=f"Spot ₹{spot_price:,.0f}",
+            annotation_position="top left",
+            annotation_font_color="#38bdf8"
+        )
+
+        fig.update_layout(
+            template="plotly_dark",
+            height=420,
+            margin=dict(l=40, r=40, t=30, b=30),
+            xaxis_title="Intraday Snapshot Time",
+            yaxis_title="Option Strike Price",
+            paper_bgcolor="rgba(11, 15, 25, 0.7)",
+            plot_bgcolor="rgba(15, 23, 42, 0.35)",
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: float, analyzer: SmartOIAnalyzer, selected_symbol_label: str):

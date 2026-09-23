@@ -14,6 +14,7 @@ st.set_page_config(
 HERE = Path(__file__).parent
 pages = {
     "Live Operations": [
+        st.Page(HERE / "autonomous_execution_dashboard.py", title="Autonomous Execution", icon="⚡"),
         st.Page(HERE / "chief_agent_dashboard.py", title="Chief Trading Agent", icon="🎯", default=True),
         st.Page(HERE / "agent_dashboard.py", title="Agent Dashboard", icon="🤖"),
         st.Page(HERE / "smart_oi_dashboard.py", title="Smart OI", icon="🎯"),

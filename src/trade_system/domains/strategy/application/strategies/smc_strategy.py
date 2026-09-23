@@ -99,9 +99,9 @@ class SmcTradeSetup:
     stop_loss: float              # Invalidation level (Behind Strong Protected pivot)
     target_1: float               # Range-to-Range Target (Opposing S/D zone)
     target_2: float               # Liquidity Run Target (Weak Target High/Low)
-    risk_reward_ratio: float      # Potential RRR (e.g. 2.5)
-    market_structure: str         # "BULLISH_STRUCTURE", "BULLISH_REALIGNED", etc.
-    equilibrium_status: str       # "DISCOUNT" (<50%), "PREMIUM" (>50%), "EQUILIBRIUM" (~50%)
+    risk_reward_ratio: float = 2.0      # Potential RRR (e.g. 2.5)
+    market_structure: str = "STRUCTURE_ALIGNED"         # "BULLISH_STRUCTURE", "BULLISH_REALIGNED", etc.
+    equilibrium_status: str = "EQUILIBRIUM"       # "DISCOUNT" (<50%), "PREMIUM" (>50%), "EQUILIBRIUM" (~50%)
     zone_classification: str = "NONE"      # "EXTREME_DEMAND", "DECISIONAL_DEMAND", etc.
     strong_protected_level: Optional[float] = None
     weak_target_level: Optional[float] = None
