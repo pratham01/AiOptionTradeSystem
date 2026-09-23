@@ -781,15 +781,17 @@ with left_col:
             # Table Overview
             table_rows = []
             for s in setups[:int(smc_top_n)]:
+                zone_type = getattr(s, "zone_classification", "")
                 row_dict = {
                     "Symbol": s.symbol.replace("NSE:", "").replace("-EQ", ""),
                     "Action": "🟢 BUY CALL" if s.direction == 1 else "🔴 BUY PUT",
                     "Score": s.confluence_score,
                     "Spot/Entry": s.entry_price,
-                    "Stop Loss": s.stop_loss,
-                    "Target 1": s.target_1,
+                    "Protected SL": s.stop_loss,
+                    "T1 (Range)": s.target_1,
+                    "T2 (Target)": getattr(s, "target_2", s.target_1),
                     "RRR": f"1:{s.risk_reward_ratio:.1f}",
-                    "Type": getattr(s, "setup_type", getattr(s, "pattern_type", "SETUP")),
+                    "Zone Type": zone_type if zone_type and zone_type != "NONE" else getattr(s, "setup_type", getattr(s, "pattern_type", "SETUP")),
                 }
                 if hasattr(s, "consequent_encroachment"):
                     row_dict["50% CE"] = s.consequent_encroachment
@@ -802,24 +804,34 @@ with left_col:
                 column_config={
                     "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100),
                     "Spot/Entry": st.column_config.NumberColumn("Entry", format="₹%.2f"),
-                    "Stop Loss": st.column_config.NumberColumn("Stop Loss", format="₹%.2f"),
-                    "Target 1": st.column_config.NumberColumn("Target 1", format="₹%.2f"),
+                    "Protected SL": st.column_config.NumberColumn("Protected SL", format="₹%.2f"),
+                    "T1 (Range)": st.column_config.NumberColumn("T1 (Range)", format="₹%.2f"),
+                    "T2 (Target)": st.column_config.NumberColumn("T2 (Target)", format="₹%.2f"),
                     "50% CE": st.column_config.NumberColumn("50% CE", format="₹%.2f"),
                 }
             )
 
             st.markdown("---")
-            st.markdown("#### 🔍 Setup Deep-Dives")
+            st.markdown("#### 🔍 Setup Deep-Dives (Photon Structure & JeaFx S&D)")
             for idx, s in enumerate(setups[:int(smc_top_n)], 1):
                 sym_clean = s.symbol.replace("NSE:", "").replace("-EQ", "")
                 setup_title = getattr(s, "setup_type", getattr(s, "pattern_type", "SETUP"))
-                badge = f"🟢 BUY CALL [{setup_title}]" if s.direction == 1 else f"🔴 BUY PUT [{setup_title}]"
+                z_name = getattr(s, "zone_classification", "")
+                z_badge = f" • [{z_name}]" if z_name and z_name != "NONE" else ""
+                realigned_badge = " ⚡ [REALIGNED]" if getattr(s, "is_internal_realigned", False) else ""
+                badge = f"🟢 BUY CALL [{setup_title}]{z_badge}{realigned_badge}" if s.direction == 1 else f"🔴 BUY PUT [{setup_title}]{z_badge}{realigned_badge}"
+                
                 with st.expander(f"#{idx} | {sym_clean} — {badge} (Score: {s.confluence_score:.0f}/100)"):
-                    c_a, c_b, c_c, c_d = st.columns(4)
+                    c_a, c_b, c_c, c_d, c_e = st.columns(5)
                     c_a.metric("Entry Zone", f"₹{s.entry_price:.2f}")
-                    c_b.metric("Stop Loss", f"₹{s.stop_loss:.2f}", delta=f"-{abs(s.entry_price - s.stop_loss):.2f}", delta_color="inverse")
-                    c_c.metric("Target 1", f"₹{s.target_1:.2f}", delta=f"+{abs(s.target_1 - s.entry_price):.2f}")
-                    c_d.metric("Risk:Reward", f"1:{s.risk_reward_ratio:.1f}")
+                    c_b.metric("Protected SL", f"₹{s.stop_loss:.2f}", delta=f"-{abs(s.entry_price - s.stop_loss):.2f}", delta_color="inverse")
+                    c_c.metric("T1 (Range-to-Range)", f"₹{s.target_1:.2f}", delta=f"+{abs(s.target_1 - s.entry_price):.2f}")
+                    t2_val = getattr(s, "target_2", s.target_1)
+                    c_d.metric("T2 (Weak Target)", f"₹{t2_val:.2f}", delta=f"+{abs(t2_val - s.entry_price):.2f}")
+                    c_e.metric("Risk:Reward", f"1:{s.risk_reward_ratio:.1f}")
+
+                    if hasattr(s, "market_structure") and s.market_structure:
+                        st.markdown(f"🏛️ **Market Structure Context:** `{s.market_structure}` | **Dealing Range:** `{getattr(s, 'equilibrium_status', 'EQUILIBRIUM')}`")
 
                     if hasattr(s, "fvg_bottom") and hasattr(s, "fvg_top"):
                         st.markdown(f"**Imbalance Zone:** ₹{s.fvg_bottom:.2f} ➔ ₹{s.fvg_top:.2f} | **50% CE Midpoint:** ₹{s.consequent_encroachment:.2f}")

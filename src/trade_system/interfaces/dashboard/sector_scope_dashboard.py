@@ -33,6 +33,18 @@ from trade_system.domains.analysis.application.analysis.fo_pcr_screener import (
     FOPCRScreener,
     StockPCRInfo,
 )
+from trade_system.domains.analysis.application.analysis.intraday_flow_reversal import (
+    IntradayFlowReversalEngine,
+    IntradayReversalSetup,
+)
+from trade_system.domains.analysis.application.analysis.midday_breakout_engine import (
+    MiddayBreakoutEngine,
+    MiddayBreakoutSetup,
+)
+from trade_system.domains.analysis.application.analysis.sector_rotation_rrg import (
+    SectorRRGEngine,
+    SectorRRGPoint,
+)
 from trade_system.shared.notifications.telegram import TelegramNotifier
 from trade_system.shared.config import Settings
 
@@ -158,7 +170,7 @@ st.markdown("""
 @st.cache_data(ttl=120)
 def fetch_available_dates():
     engine = get_engine()
-    query = text("SELECT DISTINCT date(timestamp) as d FROM ohlcv_15m WHERE symbol != 'NSE:NIFTY50-INDEX' ORDER BY d DESC")
+    query = text("SELECT DISTINCT date(timestamp) as d FROM ohlcv_15m WHERE symbol NOT LIKE '%INDEX%' ORDER BY d DESC")
     try:
         with engine.connect() as conn:
             result = conn.execute(query).fetchall()
@@ -342,12 +354,56 @@ if available_dates:
         help="Select a trading date to analyze post-market / historical data"
     )
 
+lookback_daily_label = "🌅 Full Day" if selected_date_str == today_str else f"🌅 Full Day ({selected_date_str})"
+lookback_options = [
+    lookback_daily_label,
+    "⚡ Last 15 Mins",
+    "🚀 Last 30 Mins",
+    "⏱️ Last 1 Hour",
+    "⏱️ Last 2 Hours",
+    "🍱 Since 12:30 PM (Midday)",
+]
+
+if "canonical_lookback" not in st.session_state or st.session_state["canonical_lookback"] not in lookback_options:
+    st.session_state["canonical_lookback"] = lookback_daily_label
+
+def _sync_from_sidebar():
+    val = st.session_state.get("sidebar_lookback_radio")
+    if val:
+        st.session_state["canonical_lookback"] = val
+        st.session_state["tab1_instance_quick_pills"] = val
+        st.session_state["tab3_instance_quick_pills"] = val
+
+def _sync_from_tab1():
+    val = st.session_state.get("tab1_instance_quick_pills")
+    if val:
+        st.session_state["canonical_lookback"] = val
+        st.session_state["sidebar_lookback_radio"] = val
+        st.session_state["tab3_instance_quick_pills"] = val
+
+def _sync_from_tab3():
+    val = st.session_state.get("tab3_instance_quick_pills")
+    if val:
+        st.session_state["canonical_lookback"] = val
+        st.session_state["sidebar_lookback_radio"] = val
+        st.session_state["tab1_instance_quick_pills"] = val
+
+# Ensure session state variables exist for widgets
+if "sidebar_lookback_radio" not in st.session_state or st.session_state["sidebar_lookback_radio"] not in lookback_options:
+    st.session_state["sidebar_lookback_radio"] = st.session_state["canonical_lookback"]
+if "tab1_instance_quick_pills" not in st.session_state or st.session_state["tab1_instance_quick_pills"] not in lookback_options:
+    st.session_state["tab1_instance_quick_pills"] = st.session_state["canonical_lookback"]
+if "tab3_instance_quick_pills" not in st.session_state or st.session_state["tab3_instance_quick_pills"] not in lookback_options:
+    st.session_state["tab3_instance_quick_pills"] = st.session_state["canonical_lookback"]
+
 selected_lookback = st.sidebar.radio(
     "⏱️ Performance Lookback",
-    options=["Daily (Today)", "Last 15 Mins", "Last 1 Hour", "Last 2 Hours"],
-    index=0,
-    help="Select the lookback interval for sector return calculations"
+    options=lookback_options,
+    key="sidebar_lookback_radio",
+    on_change=_sync_from_sidebar,
+    help="Select the lookback interval for sector return and momentum calculations",
 )
+selected_lookback = st.session_state.get("canonical_lookback", selected_lookback)
 
 latest_date_str, df, last_candle_ts = fetch_target_date_and_data(selected_date_str)
 
@@ -402,12 +458,16 @@ else:
     # 1. Sector Performance Calculations
     # -------------------------------------------------------------
     # Determine lookback parameters
-    if selected_lookback == "Last 15 Mins":
+    if "15 Mins" in selected_lookback:
         step = 1
-    elif selected_lookback == "Last 1 Hour":
+    elif "30 Mins" in selected_lookback:
+        step = 2
+    elif "1 Hour" in selected_lookback:
         step = 4
-    elif selected_lookback == "Last 2 Hours":
+    elif "2 Hours" in selected_lookback:
         step = 8
+    elif "12:30 PM" in selected_lookback:
+        step = "midday_1230"
     else:
         step = None  # Daily return (Today)
 
@@ -427,18 +487,22 @@ else:
             
         sector = fo_metadata.get(symbol, "UNKNOWN")
         
-        # Latest price
-        latest_row = grp_sorted.iloc[-1]
+        # Determine candles for target date and prior days
+        today_candles = grp_sorted[grp_sorted['trade_date'] == target_date]
+        prev_candles_all = grp_sorted[grp_sorted['trade_date'] < target_date]
+        
+        # On historical dates, ignore symbols with no candles on the target date
+        if not is_today and today_candles.empty:
+            continue
+            
+        # Latest price on the target day
+        latest_row = today_candles.iloc[-1] if not today_candles.empty else grp_sorted.iloc[-1]
         close_last = float(latest_row['close'])
         
         # --- Time-Adjusted RVOL (Relative Volume) ---
-        # Compute today's volume and time-adjusted historical average
         volume_today = 0
         avg_vol_time_adj = 0
         vol_surge = 0.0
-        
-        today_candles = grp_sorted[grp_sorted['trade_date'] == target_date]
-        prev_candles_all = grp_sorted[grp_sorted['trade_date'] < target_date]
         
         # Today's volume: sum of intraday candle volumes (or live quote)
         if is_today and quotes and symbol in quotes:
@@ -471,6 +535,8 @@ else:
         
         # Override with live quote LTP and compute pChange if applicable
         pchange = None
+        window_candles = today_candles
+
         if is_today and quotes and symbol in quotes:
             quote = quotes[symbol]
             close_last = quote.last_price or quote.close or quote.open
@@ -480,8 +546,25 @@ else:
                 close_prev = quote.previous_close
                 if (pchange is None or pchange == 0.0) and close_prev > 0 and close_last > 0:
                     pchange = ((close_last - close_prev) / close_prev) * 100
+                window_candles = today_candles
+            elif step == "midday_1230":
+                if not today_candles.empty:
+                    midday_bars = today_candles[today_candles['trade_time'] >= dt_time(12, 30)]
+                    if not midday_bars.empty:
+                        ref_bar = midday_bars.iloc[0]
+                        close_prev = float(ref_bar['open'])
+                        window_candles = today_candles[today_candles['timestamp'] >= ref_bar['timestamp']]
+                    else:
+                        ref_bar = today_candles.iloc[-1]
+                        close_prev = float(ref_bar['open'])
+                        window_candles = today_candles.tail(1)
+                    if close_prev > 0 and close_last > 0:
+                        pchange = ((close_last - close_prev) / close_prev) * 100
+                else:
+                    pchange = quote.change_percent
+                    close_prev = quote.previous_close
             else:
-                # Intraday return lookbacks: compare today's live LTP with today's database candles
+                # Intraday return lookbacks (Last 15m, 30m, 1h, 2h)
                 if not today_candles.empty and len(today_candles) > 1:
                     if len(today_candles) > step:
                         ref_idx = -step
@@ -490,30 +573,95 @@ else:
                         close_prev = float(today_candles.iloc[0]['open'])
                     if close_prev > 0 and close_last > 0:
                         pchange = ((close_last - close_prev) / close_prev) * 100
+                    window_candles = today_candles.tail(step + 1)
                 else:
-                    # Fallback: no intraday candles in DB yet — use daily change from live quote
                     pchange = quote.change_percent
                     close_prev = quote.previous_close
                     if (pchange is None or pchange == 0.0) and close_prev > 0 and close_last > 0:
                         pchange = ((close_last - close_prev) / close_prev) * 100
         else:
             # Historical date or fallback
-            if step is not None:
-                if len(grp_sorted) > step:
+            if step == "midday_1230":
+                if not today_candles.empty:
+                    midday_bars = today_candles[today_candles['trade_time'] >= dt_time(12, 30)]
+                    if not midday_bars.empty:
+                        ref_bar = midday_bars.iloc[0]
+                        close_prev = float(ref_bar['open'])
+                        window_candles = today_candles[today_candles['timestamp'] >= ref_bar['timestamp']]
+                    else:
+                        ref_bar = today_candles.iloc[-1]
+                        close_prev = float(ref_bar['open'])
+                        window_candles = today_candles.tail(1)
+                    if close_prev > 0 and close_last > 0:
+                        pchange = ((close_last - close_prev) / close_prev) * 100
+            elif step is not None:
+                if not today_candles.empty and len(today_candles) > 1:
+                    if len(today_candles) > step:
+                        ref_idx = -step - 1
+                        close_prev = float(today_candles.iloc[ref_idx]['close'])
+                    else:
+                        close_prev = float(today_candles.iloc[0]['open'])
+                    window_candles = today_candles.tail(step + 1)
+                elif len(grp_sorted) > step:
                     ref_idx = -step - 1
                     close_prev = float(grp_sorted.iloc[ref_idx]['close'])
+                    window_candles = grp_sorted.tail(step + 1)
                 else:
                     close_prev = float(grp_sorted.iloc[0]['close'])
+                    window_candles = grp_sorted
+                if close_prev > 0 and close_last > 0:
+                    pchange = ((close_last - close_prev) / close_prev) * 100
             else:
-                # Daily return: compare to previous day's close
                 prev_candles = grp_sorted[grp_sorted['timestamp'].dt.date < target_date]
                 if not prev_candles.empty:
                     close_prev = float(prev_candles.iloc[-1]['close'])
                 else:
                     close_prev = float(grp_sorted.iloc[0]['close'])
-            
-            if close_prev > 0 and close_last > 0:
-                pchange = ((close_last - close_prev) / close_prev) * 100
+                if close_prev > 0 and close_last > 0:
+                    pchange = ((close_last - close_prev) / close_prev) * 100
+                window_candles = today_candles
+
+        # Determine intraday high, low, open for today
+        high_today = float(today_candles['high'].max()) if not today_candles.empty else close_last
+        low_today = float(today_candles['low'].min()) if not today_candles.empty else close_last
+        open_today = float(today_candles.iloc[0]['open']) if not today_candles.empty else close_last
+
+        if is_today and quotes and symbol in quotes:
+            q = quotes[symbol]
+            q_high = float(getattr(q, 'high', 0.0) or 0.0)
+            q_low = float(getattr(q, 'low', 0.0) or 0.0)
+            q_open = float(getattr(q, 'open', 0.0) or 0.0)
+            if q_high > 0:
+                high_today = max(high_today, q_high)
+            if q_low > 0:
+                low_today = min(low_today, q_low) if low_today > 0 else q_low
+            if q_open > 0 and open_today <= 0:
+                open_today = q_open
+
+        if high_today <= 0 or high_today < close_last:
+            high_today = close_last
+        if low_today <= 0 or low_today > close_last:
+            low_today = close_last
+        if open_today <= 0:
+            open_today = close_last
+
+        # If a specific instance/window is selected, calculate thrust from that window
+        if step is not None and not window_candles.empty:
+            w_high = float(window_candles['high'].max())
+            w_low = float(window_candles['low'].min())
+            if close_last > w_high:
+                w_high = close_last
+            if close_last < w_low and w_low > 0:
+                w_low = close_last
+            move_from_low = ((close_last - w_low) / w_low * 100) if w_low > 0 else 0.0
+            drop_from_high = ((w_high - close_last) / w_high * 100) if w_high > 0 else 0.0
+            span = w_high - w_low
+            range_pos = ((close_last - w_low) / span * 100) if span > 0 else 50.0
+        else:
+            move_from_low = ((close_last - low_today) / low_today * 100) if low_today > 0 else 0.0
+            drop_from_high = ((high_today - close_last) / high_today * 100) if high_today > 0 else 0.0
+            span = high_today - low_today
+            range_pos = ((close_last - low_today) / span * 100) if span > 0 else 50.0
 
         if pchange is not None:
             rows.append({
@@ -524,7 +672,13 @@ else:
                 "pChange": pchange,
                 "volume_today": volume_today,
                 "avg_vol_time_adj": avg_vol_time_adj,
-                "vol_surge": vol_surge
+                "vol_surge": vol_surge,
+                "open_today": open_today,
+                "high_today": high_today,
+                "low_today": low_today,
+                "move_from_low": round(move_from_low, 2),
+                "drop_from_high": round(drop_from_high, 2),
+                "range_pos": round(range_pos, 1),
             })
             
     if rows:
@@ -542,6 +696,17 @@ else:
                     if (pchange is None or pchange == 0.0) and prev_close > 0 and ltp > 0:
                         pchange = ((ltp - prev_close) / prev_close) * 100
                     if prev_close > 0 and ltp > 0:
+                        q_high = float(getattr(quote, 'high', 0.0) or 0.0) or ltp
+                        q_low = float(getattr(quote, 'low', 0.0) or 0.0) or ltp
+                        q_open = float(getattr(quote, 'open', 0.0) or 0.0) or ltp
+                        if q_high < ltp:
+                            q_high = ltp
+                        if q_low <= 0 or q_low > ltp:
+                            q_low = ltp
+                        m_low = ((ltp - q_low) / q_low * 100) if q_low > 0 else 0.0
+                        d_high = ((q_high - ltp) / q_high * 100) if q_high > 0 else 0.0
+                        sp = q_high - q_low
+                        r_pos = ((ltp - q_low) / sp * 100) if sp > 0 else 50.0
                         live_symbols_to_add.append({
                             "symbol": symbol,
                             "sector": sector,
@@ -550,7 +715,13 @@ else:
                             "pChange": pchange,
                             "volume_today": quote.volume or 0,
                             "avg_vol_time_adj": 0,
-                            "vol_surge": 0.0
+                            "vol_surge": 0.0,
+                            "open_today": q_open,
+                            "high_today": q_high,
+                            "low_today": q_low,
+                            "move_from_low": round(m_low, 2),
+                            "drop_from_high": round(d_high, 2),
+                            "range_pos": round(r_pos, 1),
                         })
             if live_symbols_to_add:
                 merged_closes = pd.concat([merged_closes, pd.DataFrame(live_symbols_to_add)], ignore_index=True)
@@ -562,7 +733,7 @@ else:
                 if today_candle_count < 2:
                     st.sidebar.warning(f"⚠️ No intraday candles in DB yet. Showing **daily change** as fallback. Start the live collector for {selected_lookback} precision.")
     else:
-        merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange", "volume_today", "avg_vol_time_adj", "vol_surge"])
+        merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange", "volume_today", "avg_vol_time_adj", "vol_surge", "open_today", "high_today", "low_today", "move_from_low", "drop_from_high", "range_pos"])
     
     # Sector performance
     if not merged_closes.empty:
@@ -731,7 +902,7 @@ else:
     top_gainers = merged_closes.sort_values(by='pChange', ascending=False).head(10)
     top_losers = merged_closes.sort_values(by='pChange', ascending=True).head(10)
 
-    def _compute_entry_times(merged_df: pd.DataFrame, target_date) -> dict:
+    def _compute_entry_times(merged_df: pd.DataFrame, target_date, is_today: bool = False) -> dict:
         """Compute the earliest 15m timestamp at which each symbol first entered
         the top-10 gainers or bottom-10 losers list.
 
@@ -764,8 +935,8 @@ else:
         db_syms = set(tgt_df['symbol'].unique()) if not tgt_df.empty else set()
         missing_top_syms = top_symbols - db_syms - {s for s in top_symbols if 'INDEX' in s}
 
-        # Dynamically fetch 15m history from broker API for missing top symbols
-        if missing_top_syms:
+        # Dynamically fetch 15m history from broker API for missing top symbols (live today only)
+        if missing_top_syms and is_today:
             today_str = target_date.strftime("%Y-%m-%d")
             fetched_dfs = []
             for sym in missing_top_syms:
@@ -812,11 +983,12 @@ else:
         else:
             pchange_df = pchange_db
 
-        # Append live snapshot to capture stocks breaking into top 10 mid-candle
-        live_time = pd.Timestamp.now().round("min")
-        live_pchanges = merged_df.set_index('symbol')['pChange']
-        aligned_live = live_pchanges.reindex(pchange_df.columns).fillna(0.0)
-        pchange_df.loc[live_time] = aligned_live
+        # Append live snapshot to capture stocks breaking into top 10 mid-candle (today only)
+        if is_today:
+            live_time = pd.Timestamp.now().round("min")
+            live_pchanges = merged_df.set_index('symbol')['pChange']
+            aligned_live = live_pchanges.reindex(pchange_df.columns).fillna(0.0)
+            pchange_df.loc[live_time] = aligned_live
 
         # Rank across ALL symbols at each timestamp
         gainer_ranks = pchange_df.rank(axis=1, ascending=False, method='min')
@@ -835,7 +1007,7 @@ else:
         return entry_times
 
     if not merged_closes.empty:
-        entry_times_dict = _compute_entry_times(merged_closes, target_date)
+        entry_times_dict = _compute_entry_times(merged_closes, target_date, is_today=is_today)
     else:
         entry_times_dict = {}
 
@@ -1123,49 +1295,409 @@ else:
         st.session_state['selected_sector_drill'] = target_sector
 
     # -------------------------------------------------------------
-    # 3. SECTOR BOARD & RIGHT-SIDE CONSTITUENT STOCKS
+    # 3. SECTOR ROTATION RRG & ADVANCE/DECLINE SECTOR BOARD
     # -------------------------------------------------------------
-    active_sector = st.session_state.get('selected_sector_drill') or (options[0] if options else None)
-    
-    col_board, col_stocks = st.columns([1.1, 0.9], gap="medium")
+    SECTOR_ICONS = {
+        "AUTO": "🚗",
+        "BANKING": "🏦",
+        "CAPITAL_GOODS": "⚙️",
+        "CEMENT": "🧱",
+        "CHEMICALS": "🧪",
+        "COMMODITIES": "📦",
+        "CONSUMER": "🛒",
+        "CONSR DURBL": "🛋️",
+        "DEFENCE": "🛡️",
+        "ENERGY": "⚡",
+        "FINANCE": "💳",
+        "FINNIFTY": "🏛️",
+        "FMCG": "🥫",
+        "HEALTHCARE": "🩺",
+        "INFRA": "🏗️",
+        "IT": "💻",
+        "MEDIA": "📺",
+        "METALS": "⛏️",
+        "MIDCAP": "📈",
+        "OIL_GAS": "⛽",
+        "PHARMA": "💊",
+        "POWER": "🔌",
+        "PSU BANK": "🏛️",
+        "PVT BANK": "🏦",
+        "REALTY": "🏢",
+        "SERVICES": "📦",
+        "TELECOM": "📡",
+    }
+
+    # Compute RRG and Breadth Data
+    today_15m_all = df[df['timestamp'].dt.date == target_date].copy() if not df.empty else pd.DataFrame()
+    rrg_map = SectorRRGEngine.compute_rrg(
+        today_15m_df=today_15m_all,
+        merged_closes=merged_closes,
+        tail_bars=4
+    )
+
+    adv_sectors = int((sector_perf['pChange'] > 0).sum())
+    dec_sectors = int((sector_perf['pChange'] < 0).sum())
+    tot_sectors = len(sector_perf)
+    adv_pct_sectors = round(adv_sectors / max(tot_sectors, 1) * 100)
+
+    adv_stocks = int((merged_closes['pChange'] > 0).sum())
+    dec_stocks = int((merged_closes['pChange'] < 0).sum())
+    tot_stocks = len(merged_closes)
+    breadth_ratio = round(adv_stocks / max(dec_stocks, 1), 2)
+    adv_stocks_pct = round(adv_stocks / max(tot_stocks, 1) * 100)
+    dec_stocks_pct = max(0, 100 - adv_stocks_pct)
+    bench_ret = rrg_map[list(rrg_map.keys())[0]].benchmark_return if rrg_map else 0.0
+
+    q_lead = len([p for p in rrg_map.values() if p.quadrant == "LEADING"])
+    q_weak = len([p for p in rrg_map.values() if p.quadrant == "WEAKENING"])
+    q_lag = len([p for p in rrg_map.values() if p.quadrant == "LAGGING"])
+    q_imp = len([p for p in rrg_map.values() if p.quadrant == "IMPROVING"])
+
+    # 1. Macro Market Breadth Pulse Strip (Executive Terminal Ribbon)
+    macro_ribbon_html = f"""<div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.92) 0%, rgba(30, 41, 59, 0.85) 100%); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 10px; padding: 10px 16px; margin-bottom: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);">
+<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <span style="font-size: 0.95rem; font-weight: 800; color: #f8fafc; letter-spacing: 0.5px;">⚖️ MACRO BREADTH PULSE</span>
+        <span style="background: rgba(34, 197, 94, 0.18); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); font-size: 0.78rem; padding: 2px 10px; border-radius: 6px; font-weight: 700;">
+            {adv_sectors}/{tot_sectors} Advancing Sectors ({adv_pct_sectors}%)
+        </span>
+        <span style="background: rgba(239, 68, 68, 0.18); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); font-size: 0.78rem; padding: 2px 10px; border-radius: 6px; font-weight: 700;">
+            {dec_sectors} Declining Sectors
+        </span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 14px; font-size: 0.82rem; color: #cbd5e1; flex-wrap: wrap;">
+        <span>F&O Stocks: <b style="color: #4ade80;">{adv_stocks} 🟢</b> / <b style="color: #f87171;">{dec_stocks} 🔴</b> (A/D Ratio: <b style="color: {'#4ade80' if breadth_ratio >= 1.0 else '#f87171'};">{breadth_ratio}</b>)</span>
+        <span style="color: #475569;">|</span>
+        <span>Nifty 50: <b style="color: {'#4ade80' if bench_ret >= 0 else '#f87171'};">{bench_ret:+.2f}%</b></span>
+        <span style="color: #475569;">|</span>
+        <span style="display: inline-flex; gap: 6px;">
+            <span style="background: rgba(34, 197, 94, 0.16); color: #4ade80; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🟢 {q_lead} Lead</span>
+            <span style="background: rgba(234, 179, 8, 0.16); color: #facc15; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🟡 {q_weak} Weak</span>
+            <span style="background: rgba(239, 68, 68, 0.16); color: #f87171; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🔴 {q_lag} Lag</span>
+            <span style="background: rgba(59, 130, 246, 0.16); color: #60a5fa; font-size: 0.72rem; padding: 1px 7px; border-radius: 4px; font-weight: 700;">🔵 {q_imp} Imp</span>
+        </span>
+    </div>
+</div>
+<div style="margin-top: 8px; height: 5px; width: 100%; background: #1e293b; border-radius: 9999px; display: flex; overflow: hidden;">
+    <div style="width: {adv_stocks_pct}%; background: linear-gradient(90deg, #10b981 0%, #22c55e 100%);"></div>
+    <div style="width: {dec_stocks_pct}%; background: linear-gradient(90deg, #ef4444 0%, #f43f5e 100%);"></div>
+</div>
+</div>"""
+    st.markdown(macro_ribbon_html, unsafe_allow_html=True)
+
+    col_board, col_stocks = st.columns([1.18, 0.82], gap="medium")
 
     with col_board:
-        st.markdown("""
-        <div class="section-header" style="margin-bottom: 6px;">
-            <h3>🏆 Sector Board</h3>
-            <span class="badge">CLICK TO VIEW CONSTITUENTS</span>
-        </div>
-        """, unsafe_allow_html=True)
+        sb_h_c1, sb_h_c2 = st.columns([1.0, 2.0])
+        with sb_h_c1:
+            st.markdown("""<div style="display:flex; align-items:center; gap:8px; margin-top:2px;">
+<span style="font-size:1.05rem; font-weight:800; color:#f8fafc;">🏆 SECTOR MATRIX</span>
+<span style="background:rgba(124,58,237,0.25); color:#a78bfa; border:1px solid rgba(124,58,237,0.45); font-size:0.68rem; padding:2px 7px; border-radius:4px; font-weight:800;">INSTITUTIONAL</span>
+</div>""", unsafe_allow_html=True)
+        with sb_h_c2:
+            sb_view = st.segmented_control(
+                "Sector View Mode",
+                options=[
+                    "🧭 StockMojo RRG",
+                    "📊 Advance / Decline Matrix",
+                    "🎴 Sector Deck"
+                ],
+                default="🧭 StockMojo RRG",
+                key="sb_view_mode_toggle",
+                label_visibility="collapsed"
+            ) or "🧭 StockMojo RRG"
 
-        n_sectors = len(sector_perf)
-        cols_per_row = 3
-        sector_rows_list = list(sector_perf.iterrows())
-        
-        for row_start in range(0, n_sectors, cols_per_row):
-            cols = st.columns(cols_per_row)
-            for col_idx in range(cols_per_row):
-                item_idx = row_start + col_idx
-                if item_idx >= n_sectors:
-                    break
-                _, row = sector_rows_list[item_idx]
-                with cols[col_idx]:
-                    is_positive = row['pChange'] >= 0
-                    bar_color = "#22c55e" if is_positive else "#ef4444"
-                    bar_width = min(abs(row['pChange']) / max_change * 100, 100)
-                    arrow = "▲" if is_positive else "▼"
-                    is_selected = (row['sector'] == active_sector)
+        # Active sector drill selector
+        active_idx = options.index(st.session_state.get('selected_sector_drill', options[0])) if st.session_state.get('selected_sector_drill') in options else 0
+
+        def _sec_label(s):
+            pt = rrg_map.get(s)
+            p_chg = sector_perf.set_index('sector').loc[s, 'pChange'] if s in sector_perf['sector'].values else 0.0
+            icon = SECTOR_ICONS.get(s, "📊")
+            quad_emoji = SectorRRGEngine.QUADRANT_CONFIG.get(pt.quadrant, {}).get("emoji", "") if pt else ""
+            quad_txt = pt.quadrant.title() if pt else ""
+            return f"{icon} {s} ({p_chg:+.2f}% | {quad_emoji} {quad_txt})"
+
+        active_sector = st.selectbox(
+            "Select Active Sector to Inspect",
+            options=options,
+            index=active_idx,
+            format_func=_sec_label,
+            key="sb_active_sector_picker",
+            label_visibility="collapsed"
+        )
+        st.session_state['selected_sector_drill'] = active_sector
+
+        # ---------------------------------------------------------
+        # VIEW 1: STOCKMOJO RELATIVE ROTATION GRAPH (RRG) + 4-QUADRANT DECK
+        # ---------------------------------------------------------
+        if sb_view == "🧭 StockMojo RRG":
+            fig_rrg = go.Figure()
+
+            r_vals = [p.rs_ratio for p in rrg_map.values()]
+            m_vals = [p.rs_momentum for p in rrg_map.values()]
+            for p in rrg_map.values():
+                for r_tail, m_tail in p.history_tail:
+                    r_vals.append(r_tail)
+                    m_vals.append(m_tail)
+
+            r_min, r_max = min(r_vals + [97.0]), max(r_vals + [103.0])
+            m_min, m_max = min(m_vals + [97.0]), max(m_vals + [103.0])
+            pad_r = max((r_max - r_min) * 0.12, 1.0)
+            pad_m = max((m_max - m_min) * 0.12, 1.0)
+            x_range = [r_min - pad_r, r_max + pad_r]
+            y_range = [m_min - pad_m, m_max + pad_m]
+
+            # Shaded Quadrants (StockMojo style pastel fills)
+            # Top-Right: Leading (Green)
+            fig_rrg.add_shape(type="rect", x0=100, y0=100, x1=x_range[1], y1=y_range[1],
+                              fillcolor="rgba(34, 197, 94, 0.08)", line_width=0, layer="below")
+            # Bottom-Right: Weakening (Amber)
+            fig_rrg.add_shape(type="rect", x0=100, y0=y_range[0], x1=x_range[1], y1=100,
+                              fillcolor="rgba(234, 179, 8, 0.08)", line_width=0, layer="below")
+            # Bottom-Left: Lagging (Red)
+            fig_rrg.add_shape(type="rect", x0=x_range[0], y0=y_range[0], x1=100, y1=100,
+                              fillcolor="rgba(239, 68, 68, 0.08)", line_width=0, layer="below")
+            # Top-Left: Improving (Blue)
+            fig_rrg.add_shape(type="rect", x0=x_range[0], y0=100, x1=100, y1=y_range[1],
+                              fillcolor="rgba(59, 130, 246, 0.08)", line_width=0, layer="below")
+
+            # Crosshairs at (100, 100)
+            fig_rrg.add_hline(y=100, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
+            fig_rrg.add_vline(x=100, line_dash="dash", line_color="rgba(255, 255, 255, 0.35)", line_width=1.5)
+
+            # Institutional Quadrant Watermark Annotations
+            fig_rrg.add_annotation(x=x_range[1] - pad_r * 0.45, y=y_range[1] - pad_m * 0.35,
+                                   text="<b>LEADING</b>", showarrow=False, font=dict(color="rgba(34, 197, 94, 0.7)", size=13))
+            fig_rrg.add_annotation(x=x_range[1] - pad_r * 0.45, y=y_range[0] + pad_m * 0.35,
+                                   text="<b>WEAKENING</b>", showarrow=False, font=dict(color="rgba(234, 179, 8, 0.7)", size=13))
+            fig_rrg.add_annotation(x=x_range[0] + pad_r * 0.45, y=y_range[0] + pad_m * 0.35,
+                                   text="<b>LAGGING</b>", showarrow=False, font=dict(color="rgba(239, 68, 68, 0.7)", size=13))
+            fig_rrg.add_annotation(x=x_range[0] + pad_r * 0.45, y=y_range[1] - pad_m * 0.35,
+                                   text="<b>IMPROVING</b>", showarrow=False, font=dict(color="rgba(59, 130, 246, 0.7)", size=13))
+
+            colors = {
+                "LEADING": "#22c55e",
+                "WEAKENING": "#eab308",
+                "LAGGING": "#ef4444",
+                "IMPROVING": "#38bdf8"
+            }
+
+            for sec, pt in rrg_map.items():
+                c = colors.get(pt.quadrant, "#cbd5e1")
+                # Trajectory spline tail with progressive markers
+                if len(pt.history_tail) > 1:
+                    t_xs = [t[0] for t in pt.history_tail]
+                    t_ys = [t[1] for t in pt.history_tail]
+                    fig_rrg.add_trace(go.Scatter(
+                        x=t_xs, y=t_ys,
+                        mode="lines+markers",
+                        line=dict(color=c, width=1.8, shape="spline"),
+                        marker=dict(color=c, size=[4, 6, 8][:len(t_xs)], opacity=0.7),
+                        hoverinfo="skip",
+                        showlegend=False
+                    ))
+
+                # Primary Point Marker
+                is_active = (sec == active_sector)
+                m_size = 15 if is_active else 10
+                fig_rrg.add_trace(go.Scatter(
+                    x=[pt.rs_ratio],
+                    y=[pt.rs_momentum],
+                    mode="markers+text",
+                    name=sec,
+                    text=[f"<b>{sec}</b>"],
+                    textposition="top center",
+                    textfont=dict(size=9.5, color="#ffffff" if is_active else "#cbd5e1"),
+                    marker=dict(
+                        size=m_size,
+                        color=c,
+                        line=dict(color="#ffffff" if is_active else "rgba(255,255,255,0.45)", width=2.5 if is_active else 1.2)
+                    ),
+                    hovertemplate=(
+                        f"<b>{sec}</b> ({pt.quadrant})<br>"
+                        f"RS-Ratio: %{{x:.2f}}<br>"
+                        f"RS-Momentum: %{{y:.2f}}<br>"
+                        f"Return: {pt.sector_return:+.2f}%<br>"
+                        f"Advances: {pt.advances} | Declines: {pt.declines}<br>"
+                        f"Avg Vol Surge: {pt.avg_vol_surge:.1f}x<extra></extra>"
+                    ),
+                    showlegend=False
+                ))
+
+            fig_rrg.update_layout(
+                xaxis=dict(title="<b>RS-Ratio</b> (Strength vs Nifty 50)", range=x_range, zeroline=False, gridcolor="rgba(255,255,255,0.06)"),
+                yaxis=dict(title="<b>RS-Momentum</b> (Velocity)", range=y_range, zeroline=False, gridcolor="rgba(255,255,255,0.06)"),
+                template="plotly_dark",
+                height=390,
+                margin=dict(l=35, r=35, t=25, b=35)
+            )
+            st.plotly_chart(fig_rrg, use_container_width=True, key="sector_rrg_chart")
+
+            # -----------------------------------------------------
+            # StockMojo-Style 4-Quadrant Sector Deck (1:1 Column Deck)
+            # -----------------------------------------------------
+            q_cols = st.columns(4)
+            quadrant_configs = [
+                ("IMPROVING", "🔵 Improving", "#38bdf8", "rgba(56, 189, 248, 0.12)", q_cols[0]),
+                ("LEADING", "🟢 Leading", "#22c55e", "rgba(34, 197, 94, 0.12)", q_cols[1]),
+                ("WEAKENING", "🟡 Weakening", "#eab308", "rgba(234, 179, 8, 0.12)", q_cols[2]),
+                ("LAGGING", "🔴 Lagging", "#ef4444", "rgba(239, 68, 68, 0.12)", q_cols[3]),
+            ]
+
+            for q_key, q_title, q_border_c, q_bg_c, q_col in quadrant_configs:
+                with q_col:
+                    sec_in_quad = [s for s, p in rrg_map.items() if p.quadrant == q_key]
+                    sec_in_quad = sorted(sec_in_quad, key=lambda s: rrg_map[s].sector_return, reverse=True)
                     
-                    if st.button(
-                        f"{row['sector']} {arrow}{row['pChange']:+.1f}%",
-                        key=f"sector_card_{row['sector']}",
-                        use_container_width=True,
-                        type="primary" if is_selected else "secondary"
-                    ):
-                        st.session_state['selected_sector_drill'] = row['sector']
-                        st.session_state['clicked_stock_sector'] = row['sector']
-                        st.rerun()
+                    st.markdown(f"""<div style="background:{q_bg_c}; border-top: 3px solid {q_border_c}; border-radius: 6px 6px 0 0; padding: 6px 8px; text-align: center; margin-bottom: 6px;">
+<span style="color:{q_border_c}; font-weight:800; font-size:0.80rem; letter-spacing:0.3px;">{q_title} ({len(sec_in_quad)})</span>
+</div>""", unsafe_allow_html=True)
                     
-                    st.markdown(f'<div style="height:2px;background:rgba(255,255,255,0.06);border-radius:2px;overflow:hidden;margin-bottom:4px;"><div style="height:100%;width:{bar_width}%;background:{bar_color};"></div></div>', unsafe_allow_html=True)
+                    if not sec_in_quad:
+                        st.markdown("<div style='text-align:center; color:#64748b; font-size:0.75rem; padding:8px;'>None</div>", unsafe_allow_html=True)
+                    else:
+                        for s in sec_in_quad:
+                            p = rrg_map[s]
+                            icon = SECTOR_ICONS.get(s, "📊")
+                            is_act = (s == active_sector)
+                            act_style = "border: 1px solid #a78bfa; background: rgba(124, 58, 237, 0.25);" if is_act else "border: 1px solid rgba(148, 163, 184, 0.15); background: rgba(15, 23, 42, 0.65);"
+                            ret_c = "#4ade80" if p.sector_return >= 0 else "#f87171"
+                            
+                            st.markdown(f"""<div style="{act_style} border-radius: 6px; padding: 5px 8px; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+<span style="font-size: 0.78rem; font-weight: 700; color: #f8fafc;">{icon} {s}</span>
+<div style="display:flex; align-items:center; gap:5px;">
+    <span style="color: {ret_c}; font-weight: 700; font-size: 0.75rem;">{p.sector_return:+.1f}%</span>
+    <span style="color: #94a3b8; font-size: 0.68rem;">{p.advances}🟢/{p.declines}🔴</span>
+</div>
+</div>""", unsafe_allow_html=True)
+
+        # ---------------------------------------------------------
+        # VIEW 2: INSTITUTIONAL ADVANCE / DECLINE LEADERBOARD MATRIX
+        # ---------------------------------------------------------
+        elif sb_view == "📊 Advance / Decline Matrix":
+            st.markdown("""<div style="font-size:0.82rem; color:#94a3b8; margin-bottom:8px;">
+Ranked leaderboard tracking sector advance/decline breadth, relative strength regime, and leading driver stocks.
+</div>""", unsafe_allow_html=True)
+
+            ad_rows = []
+            for _, r in sector_perf.iterrows():
+                s = r['sector']
+                pt = rrg_map.get(s)
+                icon = SECTOR_ICONS.get(s, "📊")
+                sec_stocks = merged_closes[merged_closes['sector'] == s]
+                
+                # Driver stock (highest gainer) and Drag stock (worst decliner)
+                top_driver = "—"
+                drag_stock = "—"
+                if not sec_stocks.empty:
+                    top_stk = sec_stocks.sort_values('pChange', ascending=False).iloc[0]
+                    bot_stk = sec_stocks.sort_values('pChange', ascending=True).iloc[0]
+                    top_driver = f"{top_stk['symbol'].replace('NSE:', '').replace('-EQ', '')} ({top_stk['pChange']:+.1f}%)"
+                    drag_stock = f"{bot_stk['symbol'].replace('NSE:', '').replace('-EQ', '')} ({bot_stk['pChange']:+.1f}%)"
+
+                adv = pt.advances if pt else 0
+                dec = pt.declines if pt else 0
+                tot = pt.total_stocks if pt else 1
+                adv_pct = pt.advance_pct if pt else 50.0
+                quad = pt.quadrant if pt else "NEUTRAL"
+                rs_rat = pt.rs_ratio if pt else 100.0
+                rs_mom = pt.rs_momentum if pt else 100.0
+                avg_vs = pt.avg_vol_surge if pt else 1.0
+
+                q_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(quad, {"emoji": "⚪"})
+
+                ad_rows.append({
+                    "Sector": f"{icon} {s}",
+                    "Change %": r['pChange'],
+                    "RRG Quadrant": f"{q_cfg.get('emoji', '')} {quad.title()}",
+                    "RS Ratio": rs_rat,
+                    "RS Mom": rs_mom,
+                    "Breadth": f"{adv}🟢 / {dec}🔴 ({adv_pct:.0f}%)",
+                    "Top Driver": top_driver,
+                    "Drag Stock": drag_stock,
+                    "Vol Surge": f"{avg_vs:.1f}x"
+                })
+
+            ad_df = pd.DataFrame(ad_rows)
+            st.dataframe(
+                ad_df.style.format({
+                    "Change %": "{:+.2f}%",
+                    "RS Ratio": "{:.1f}",
+                    "RS Mom": "{:.1f}",
+                }).map(
+                    lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
+                    subset=["Change %"]
+                ),
+                use_container_width=True,
+                hide_index=True,
+                height=480
+            )
+
+        # ---------------------------------------------------------
+        # VIEW 3: COMPACT SECTOR CARDS DECK
+        # ---------------------------------------------------------
+        else:
+            cols_per_row = 2
+            sector_rows_list = list(sector_perf.iterrows())
+            n_sec_cards = len(sector_rows_list)
+
+            for row_start in range(0, n_sec_cards, cols_per_row):
+                cols = st.columns(cols_per_row)
+                for col_idx in range(cols_per_row):
+                    item_idx = row_start + col_idx
+                    if item_idx >= n_sec_cards:
+                        break
+                    _, row = sector_rows_list[item_idx]
+                    sec = row['sector']
+                    with cols[col_idx]:
+                        pt = rrg_map.get(sec)
+                        adv = pt.advances if pt else 0
+                        dec = pt.declines if pt else 0
+                        adv_pct = pt.advance_pct if pt else 50.0
+                        dec_pct = max(0.0, 100.0 - adv_pct)
+                        avg_vs = pt.avg_vol_surge if pt else 1.0
+                        quad = pt.quadrant if pt else "NEUTRAL"
+                        rs_rat = pt.rs_ratio if pt else 100.0
+
+                        is_positive = row['pChange'] >= 0
+                        ret_color = "#4ade80" if is_positive else "#f87171"
+                        ret_bg = "rgba(34, 197, 94, 0.15)" if is_positive else "rgba(239, 68, 68, 0.15)"
+                        arrow = "▲" if is_positive else "▼"
+                        icon = SECTOR_ICONS.get(sec, "📊")
+
+                        rrg_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(quad, {
+                            "badge_color": "#94a3b8", "bg_color": "rgba(148,163,184,0.1)", "emoji": "⚪"
+                        })
+
+                        is_active = (sec == active_sector)
+                        active_border = "border: 2px solid #8b5cf6; box-shadow: 0 0 12px rgba(139, 92, 246, 0.35);" if is_active else "border: 1px solid rgba(148, 163, 184, 0.15);"
+                        active_badge = "<span style='background:#7c3aed; color:#ffffff; font-size:0.62rem; padding:1px 5px; border-radius:3px; font-weight:800; margin-left:4px;'>ACTIVE</span>" if is_active else ""
+
+                        st.markdown(f"""<div style="background: rgba(15, 23, 42, 0.72); {active_border} border-left: 4px solid {ret_color}; border-radius: 8px; padding: 8px 10px; margin-bottom: 7px; transition: all 0.2s;">
+<div style="display:flex; justify-content:space-between; align-items:center;">
+    <span style="font-weight:700; font-size:0.88rem; color:#f8fafc;">{icon} {sec} {active_badge}</span>
+    <span style="font-weight:700; font-size:0.80rem; color:{ret_color}; background:{ret_bg}; padding:1px 6px; border-radius:4px;">
+        {arrow} {row['pChange']:+.2f}%
+    </span>
+</div>
+<div style="margin-top: 5px;">
+    <div style="display:flex; justify-content:space-between; font-size:0.70rem; color:#94a3b8; margin-bottom:2px;">
+        <span>Breadth: <b style="color:#4ade80;">{adv}🟢</b> / <b style="color:#f87171;">{dec}🔴</b></span>
+        <span style="color:#cbd5e1; font-weight:600;">{adv_pct:.0f}% Adv</span>
+    </div>
+    <div style="height:4px; width:100%; background:#1e293b; border-radius:2px; display:flex; overflow:hidden;">
+        <div style="width:{adv_pct}%; background:#22c55e;"></div>
+        <div style="width:{dec_pct}%; background:#ef4444;"></div>
+    </div>
+</div>
+<div style="display:flex; justify-content:space-between; align-items:center; margin-top:5px; font-size:0.70rem;">
+    <span style="background:{rrg_cfg['bg_color']}; color:{rrg_cfg['badge_color']}; border:1px solid {rrg_cfg['badge_color']}44; padding:1px 5px; border-radius:4px; font-weight:700;">
+        {rrg_cfg['emoji']} {quad.title()} (RS:{rs_rat:.1f})
+    </span>
+    <span style="color:#94a3b8;">Vol: <b style="color:#e2e8f0;">{avg_vs:.1f}x</b></span>
+</div>
+</div>""", unsafe_allow_html=True)
 
     with col_stocks:
         if active_sector:
@@ -1175,15 +1707,24 @@ else:
                 sector_stocks_df = sector_stocks_df.sort_values('pChange', ascending=False)
                 sector_avg = sector_stocks_df['pChange'].mean()
                 
-                st.markdown(f"""
-                <div style="background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(124, 58, 237, 0.3); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="font-size: 0.98rem; font-weight: 700; color: #f8fafc;">📋 {active_sector} Stocks</span>
-                        <span style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-size: 0.7rem; padding: 1px 7px; border-radius: 9999px; font-weight: 600;">{len(sector_stocks_df)} Stocks</span>
-                    </div>
-                    <span style="color: {'#22c55e' if sector_avg >= 0 else '#ef4444'}; font-weight: 700; font-size: 0.85rem;">Avg: {sector_avg:+.2f}%</span>
-                </div>
-                """, unsafe_allow_html=True)
+                pt_active = rrg_map.get(active_sector)
+                quad_badge = ""
+                if pt_active:
+                    q_cfg = SectorRRGEngine.QUADRANT_CONFIG.get(pt_active.quadrant, {})
+                    quad_badge = f"<span style='background:{q_cfg.get('bg_color', '')}; color:{q_cfg.get('badge_color', '')}; border:1px solid {q_cfg.get('badge_color', '')}44; font-size:0.68rem; padding:1px 6px; border-radius:4px; font-weight:700;'>{q_cfg.get('emoji', '')} {pt_active.quadrant.title()}</span>"
+
+                sec_icon = SECTOR_ICONS.get(active_sector, "📋")
+                
+                # Dedicated HTML header (zero leading indentation to prevent markdown raw code leakage)
+                header_html = f"""<div style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.88) 0%, rgba(30, 41, 59, 0.75) 100%); border: 1px solid rgba(124, 58, 237, 0.4); border-radius: 8px; padding: 9px 12px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap:wrap; gap:6px;">
+<div style="display: flex; align-items: center; gap: 8px;">
+    <span style="font-size: 0.96rem; font-weight: 800; color: #f8fafc;">{sec_icon} {active_sector} Stocks</span>
+    <span style="background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-size: 0.70rem; padding: 1px 7px; border-radius: 9999px; font-weight: 700;">{len(sector_stocks_df)} Stocks</span>
+    {quad_badge}
+</div>
+<span style="color: {'#22c55e' if sector_avg >= 0 else '#ef4444'}; font-weight: 800; font-size: 0.88rem;">Avg: {sector_avg:+.2f}%</span>
+</div>"""
+                st.markdown(header_html, unsafe_allow_html=True)
                 
                 # Build vol surge & indicator labels for drill-down
                 def _vol_surge_label(vs):
@@ -1224,7 +1765,19 @@ else:
                 sector_stocks_df['Daily RSI'] = rsi_labels
                 sector_stocks_df['vs VWAP'] = vwap_labels
 
-                display_df = sector_stocks_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
+                # Instant constituent search filter
+                q_sym = st.text_input(
+                    "Filter stocks",
+                    placeholder=f"Filter {len(sector_stocks_df)} {active_sector} stocks...",
+                    key="sec_drill_sym_filter",
+                    label_visibility="collapsed"
+                )
+
+                filtered_sec_df = sector_stocks_df
+                if q_sym:
+                    filtered_sec_df = filtered_sec_df[filtered_sec_df['Symbol'].str.contains(q_sym.upper(), case=False)]
+
+                display_df = filtered_sec_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
                 display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
                 
                 st.dataframe(
@@ -1237,7 +1790,7 @@ else:
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    height=345
+                    height=450
                 )
             else:
                 st.info(f"No stock data available for {active_sector}.")
@@ -1251,6 +1804,7 @@ else:
     # -------------------------------------------------------------
     tab_options = [
         "📊 Gainers & Losers",
+        "⚡ Intraday Flow & Reversals (Vol + OI)",
         "📈 Sector Chart",
         "🚨 Breakout Scanner",
         "🎯 Multi-Touch Proximity (KEI Pattern)",
@@ -1272,43 +1826,145 @@ else:
 
     # ---- TAB 1: Gainers & Losers ----
     if active_tab == "📊 Gainers & Losers":
+        # Quick Time-Instance Switcher Pill Bar
+        inst_box_c1, inst_box_c2 = st.columns([1.3, 3.7])
+        with inst_box_c1:
+            st.markdown(f"<span style='font-size:0.85rem; font-weight:600; color:#cbd5e1;'>⏱️ Active Instance:</span> <code style='color:#a78bfa;'>{selected_lookback}</code>", unsafe_allow_html=True)
+        with inst_box_c2:
+            st.segmented_control(
+                "Instance Time-Window",
+                options=lookback_options,
+                key="tab1_instance_quick_pills",
+                on_change=_sync_from_tab1,
+                label_visibility="collapsed",
+            )
+
+        # Mode Toggle between Net Day Change and Intraday Thrust Movers
+        gl_mode = st.radio(
+            "Leaderboard Metric View",
+            options=["📊 Net Day Change (Standard Top 10)", "⚡ Intraday Thrust Movers (Top Rebounds from Low & Dumps from High)"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="gl_view_mode_toggle"
+        )
+
         col_gainers, col_losers = st.columns(2)
 
-        with col_gainers:
-            st.markdown("##### 🟢 Top 10 Gainers")
-            if gainers_data:
-                gainer_df = pd.DataFrame(gainers_data)
-                st.dataframe(
-                    gainer_df.style.format({
-                        "LTP": "₹{:.2f}",
-                        "Change": "{:+.2f}%"
-                    }).map(
-                        lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else "",
-                        subset=["Change"]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                    selection_mode="single-row",
-                    key="gainer_leaderboard"
-                )
+        if gl_mode == "📊 Net Day Change (Standard Top 10)":
+            with col_gainers:
+                st.markdown("##### 🟢 Top 10 Gainers")
+                if gainers_data:
+                    gainer_df = pd.DataFrame(gainers_data)
+                    st.dataframe(
+                        gainer_df.style.format({
+                            "LTP": "₹{:.2f}",
+                            "Change": "{:+.2f}%"
+                        }).map(
+                            lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else "",
+                            subset=["Change"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        selection_mode="single-row",
+                        key="gainer_leaderboard"
+                    )
 
-        with col_losers:
-            st.markdown("##### 🔴 Top 10 Losers")
-            if losers_data:
-                loser_df = pd.DataFrame(losers_data)
-                st.dataframe(
-                    loser_df.style.format({
-                        "LTP": "₹{:.2f}",
-                        "Change": "{:+.2f}%"
-                    }).map(
-                        lambda v: "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else "",
-                        subset=["Change"]
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
-                    selection_mode="single-row",
-                    key="loser_leaderboard"
-                )
+            with col_losers:
+                st.markdown("##### 🔴 Top 10 Losers")
+                if losers_data:
+                    loser_df = pd.DataFrame(losers_data)
+                    st.dataframe(
+                        loser_df.style.format({
+                            "LTP": "₹{:.2f}",
+                            "Change": "{:+.2f}%"
+                        }).map(
+                            lambda v: "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else "",
+                            subset=["Change"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        selection_mode="single-row",
+                        key="loser_leaderboard"
+                    )
+        else:
+            # Intraday Thrust Movers: Rebounds from Low vs Dumps from High
+            with col_gainers:
+                st.markdown("##### 🟢 Top 10 Rebounds from Low (Intraday Surges)")
+                if not merged_closes.empty and "move_from_low" in merged_closes.columns:
+                    top_rebounds = merged_closes.sort_values(by="move_from_low", ascending=False).head(10)
+                    rebound_rows = []
+                    for _, r in top_rebounds.iterrows():
+                        sym_c = r["symbol"].replace("NSE:", "").replace("-EQ", "")
+                        vs = r.get("vol_surge", 0.0)
+                        vs_l = f"🔥 {vs:.1f}x" if vs >= 1.5 else (f"🟡 {vs:.1f}x" if vs >= 1.0 else "—")
+                        ind = _indicators.get(r["symbol"]) or _indicators.get(sym_c) or {}
+                        vw = ind.get("vwap")
+                        vw_l = f"₹{vw:.1f}" if vw else "—"
+                        rebound_rows.append({
+                            "Symbol": sym_c,
+                            "Sector": r["sector"],
+                            "LTP": r["close_last"],
+                            "From Low": f"+{r['move_from_low']:.2f}%",
+                            "Day Chg": r["pChange"],
+                            "Range Pos": f"{r.get('range_pos', 50):.0f}%",
+                            "Vol Surge": vs_l,
+                            "VWAP": vw_l,
+                        })
+                    if rebound_rows:
+                        reb_df = pd.DataFrame(rebound_rows)
+                        st.dataframe(
+                            reb_df.style.format({
+                                "LTP": "₹{:.2f}",
+                                "Day Chg": "{:+.2f}%"
+                            }).map(
+                                lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else "",
+                                subset=["Day Chg"]
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                            key="rebound_leaderboard"
+                        )
+                else:
+                    st.info("No intraday low/high data available.")
+
+            with col_losers:
+                st.markdown("##### 🔴 Top 10 Dumps from High (Intraday Reversals)")
+                if not merged_closes.empty and "drop_from_high" in merged_closes.columns:
+                    top_dumps = merged_closes.sort_values(by="drop_from_high", ascending=False).head(10)
+                    dump_rows = []
+                    for _, r in top_dumps.iterrows():
+                        sym_c = r["symbol"].replace("NSE:", "").replace("-EQ", "")
+                        vs = r.get("vol_surge", 0.0)
+                        vs_l = f"🔥 {vs:.1f}x" if vs >= 1.5 else (f"🟡 {vs:.1f}x" if vs >= 1.0 else "—")
+                        ind = _indicators.get(r["symbol"]) or _indicators.get(sym_c) or {}
+                        vw = ind.get("vwap")
+                        vw_l = f"₹{vw:.1f}" if vw else "—"
+                        dump_rows.append({
+                            "Symbol": sym_c,
+                            "Sector": r["sector"],
+                            "LTP": r["close_last"],
+                            "From High": f"-{r['drop_from_high']:.2f}%",
+                            "Day Chg": r["pChange"],
+                            "Range Pos": f"{r.get('range_pos', 50):.0f}%",
+                            "Vol Surge": vs_l,
+                            "VWAP": vw_l,
+                        })
+                    if dump_rows:
+                        dump_df = pd.DataFrame(dump_rows)
+                        st.dataframe(
+                            dump_df.style.format({
+                                "LTP": "₹{:.2f}",
+                                "Day Chg": "{:+.2f}%"
+                            }).map(
+                                lambda v: "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else "",
+                                subset=["Day Chg"]
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                            key="dump_leaderboard"
+                        )
+                else:
+                    st.info("No intraday low/high data available.")
 
         st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
         col_near_bo, col_near_bd = st.columns(2)
@@ -1352,6 +2008,351 @@ else:
                 )
             else:
                 st.info("No stocks currently within 0.75% of intraday breakdown level.")
+
+    # ---- TAB: Intraday Smart Flow & Reversal Radar ----
+    elif active_tab == "⚡ Intraday Flow & Reversals (Vol + OI)":
+        st.markdown("""
+        <div class="section-header" style="margin-top: 0.2rem; margin-bottom: 0.8rem;">
+            <h3>⚡ Intraday Smart Flow & Reversal Radar</h3>
+            <span class="badge" style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.35);">
+                INTRADAY THRUST • RELATIVE VOLUME SURGE • DERIVATIVES OI DYNAMICS • VWAP RECLAIM
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("ℹ️ How does Intraday Flow & Reversal Detection Work?", expanded=False):
+            st.markdown("""
+            **Overcoming Morning Gap Blindness (The Intraday Reversal Strategy):**
+            1. **Intraday Thrust (From Low/High)**: Rather than measuring net day change from yesterday's close, this detects stocks that bottomed or topped *during the session* and moved $\ge 1.2\%$ from their extreme.
+            2. **Relative Volume Surge ($RVol$)**: Compares intraday volume to the time-adjusted 10-day historical average. Volume surges $\ge 1.5\times$ confirm institutional commitment.
+            3. **Derivatives Positioning & $\Delta\text{OI}$ Quadrants**:
+               - **🟢 Long Build-up**: Price rising from lows + positive/supportive PCR (fresh institutional longs).
+               - **⚡ Short Covering**: Rapid rally off support + Oversold PCR ($\le 0.55$) / Call unwinding (trapped call writers panicking).
+               - **🔴 Short Build-up**: Price rolling over from highs + Call writing / declining PCR.
+               - **🩸 Long Unwinding**: Aggressive dump from highs + Overbought PCR ($\ge 0.85$) (trapped bulls capitulating).
+            4. **VWAP Confluence**: Price crossing and holding above/below Session VWAP confirms trend takeover.
+            """)
+
+        # Quick Time-Instance Switcher Pill Bar for Tab 3
+        inst_c1, inst_c2 = st.columns([1.3, 3.7])
+        with inst_c1:
+            st.markdown(f"<span style='font-size:0.85rem; font-weight:600; color:#cbd5e1;'>⏱️ Active Instance:</span> <code style='color:#a78bfa;'>{selected_lookback}</code>", unsafe_allow_html=True)
+        with inst_c2:
+            st.segmented_control(
+                "Instance Time-Window Tab 3",
+                options=lookback_options,
+                key="tab3_instance_quick_pills",
+                on_change=_sync_from_tab3,
+                label_visibility="collapsed",
+            )
+
+        # Radar Sub-Tab Toggle
+        radar_view_mode = st.radio(
+            "Radar Focus View",
+            options=[
+                "⏱️ Rolling Instance Thrust & Flow (Vol + OI)",
+                "🔥 Midday Squeeze & Breakout Radar (10:30-12:45 Coil -> Afternoon Run)"
+            ],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="radar_view_mode_toggle"
+        )
+
+        cached_pcr = FOPCRScreener.load_snapshot_cache(max_age_minutes=180)
+
+        # ── SUB-MODE 1: Current Instance Thrust & Flow ────────────────────────
+        if radar_view_mode == "⏱️ Rolling Instance Thrust & Flow (Vol + OI)":
+            flow_setups = IntradayFlowReversalEngine.evaluate_universe(
+                merged_closes=merged_closes,
+                quotes=quotes,
+                pcr_cache=cached_pcr,
+                indicators=_indicators
+            )
+
+            if not flow_setups:
+                st.info("No intraday flow data currently available. Ensure market quotes or 15m candles are loaded.")
+            else:
+                # Quick KPIs
+                c_bull = len([s for s in flow_setups if s.direction == "BULLISH" and s.move_from_low_pct >= 1.2])
+                c_bear = len([s for s in flow_setups if s.direction == "BEARISH" and s.drop_from_high_pct >= 1.2])
+                c_vol = len([s for s in flow_setups if s.vol_surge >= 1.5])
+                c_sqz = len([s for s in flow_setups if "SHORT COVERING" in s.flow_quadrant])
+
+                pk1, pk2, pk3, pk4 = st.columns(4)
+                with pk1:
+                    st.metric("🟢 Bullish Rebounds (≥1.2%)", c_bull, help="Stocks rebounding ≥1.2% in active lookback window")
+                with pk2:
+                    st.metric("🔴 Bearish Dumps (≥1.2%)", c_bear, help="Stocks falling ≥1.2% in active lookback window")
+                with pk3:
+                    st.metric("🔥 Volume Spikes (≥1.5x)", c_vol, help="Stocks with relative volume ≥1.5x vs historical average")
+                with pk4:
+                    st.metric("⚡ Squeeze Setups", c_sqz, help="Oversold stocks exhibiting aggressive intraday short covering")
+
+                st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+
+                # Interactive Filters
+                flt_c1, flt_c2, flt_c3, flt_c4, flt_c5 = st.columns([1.2, 1.0, 1.0, 1.0, 1.1])
+                with flt_c1:
+                    flt_dir = st.selectbox(
+                        "Direction Filter",
+                        ["All Setups", "🟢 Bullish Reversals (From Low)", "🔴 Bearish Dumps (From High)", "⚡ Short Squeezes Only"],
+                        key="flow_flt_dir"
+                    )
+                with flt_c2:
+                    flt_min_vol = st.slider("Min Vol Surge", 0.0, 3.0, 0.8, 0.2, key="flow_flt_vol", format="%.1fx")
+                with flt_c3:
+                    flt_min_thrust = st.slider("Min Thrust %", 0.5, 4.0, 1.0, 0.25, key="flow_flt_thrust", format="%.2f%%")
+                with flt_c4:
+                    flt_min_score = st.slider("Min Conviction", 0, 90, 40, 5, key="flow_flt_score")
+                with flt_c5:
+                    flt_sector = st.selectbox("Sector", ["All Sectors"] + options, key="flow_flt_sector")
+
+                filtered = list(flow_setups)
+                if flt_dir == "🟢 Bullish Reversals (From Low)":
+                    filtered = [s for s in filtered if s.direction == "BULLISH"]
+                elif flt_dir == "🔴 Bearish Dumps (From High)":
+                    filtered = [s for s in filtered if s.direction == "BEARISH"]
+                elif flt_dir == "⚡ Short Squeezes Only":
+                    filtered = [s for s in filtered if "SHORT COVERING" in s.flow_quadrant]
+
+                if flt_min_vol > 0:
+                    filtered = [s for s in filtered if s.vol_surge >= flt_min_vol]
+
+                if flt_min_thrust > 0:
+                    filtered = [
+                        s for s in filtered 
+                        if (s.move_from_low_pct >= flt_min_thrust if s.direction == "BULLISH" else (s.drop_from_high_pct >= flt_min_thrust if s.direction == "BEARISH" else max(s.move_from_low_pct, s.drop_from_high_pct) >= flt_min_thrust))
+                    ]
+
+                if flt_min_score > 0:
+                    filtered = [s for s in filtered if s.reversal_score >= flt_min_score]
+
+                if flt_sector != "All Sectors":
+                    filtered = [s for s in filtered if s.sector == flt_sector]
+
+                if not filtered:
+                    st.info("No stocks match the selected filter criteria. Try relaxing the filters.")
+                else:
+                    st.caption(f"Showing **{len(filtered)}** active intraday flow & reversal candidates for **{selected_lookback}**:")
+
+                    table_rows = []
+                    for s in filtered:
+                        filled_blocks = int(round(s.range_pos_pct / 10))
+                        empty_blocks = 10 - filled_blocks
+                        range_bar = "█" * filled_blocks + "░" * empty_blocks + f" {s.range_pos_pct:.0f}%"
+
+                        if s.vol_surge >= 2.0:
+                            vs_badge = f"🔥 {s.vol_surge:.1f}x"
+                        elif s.vol_surge >= 1.2:
+                            vs_badge = f"🟢 {s.vol_surge:.1f}x"
+                        elif s.vol_surge > 0:
+                            vs_badge = f"🟡 {s.vol_surge:.1f}x"
+                        else:
+                            vs_badge = "—"
+
+                        if s.vs_vwap is not None:
+                            vwap_badge = f"↑ {s.vs_vwap:+.1f}%" if s.vs_vwap >= 0 else f"↓ {s.vs_vwap:+.1f}%"
+                        else:
+                            vwap_badge = "—"
+
+                        if s.direction == "BULLISH":
+                            thrust_str = f"🟢 +{s.move_from_low_pct:.2f}%"
+                        elif s.direction == "BEARISH":
+                            thrust_str = f"🔴 -{s.drop_from_high_pct:.2f}%"
+                        else:
+                            thrust_str = f"+{s.move_from_low_pct:.2f}%"
+
+                        table_rows.append({
+                            "Symbol": s.clean_symbol,
+                            "Sector": s.sector,
+                            "LTP": s.ltp,
+                            "Net Chg": s.pchange,
+                            "Thrust": thrust_str,
+                            "Session Range": range_bar,
+                            "Vol Surge": vs_badge,
+                            "Deriv. Flow": s.flow_quadrant,
+                            "VWAP Status": vwap_badge,
+                            "PCR": f"{s.pcr_oi:.2f}" if s.pcr_oi else "—",
+                            "Score": f"⭐ {s.reversal_score}/100",
+                        })
+
+                    disp_df = pd.DataFrame(table_rows)
+                    st.dataframe(
+                        disp_df.style.format({
+                            "LTP": "₹{:.2f}",
+                            "Net Chg": "{:+.2f}%"
+                        }).map(
+                            lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else ("color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""),
+                            subset=["Net Chg"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        selection_mode="single-row",
+                        key="flow_reversal_table"
+                    )
+
+                    selected_idx = 0
+                    if "flow_reversal_table" in st.session_state and st.session_state["flow_reversal_table"]:
+                        sel_dict = st.session_state["flow_reversal_table"].get("selection", {})
+                        rows = sel_dict.get("rows", [])
+                        if rows and 0 <= rows[0] < len(filtered):
+                            selected_idx = rows[0]
+
+                    top_setup = filtered[selected_idx]
+
+                    st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+                    st.markdown(f"#### 🎯 Actionable Trade Blueprint: **{top_setup.clean_symbol}** ({top_setup.sector})")
+
+                    tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+                    with tc1:
+                        dir_color = "#22c55e" if top_setup.direction == "BULLISH" else "#ef4444"
+                        st.markdown(f"**Trade Setup**<br><span style='color:{dir_color}; font-size:1.15rem; font-weight:800;'>{'BUY ATM CALL' if top_setup.direction == 'BULLISH' else 'BUY ATM PUT'}</span>", unsafe_allow_html=True)
+                    with tc2:
+                        st.metric("Entry Trigger", f"₹{top_setup.entry_trigger:.2f}" if top_setup.entry_trigger else "—")
+                    with tc3:
+                        st.metric("Stop Loss (Pivot)", f"₹{top_setup.stop_loss:.2f}" if top_setup.stop_loss else "—")
+                    with tc4:
+                        st.metric("Target 1 (1.5R)", f"₹{top_setup.target_1:.2f}" if top_setup.target_1 else "—")
+                    with tc5:
+                        st.metric("Target 2 (2.5R)", f"₹{top_setup.target_2:.2f}" if top_setup.target_2 else "—")
+
+                    st.info(f"🧠 **Institutional Forensic Catalyst**: {top_setup.key_catalyst}")
+
+        # ── SUB-MODE 2: Midday Squeeze & Breakout Radar ───────────────────────
+        elif radar_view_mode == "🔥 Midday Squeeze & Breakout Radar (10:30-12:45 Coil -> Afternoon Run)":
+            st.markdown("""
+            <div style="background: rgba(30, 27, 75, 0.45); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: 8px; padding: 10px 16px; margin-bottom: 12px;">
+                <span style="color: #c4b5fd; font-weight: 700; font-size: 0.95rem;">🎯 The Midday "Coil & Blast" Strategy:</span>
+                <span style="color: #cbd5e1; font-size: 0.85rem;">
+                    Identifies stocks that compressed in an ultra-tight consolidation channel (<1.2% channel) between 10:30 AM and 12:45 PM, and are actively breaking out into the afternoon session with high volume and VWAP momentum.
+                </span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            today_15m_all = df[df['timestamp'].dt.date == target_date].copy() if not df.empty else pd.DataFrame()
+
+            # Interactive Filter Bar
+            mf_c1, mf_c2, mf_c3, mf_c4 = st.columns([1.2, 1.0, 1.0, 1.1])
+            with mf_c1:
+                mid_status_filter = st.selectbox(
+                    "Breakout Status",
+                    ["All Candidates", "🟢 Bullish Breakouts Only", "🔴 Bearish Breakdowns Only", "⚡ Coiled Squeezes (Watchlist)"],
+                    key="mid_flt_status"
+                )
+            with mf_c2:
+                mid_max_coil = st.slider("Max Coil Width %", 0.4, 2.0, 1.2, 0.1, key="mid_flt_coil", format="%.1f%%")
+            with mf_c3:
+                mid_min_vol = st.slider("Min Vol Surge", 0.8, 3.0, 1.2, 0.1, key="mid_flt_vol", format="%.1fx")
+            with mf_c4:
+                mid_sector = st.selectbox("Sector Filter", ["All Sectors"] + options, key="mid_flt_sector")
+
+            midday_setups = MiddayBreakoutEngine.scan_universe(
+                today_15m_df=today_15m_all,
+                quotes=quotes,
+                pcr_cache=cached_pcr,
+                fo_metadata=fo_metadata,
+                max_coil_pct=mid_max_coil,
+                min_vol_surge=mid_min_vol
+            )
+
+            m_filtered = list(midday_setups)
+            if mid_status_filter == "🟢 Bullish Breakouts Only":
+                m_filtered = [s for s in m_filtered if "BULLISH" in s.status]
+            elif mid_status_filter == "🔴 Bearish Breakdowns Only":
+                m_filtered = [s for s in m_filtered if "BEARISH" in s.status]
+            elif mid_status_filter == "⚡ Coiled Squeezes (Watchlist)":
+                m_filtered = [s for s in m_filtered if s.status == "COILED_SQUEEZE"]
+
+            if mid_sector != "All Sectors":
+                m_filtered = [s for s in m_filtered if s.sector == mid_sector]
+
+            # KPIs
+            m_bull_count = len([s for s in midday_setups if "BULLISH" in s.status])
+            m_bear_count = len([s for s in midday_setups if "BEARISH" in s.status])
+            m_coil_count = len([s for s in midday_setups if s.status == "COILED_SQUEEZE"])
+
+            mk1, mk2, mk3, mk4 = st.columns(4)
+            with mk1:
+                st.metric("🟢 Bullish Breakouts", m_bull_count, help="Stocks breaking above 10:30-12:45 lunch ceiling")
+            with mk2:
+                st.metric("🔴 Bearish Breakdowns", m_bear_count, help="Stocks breaking below 10:30-12:45 lunch floor")
+            with mk3:
+                st.metric("⚡ Coiled in Squeeze", m_coil_count, help="Stocks tightly coiling; prime afternoon explosion watchlist")
+            with mk4:
+                st.metric("🎯 Total Monitored", len(midday_setups))
+
+            st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+
+            if not m_filtered:
+                st.info("No midday breakout setups match the selected criteria. Try expanding the coil width or relaxing filters.")
+            else:
+                st.caption(f"Surfacing **{len(m_filtered)}** high-conviction midday coil & breakout opportunities:")
+
+                m_table_rows = []
+                for s in m_filtered:
+                    status_badge = "🟢 BREAKOUT" if "BULLISH" in s.status else ("🔴 BREAKDOWN" if "BEARISH" in s.status else "⚡ COILED")
+                    m_table_rows.append({
+                        "Symbol": s.symbol.replace("NSE:", "").replace("-EQ", ""),
+                        "Sector": s.sector,
+                        "LTP": s.ltp,
+                        "Status": status_badge,
+                        "Lunch Coil Range": f"{s.midday_range_pct:.2f}% (₹{s.midday_low:.1f}-₹{s.midday_high:.1f})",
+                        "Breakout %": f"{s.breakout_pct:+.2f}%" if s.breakout_pct != 0 else "—",
+                        "Vol Surge": f"{s.vol_surge:.1f}x",
+                        "VWAP Status": s.vwap_status.replace("_", " "),
+                        "Score": f"⭐ {s.score}/100",
+                        "Entry": s.entry_price,
+                        "Stop Loss": s.stop_loss,
+                        "Target 1": s.target_1,
+                        "RRR": f"1:{s.risk_reward:.1f}",
+                    })
+
+                m_disp_df = pd.DataFrame(m_table_rows)
+                st.dataframe(
+                    m_disp_df.style.format({
+                        "LTP": "₹{:.2f}",
+                        "Entry": "₹{:.2f}",
+                        "Stop Loss": "₹{:.2f}",
+                        "Target 1": "₹{:.2f}"
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                    selection_mode="single-row",
+                    key="midday_breakout_table"
+                )
+
+                st.markdown("#### 🔍 Actionable Breakout Blueprints")
+                active_breakouts = [s for s in m_filtered if "BREAKOUT" in s.status or "BREAKDOWN" in s.status]
+                display_blueprints = active_breakouts[:6] if active_breakouts else m_filtered[:4]
+
+                # Render responsive cards in rows of 3
+                num_cards = len(display_blueprints)
+                for chunk_idx in range(0, num_cards, 3):
+                    chunk = display_blueprints[chunk_idx : chunk_idx + 3]
+                    cols = st.columns(len(chunk))
+                    for col, s in zip(cols, chunk):
+                        with col:
+                            sym_c = s.symbol.replace("NSE:", "").replace("-EQ", "")
+                            badge_color = "#22c55e" if "BULLISH" in s.status else ("#ef4444" if "BEARISH" in s.status else "#eab308")
+                            st.markdown(f"""
+                            <div style="background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(148, 163, 184, 0.2); border-top: 3px solid {badge_color}; border-radius: 8px; padding: 12px; margin-bottom: 12px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <span style="font-weight:700; font-size:1.05rem; color:#f8fafc;">{sym_c}</span>
+                                    <span style="font-size:0.75rem; background:rgba(255,255,255,0.1); padding:2px 6px; border-radius:4px; color:{badge_color}; font-weight:700;">{s.status}</span>
+                                </div>
+                                <div style="font-size:0.75rem; color:#94a3b8; margin-top:2px;">{s.sector} | Score: <b>{s.score}/100</b></div>
+                                <hr style="margin: 8px 0; border: 0; border-top: 1px solid rgba(255,255,255,0.08);">
+                                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size:0.8rem;">
+                                    <div><span style="color:#94a3b8;">Entry:</span> <b>₹{s.entry_price:.2f}</b></div>
+                                    <div><span style="color:#94a3b8;">SL:</span> <b style="color:#f87171;">₹{s.stop_loss:.2f}</b></div>
+                                    <div><span style="color:#94a3b8;">T1:</span> <b style="color:#4ade80;">₹{s.target_1:.2f}</b></div>
+                                    <div><span style="color:#94a3b8;">RRR:</span> <b>1:{s.risk_reward:.1f}</b></div>
+                                </div>
+                                <div style="font-size:0.75rem; color:#cbd5e1; margin-top:8px; line-height:1.25;">
+                                    <i>{s.catalyst}</i>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
 
     # ---- TAB 2: Sector Chart ----
     elif active_tab == "📈 Sector Chart":

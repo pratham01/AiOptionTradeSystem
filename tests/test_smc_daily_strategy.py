@@ -93,6 +93,35 @@ class TestSmartMoneyConceptStrategy(unittest.TestCase):
         self.assertIsNotNone(agent.strategy)
         self.assertIsNotNone(agent.engine)
 
+    def test_strategy_factory_instantiation(self):
+        """Verify SmartMoneyConceptStrategy can be created from StrategyFactory."""
+        from trade_system.domains.strategy.application.strategies.strategy_registry import StrategyFactory
+        strat = StrategyFactory.create_strategy("smc")
+        self.assertEqual(strat.name, "smc")
+        self.assertIsInstance(strat, SmartMoneyConceptStrategy)
+
+    def test_setup_contains_photon_and_jeafx_attributes(self):
+        """Verify SmcTradeSetup contains Photon structure and JeaFx supply/demand attributes."""
+        df = self._generate_synthetic_ohlcv("bullish_ob")
+        setup = self.strategy.analyze_symbol(df, symbol="NSE:TEST-EQ")
+        if setup is not None:
+            self.assertTrue(hasattr(setup, "zone_classification"))
+            self.assertTrue(hasattr(setup, "strong_protected_level"))
+            self.assertTrue(hasattr(setup, "weak_target_level"))
+            self.assertTrue(hasattr(setup, "opposing_target_zone"))
+            self.assertTrue(hasattr(setup, "is_internal_realigned"))
+            summary = setup.format_summary()
+            self.assertIn("Protected SL", summary)
+            self.assertIn("RRR", summary)
+
+    def test_generate_signals_base_strategy(self):
+        """Verify generate_signals runs cleanly on historical dataframe."""
+        df = self._generate_synthetic_ohlcv("bullish_ob")
+        sig_df = self.strategy.generate_signals(df)
+        self.assertIn("signal", sig_df.columns)
+        self.assertIn("entry_price", sig_df.columns)
+        self.assertIn("stop_loss", sig_df.columns)
+
 
 if __name__ == "__main__":
     unittest.main()

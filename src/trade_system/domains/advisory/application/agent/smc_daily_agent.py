@@ -143,25 +143,27 @@ class SmcDailyScannerAgent:
         bearish = [s for s in top_setups if s.direction == -1]
 
         if bullish:
-            lines.append("🟢 <b>BULLISH DEMAND & DISCOUNT REVERSALS (Sector Confirmed):</b>")
+            lines.append("🟢 <b>BULLISH DEMAND & REALIGNMENT (Sector Confirmed):</b>")
             for s in bullish:
                 sym = s.symbol.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
                 reasons_str = "; ".join(s.reasons[:2])
+                z_tag = f" [{s.zone_classification}]" if s.zone_classification != "NONE" else ""
                 lines.append(
-                    f"• <b>{sym}</b> (Score: {s.confluence_score:.0f}/100)\n"
-                    f"  Entry: ₹{s.entry_price:.2f} | SL: ₹{s.stop_loss:.2f} | T1: ₹{s.target_1:.2f} (1:{s.risk_reward_ratio:.1f} RRR)\n"
+                    f"• <b>{sym}</b>{z_tag} (Score: {s.confluence_score:.0f}/100)\n"
+                    f"  Entry: ₹{s.entry_price:.2f} | Protected SL: ₹{s.stop_loss:.2f} | T1 (Range): ₹{s.target_1:.2f} | T2 (Target): ₹{s.target_2:.2f} (1:{s.risk_reward_ratio:.1f} RRR)\n"
                     f"  <i>{reasons_str}</i>"
                 )
             lines.append("")
 
         if bearish:
-            lines.append("🔴 <b>BEARISH SUPPLY & PREMIUM REVERSALS (Sector Confirmed):</b>")
+            lines.append("🔴 <b>BEARISH SUPPLY & REALIGNMENT (Sector Confirmed):</b>")
             for s in bearish:
                 sym = s.symbol.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
                 reasons_str = "; ".join(s.reasons[:2])
+                z_tag = f" [{s.zone_classification}]" if s.zone_classification != "NONE" else ""
                 lines.append(
-                    f"• <b>{sym}</b> (Score: {s.confluence_score:.0f}/100)\n"
-                    f"  Entry: ₹{s.entry_price:.2f} | SL: ₹{s.stop_loss:.2f} | T1: ₹{s.target_1:.2f} (1:{s.risk_reward_ratio:.1f} RRR)\n"
+                    f"• <b>{sym}</b>{z_tag} (Score: {s.confluence_score:.0f}/100)\n"
+                    f"  Entry: ₹{s.entry_price:.2f} | Protected SL: ₹{s.stop_loss:.2f} | T1 (Range): ₹{s.target_1:.2f} | T2 (Target): ₹{s.target_2:.2f} (1:{s.risk_reward_ratio:.1f} RRR)\n"
                     f"  <i>{reasons_str}</i>"
                 )
             lines.append("")
@@ -183,8 +185,8 @@ class SmcDailyScannerAgent:
             f"**Generated:** {now_str} IST  ",
             f"**Universe:** 212 F&O Universe Stocks & Major Indices  ",
             f"**Total Setups Found:** {len(setups)}  \n",
-            "| Symbol | Sector | Action | Type | Score | Spot / Entry | Stop Loss | Target 1 | RRR | Sector Status |",
-            "| :--- | :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :--- |",
+            "| Symbol | Sector | Action | Zone Type | Score | Spot / Entry | Protected SL | T1 (Range) | T2 (Target) | RRR | Sector Status |",
+            "| :--- | :--- | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
         ]
 
         for s in setups:
@@ -192,8 +194,9 @@ class SmcDailyScannerAgent:
             icon = "🟢 CALL" if s.direction == 1 else "🔴 PUT"
             sec_eval = self.conflict_resolver.evaluate_alignment(s.symbol, s.direction)
             sec_badge = "✅ ALIGNED" if sec_eval.is_aligned else f"🚫 HEADWIND ({sec_eval.sector_pct:+.1f}%)"
+            z_type = s.zone_classification if s.zone_classification != "NONE" else s.setup_type
             lines.append(
-                f"| **{sym}** | `{sec_eval.sector}` | {icon} | {s.setup_type} | {s.confluence_score:.0f} | ₹{s.entry_price:.2f} | ₹{s.stop_loss:.2f} | ₹{s.target_1:.2f} | 1:{s.risk_reward_ratio:.1f} | {sec_badge} |"
+                f"| **{sym}** | `{sec_eval.sector}` | {icon} | `{z_type}` | {s.confluence_score:.0f} | ₹{s.entry_price:.2f} | ₹{s.stop_loss:.2f} | ₹{s.target_1:.2f} | ₹{s.target_2:.2f} | 1:{s.risk_reward_ratio:.1f} | {sec_badge} |"
             )
 
         lines.append("\n## Detailed Setups Rationale\n")
@@ -203,9 +206,10 @@ class SmcDailyScannerAgent:
             lines.append(f"### {idx}. {sym} ({s.action}) — Sector: {sec_eval.sector}")
             lines.append(f"- **Sector Alignment:** {sec_eval.reason}")
             lines.append(f"- **Confluence Score:** {s.confluence_score:.0f}/100")
-            lines.append(f"- **Trade Levels:** Entry ₹{s.entry_price:.2f} | Stop Loss ₹{s.stop_loss:.2f} | Target ₹{s.target_1:.2f}")
+            lines.append(f"- **Zone Classification:** `{s.zone_classification}` | Dealing Range: `{s.equilibrium_status}`")
+            lines.append(f"- **Structure State:** `{s.market_structure}`")
+            lines.append(f"- **Trade Levels:** Entry ₹{s.entry_price:.2f} | Protected SL ₹{s.stop_loss:.2f} | T1 (Range) ₹{s.target_1:.2f} | T2 (Weak Target) ₹{s.target_2:.2f}")
             lines.append(f"- **Risk-to-Reward:** 1:{s.risk_reward_ratio:.1f}")
-            lines.append(f"- **Dealing Range:** {s.equilibrium_status} Zone")
             lines.append(f"- **Institutional Factors:**")
             for r in s.reasons:
                 lines.append(f"  - {r}")

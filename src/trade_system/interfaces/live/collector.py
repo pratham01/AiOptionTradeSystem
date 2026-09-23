@@ -83,6 +83,8 @@ from trade_system.interfaces.live.pipelines.gamma_pipeline import GammaPipeline
 from trade_system.shared.observability.metrics import METRICS
 from trade_system.shared.observability.health import HEALTH_CHECKER
 from trade_system.interfaces.live.health_server import start_health_server
+from trade_system.core.orchestration.workflow_engine import WorkflowEngine
+import asyncio
 
 
 LOGGER = logging.getLogger(__name__)

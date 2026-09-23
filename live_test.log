@@ -1,9 +1,0 @@
-2026-05-20 16:34:23,155 - trade_system.infrastructure.brokers.factory - INFO - Fyers broker initialized
-2026-05-20 16:34:23,156 - trade_system.application.evolution.weight_evolver - INFO - Using default weights for candidate_screener.
-2026-05-20 16:34:23,156 - trade_system.application.agent.candidate_screener_agent - INFO - CandidateScreenerAgent weights: {'volume_delta': 0.3, 'compression': 0.2, 'value_area': 0.15, 'trend_alignment': 0.2, 'momentum': 0.1, 'market_context': 0.05}
-2026-05-20 16:34:23,156 - trade_system.application.evolution.weight_evolver - INFO - Using default weights for setup_validator.
-2026-05-20 16:34:23,156 - trade_system.application.agent.setup_validator_agent - INFO - SetupValidatorAgent weights: {'volume_delta': 0.25, 'price_action': 0.3, 'momentum': 0.2, 'value_area': 0.15, 'market_context': 0.1}
-2026-05-20 16:34:23,157 - trade_system.interfaces.live.agent_engine - INFO - Starting Agentic Live Engine...
-2026-05-20 16:34:23,157 - trade_system.interfaces.live.agent_engine - INFO - Authenticating broker...
-2026-05-20 16:34:23,249 - trade_system.infrastructure.brokers.fyers.client - ERROR - Fyers authentication failed: Your token has expired. Please generate a token
-2026-05-20 16:34:23,249 - trade_system.interfaces.live.agent_engine - ERROR - Broker authentication failed. Exiting.

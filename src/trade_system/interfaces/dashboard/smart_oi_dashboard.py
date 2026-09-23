@@ -23,6 +23,13 @@ from trade_system.domains.market_data.infrastructure.data.fo_universe import get
 from trade_system.shared.config import Settings
 from trade_system.interfaces.dashboard.shared_broker import get_cached_broker
 from trade_system.domains.advisory.application.agent.option_chain_monitor_agent import OptionChainMonitorAgent
+from trade_system.domains.analysis.application.analysis.stockmojo_smart_oi_engine import (
+    aggregate_option_snapshots,
+    resample_intraday_data,
+    detect_price_volume_divergences,
+    format_indian_number,
+    DivergenceSignal,
+)
 import json
 
 LOGGER = logging.getLogger(__name__)
@@ -144,30 +151,20 @@ def load_db_snapshots(symbol: str, target_date: str) -> list[tuple[datetime, pd.
         snapshots = []
         with engine.connect() as conn:
             from sqlalchemy import text
-            start_time = f"{target_date} 00:00:00"
-            end_time = f"{target_date} 23:59:59"
-            query = text("""
-                SELECT DISTINCT timestamp 
+            data_query = text("""
+                SELECT * 
                 FROM option_chain_data 
                 WHERE underlying_symbol = :symbol 
-                  AND timestamp >= :start_time
-                  AND timestamp <= :end_time
+                  AND substr(timestamp, 1, 10) = :target_date
                 ORDER BY timestamp ASC
             """)
-            ts_df = pd.read_sql(query, conn, params={"symbol": symbol, "start_time": start_time, "end_time": end_time})
-            if ts_df.empty:
+            df = pd.read_sql(data_query, conn, params={"symbol": symbol, "target_date": target_date})
+            if df.empty:
                 return []
             
-            for ts in ts_df["timestamp"]:
-                data_query = text("""
-                    SELECT * 
-                    FROM option_chain_data 
-                    WHERE underlying_symbol = :symbol 
-                      AND timestamp = :ts
-                """)
-                df = pd.read_sql(data_query, conn, params={"symbol": symbol, "ts": ts})
+            for ts, group in df.groupby("timestamp", sort=False):
                 ts_dt = datetime.fromisoformat(ts) if isinstance(ts, str) else ts
-                snapshots.append((ts_dt, df))
+                snapshots.append((ts_dt, group))
         return snapshots
     except Exception as e:
         LOGGER.error(f"Error loading snapshots: {e}")
@@ -181,17 +178,14 @@ def load_db_price_data(symbol: str, target_date: str) -> pd.DataFrame:
         engine = get_engine()
         with engine.connect() as conn:
             from sqlalchemy import text
-            start_time = f"{target_date} 00:00:00"
-            end_time = f"{target_date} 23:59:59"
             query = text("""
                 SELECT timestamp, open, high, low, close, volume 
                 FROM ohlcv_1m 
                 WHERE symbol = :symbol 
-                  AND timestamp >= :start_time
-                  AND timestamp <= :end_time
+                  AND substr(timestamp, 1, 10) = :target_date
                 ORDER BY timestamp ASC
             """)
-            df = pd.read_sql(query, conn, params={"symbol": symbol, "start_time": start_time, "end_time": end_time})
+            df = pd.read_sql(query, conn, params={"symbol": symbol, "target_date": target_date})
             if not df.empty:
                 df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed")
             return df
@@ -941,6 +935,366 @@ def render_actionable_trade_blueprint(
             </div>
         </div>
         """), unsafe_allow_html=True)
+
+
+def render_stockmojo_smart_oi_terminal(
+    symbol_label: str,
+    db_symbol: str,
+    spot_price: float,
+    price_df: pd.DataFrame,
+    snapshots: list,
+    analyzer: SmartOIAnalyzer
+):
+    """
+    Render 1:1 StockMojo-style Smart OI Terminal:
+    - Left Panel (65%): Multi-pane synchronized Price Candles, Volume Delta / Smart OI Delta, and Volume.
+    - Right Panel (35%): Put/Call OI Change + PE-CE Net Flow, and Intraday OI vs Vol PCR.
+    - Divergence Forensics Banner: Automatic detection and high-conviction alerts.
+    """
+    from plotly.subplots import make_subplots
+
+    st.markdown("### 🎯 StockMojo Smart OI Terminal")
+    st.caption("Institutional Order Flow, Volume Delta & Real-Time Open Interest Divergence Cockpit")
+
+    if price_df is None or price_df.empty:
+        st.info("ℹ️ Intraday candlestick price history is not available for this session. Please check broker connection or database historical logs.")
+        return
+
+    # Top Controls Bar: Timeframe & Delta Mode
+    c_tf, c_mode, c_scope = st.columns([1.6, 2.4, 1.2])
+    with c_tf:
+        tf = st.radio("⏱️ Timeframe", ["1m", "3m", "5m", "15m"], index=1, horizontal=True, key="sm_terminal_tf")
+    with c_mode:
+        delta_mode = st.radio(
+            "⚡ Delta Mode",
+            ["Smart OI Delta", "Candle Volume Delta", "Cumulative Delta (CVD)"],
+            index=0,
+            horizontal=True,
+            key="sm_terminal_delta_mode"
+        )
+    with c_scope:
+        st.markdown(_clean_html(f"""
+            <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.4); border-radius: 8px; padding: 6px 12px; text-align: center; margin-top: 10px;">
+                <span style="font-size: 11px; color: #94a3b8;">Spot Reference</span><br>
+                <b style="font-size: 14px; color: #38bdf8;">₹{spot_price:,.1f}</b>
+            </div>
+        """), unsafe_allow_html=True)
+
+    # 1. Aggregate and resample data
+    snap_df = aggregate_option_snapshots(snapshots)
+    aligned_df = resample_intraday_data(price_df, snap_df, timeframe=tf)
+
+    if aligned_df.empty:
+        st.warning("⚠️ No aligned price/volume data found for the selected timeframe.")
+        return
+
+    # 2. Select delta series
+    if delta_mode == "Smart OI Delta":
+        delta_col = "smart_oi_delta"
+        delta_label = f"Smart OI Delta (ΔPE - ΔCE) [{tf}]"
+    elif delta_mode == "Candle Volume Delta":
+        delta_col = "candle_volume_delta"
+        delta_label = f"Candle Volume Delta [{tf}]"
+    else:
+        delta_col = "cvd"
+        delta_label = "Cumulative Volume Delta (CVD)"
+
+    # 3. Detect Divergences
+    divergences = detect_price_volume_divergences(aligned_df, delta_col=delta_col, window=2)
+
+    # Metrics summary
+    cur_spot = aligned_df.iloc[-1]["close"]
+    open_spot = aligned_df.iloc[0]["open"]
+    p_chg = ((cur_spot - open_spot) / open_spot) * 100
+    latest_delta = aligned_df.iloc[-1][delta_col]
+    latest_net_oi_chg = aligned_df.iloc[-1].get("net_oi_chg", 0.0)
+    latest_oi_pcr = aligned_df.iloc[-1].get("oi_pcr", 1.0)
+    latest_vol_pcr = aligned_df.iloc[-1].get("vol_pcr", 1.0)
+
+    # Find recent active divergence in last 10 candles
+    recent_div: Optional[DivergenceSignal] = None
+    if divergences:
+        latest_div = divergences[-1]
+        div_indices = aligned_df[aligned_df["timestamp"] == latest_div.timestamp].index
+        if not div_indices.empty and (len(aligned_df) - 1 - div_indices[0]) <= 10:
+            recent_div = latest_div
+
+    # Executive Divergence Forensics Banner
+    if recent_div:
+        if recent_div.divergence_type == "BEARISH_DIVERGENCE":
+            st.markdown(_clean_html(f"""
+                <div style="background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px; padding: 12px 18px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <div style="font-weight: 700; color: #ef4444; font-size: 14px; letter-spacing: 0.3px;">🚨 INSTITUTIONAL BEARISH DIVERGENCE (BULL TRAP ALERT)</div>
+                        <div style="color: #cbd5e1; font-size: 12.5px; margin-top: 3px;">{recent_div.description}</div>
+                    </div>
+                    <div style="background: #ef4444; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;">DISTRIBUTION</div>
+                </div>
+            """), unsafe_allow_html=True)
+        else:
+            st.markdown(_clean_html(f"""
+                <div style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 8px; padding: 12px 18px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <div style="font-weight: 700; color: #10b981; font-size: 14px; letter-spacing: 0.3px;">🔥 INSTITUTIONAL BULLISH DIVERGENCE (SMART ABSORPTION)</div>
+                        <div style="color: #cbd5e1; font-size: 12.5px; margin-top: 3px;">{recent_div.description}</div>
+                    </div>
+                    <div style="background: #10b981; color: white; padding: 4px 12px; border-radius: 6px; font-weight: 700; font-size: 11px; text-transform: uppercase;">ABSORPTION</div>
+                </div>
+            """), unsafe_allow_html=True)
+    else:
+        net_flow_color = "#10b981" if latest_net_oi_chg > 0 else ("#ef4444" if latest_net_oi_chg < 0 else "#94a3b8")
+        st.markdown(_clean_html(f"""
+            <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(51, 65, 85, 0.3); border-radius: 8px; padding: 10px 16px; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between;">
+                <span style="color: #94a3b8; font-size: 13px;">
+                    🛡️ <b>Trend In-Sync:</b> Price Action & Volume Flow are aligned. Spot: <b>₹{cur_spot:,.1f}</b> ({p_chg:+.2f}%) | Net Writer Flow: <b style="color: {net_flow_color};">{format_indian_number(latest_net_oi_chg)}</b>
+                </span>
+                <span style="color: #cbd5e1; font-size: 12px;">
+                    OI PCR: <b style="color: #00b4d8;">{latest_oi_pcr:.3f}</b> &nbsp;|&nbsp; Vol PCR: <b style="color: #f59e0b;">{latest_vol_pcr:.3f}</b>
+                </span>
+            </div>
+        """), unsafe_allow_html=True)
+
+    # 4. Institutional Grid (65% Left / 35% Right)
+    col_left, col_right = st.columns([0.65, 0.35])
+
+    with col_left:
+        # 3-Pane Synchronized Plotly Subplots
+        fig_left = make_subplots(
+            rows=3,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.025,
+            row_heights=[0.55, 0.25, 0.20],
+            subplot_titles=[
+                f"<b>{symbol_label} Spot Price & VWAP ({tf})</b>",
+                f"<b>{delta_label}</b>",
+                f"<b>Traded Volume ({tf})</b>"
+            ]
+        )
+
+        # Row 1: Candlesticks
+        fig_left.add_trace(go.Candlestick(
+            x=aligned_df["timestamp"],
+            open=aligned_df["open"],
+            high=aligned_df["high"],
+            low=aligned_df["low"],
+            close=aligned_df["close"],
+            increasing_line_color="#00d084",
+            decreasing_line_color="#ff4d6d",
+            increasing_fillcolor="#00d084",
+            decreasing_fillcolor="#ff4d6d",
+            name="Price"
+        ), row=1, col=1)
+
+        # VWAP
+        if "vwap" in aligned_df.columns:
+            fig_left.add_trace(go.Scatter(
+                x=aligned_df["timestamp"],
+                y=aligned_df["vwap"],
+                line=dict(color="#f59e0b", width=1.5, dash="dash"),
+                name="VWAP"
+            ), row=1, col=1)
+
+        # Spot Reference Line
+        fig_left.add_hline(
+            y=cur_spot,
+            line_dash="dot",
+            line_color="#94a3b8",
+            line_width=1,
+            row=1, col=1
+        )
+
+        # Divergence Markers on Row 1
+        for d in divergences:
+            if d.divergence_type == "BEARISH_DIVERGENCE":
+                fig_left.add_trace(go.Scatter(
+                    x=[d.timestamp],
+                    y=[d.price_level],
+                    mode="markers+text",
+                    marker=dict(symbol="triangle-down", size=11, color="#ef4444"),
+                    text=["▼ Bearish Div"],
+                    textposition="top center",
+                    textfont=dict(size=10, color="#ef4444", family="sans-serif"),
+                    hoverinfo="text",
+                    hovertext=f"⚠️ {d.summary}<br>{d.description}",
+                    showlegend=False
+                ), row=1, col=1)
+            elif d.divergence_type == "BULLISH_DIVERGENCE":
+                fig_left.add_trace(go.Scatter(
+                    x=[d.timestamp],
+                    y=[d.price_level],
+                    mode="markers+text",
+                    marker=dict(symbol="triangle-up", size=11, color="#10b981"),
+                    text=["▲ Bullish Div"],
+                    textposition="bottom center",
+                    textfont=dict(size=10, color="#10b981", family="sans-serif"),
+                    hoverinfo="text",
+                    hovertext=f"🔥 {d.summary}<br>{d.description}",
+                    showlegend=False
+                ), row=1, col=1)
+
+        # Row 2: Delta
+        if delta_mode == "Cumulative Delta (CVD)":
+            fig_left.add_trace(go.Scatter(
+                x=aligned_df["timestamp"],
+                y=aligned_df["cvd"],
+                line=dict(color="#00f5d4", width=2),
+                fill="tozeroy",
+                fillcolor="rgba(0, 245, 212, 0.12)",
+                name="CVD",
+                hovertemplate="Time: %{x}<br>CVD: %{y:,.0f}<extra></extra>"
+            ), row=2, col=1)
+        else:
+            delta_vals = aligned_df[delta_col]
+            delta_colors = ["#00d084" if v >= 0 else "#ff4d6d" for v in delta_vals]
+            fig_left.add_trace(go.Bar(
+                x=aligned_df["timestamp"],
+                y=delta_vals,
+                marker_color=delta_colors,
+                name="Delta",
+                hovertemplate="Time: %{x}<br>Delta: %{y:,.0f}<extra></extra>"
+            ), row=2, col=1)
+
+        fig_left.add_hline(y=0, line_color="#475569", line_width=1, row=2, col=1)
+
+        # Row 3: Volume Histogram
+        vol_colors = ["#00d084" if c >= o else "#ff4d6d" for c, o in zip(aligned_df["close"], aligned_df["open"])]
+        fig_left.add_trace(go.Bar(
+            x=aligned_df["timestamp"],
+            y=aligned_df["volume"],
+            marker_color=vol_colors,
+            name="Volume",
+            hovertemplate="Time: %{x}<br>Vol: %{y:,.0f}<extra></extra>"
+        ), row=3, col=1)
+
+        fig_left.update_layout(
+            height=720,
+            template="plotly_dark",
+            margin=dict(l=10, r=25, t=30, b=10),
+            xaxis_rangeslider_visible=False,
+            showlegend=False,
+            hovermode="x unified",
+            paper_bgcolor="rgba(11, 15, 25, 0.7)",
+            plot_bgcolor="rgba(15, 23, 42, 0.35)",
+        )
+        fig_left.update_xaxes(
+            showspikes=True,
+            spikemode="across",
+            spikesnap="cursor",
+            spikecolor="#64748b",
+            spikethickness=1,
+            spikedash="dot"
+        )
+        fig_left.update_yaxes(showgrid=True, gridcolor="rgba(51, 65, 85, 0.25)", zeroline=False)
+        st.plotly_chart(fig_left, use_container_width=True)
+
+    with col_right:
+        # Right Top: Put OI vs Call OI Change & Net PE-CE Flow
+        fig_right_top = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_right_top.add_trace(go.Scatter(
+            x=aligned_df["timestamp"],
+            y=aligned_df["pe_oi_chg"],
+            line=dict(color="#ff4d6d", width=2),
+            name="Put OI (Chg Day)",
+            hovertemplate="%{y:,.0f}"
+        ), secondary_y=False)
+        fig_right_top.add_trace(go.Scatter(
+            x=aligned_df["timestamp"],
+            y=aligned_df["ce_oi_chg"],
+            line=dict(color="#00d084", width=2),
+            name="Call OI (Chg Day)",
+            hovertemplate="%{y:,.0f}"
+        ), secondary_y=False)
+        fig_right_top.add_trace(go.Scatter(
+            x=aligned_df["timestamp"],
+            y=aligned_df["net_oi_chg"],
+            line=dict(color="#9b5de5", width=2.5),
+            name="PE-CE (Chg Day)",
+            hovertemplate="%{y:,.0f}"
+        ), secondary_y=True)
+
+        # Highlight latest PE-CE endpoint
+        fig_right_top.add_annotation(
+            x=aligned_df["timestamp"].iloc[-1],
+            y=latest_net_oi_chg,
+            yref="y2",
+            text=f"<b>{format_indian_number(latest_net_oi_chg)}</b>",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="#9b5de5",
+            bgcolor="#9b5de5",
+            font=dict(color="white", size=10, family="monospace"),
+            borderpad=3
+        )
+        fig_right_top.update_layout(
+            title="<b>Put vs Call OI (Chg Day) & PE-CE</b>",
+            title_font_size=13,
+            height=350,
+            template="plotly_dark",
+            margin=dict(l=10, r=40, t=40, b=10),
+            hovermode="x unified",
+            paper_bgcolor="rgba(11, 15, 25, 0.7)",
+            plot_bgcolor="rgba(15, 23, 42, 0.35)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10))
+        )
+        fig_right_top.update_yaxes(title_text="OI Chg", secondary_y=False, showgrid=True, gridcolor="rgba(51, 65, 85, 0.25)")
+        fig_right_top.update_yaxes(title_text="PE-CE Diff", secondary_y=True, showgrid=False)
+        st.plotly_chart(fig_right_top, use_container_width=True)
+
+        # Right Bottom: OI PCR vs Volume PCR (Sentiment)
+        fig_right_bottom = go.Figure()
+        fig_right_bottom.add_trace(go.Scatter(
+            x=aligned_df["timestamp"],
+            y=aligned_df["oi_pcr"],
+            line=dict(color="#00b4d8", width=2),
+            name="OI PCR",
+            hovertemplate="%{y:.3f}"
+        ))
+        fig_right_bottom.add_trace(go.Scatter(
+            x=aligned_df["timestamp"],
+            y=aligned_df["vol_pcr"],
+            line=dict(color="#f59e0b", width=2),
+            name="Vol PCR (Total)",
+            hovertemplate="%{y:.3f}"
+        ))
+        fig_right_bottom.add_hline(y=1.0, line_dash="dot", line_color="#64748b", line_width=1)
+
+        # Latest PCR annotations
+        fig_right_bottom.add_annotation(
+            x=aligned_df["timestamp"].iloc[-1],
+            y=latest_oi_pcr,
+            text=f"<b>{latest_oi_pcr:.3f}</b>",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="#00b4d8",
+            bgcolor="#00b4d8",
+            font=dict(color="white", size=10, family="monospace"),
+            borderpad=3
+        )
+        fig_right_bottom.add_annotation(
+            x=aligned_df["timestamp"].iloc[-1],
+            y=latest_vol_pcr,
+            text=f"<b>{latest_vol_pcr:.3f}</b>",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="#f59e0b",
+            bgcolor="#f59e0b",
+            font=dict(color="black", size=10, family="monospace"),
+            borderpad=3
+        )
+        fig_right_bottom.update_layout(
+            title="<b>OI PCR vs Volume PCR (Sentiment)</b>",
+            title_font_size=13,
+            height=355,
+            template="plotly_dark",
+            margin=dict(l=10, r=40, t=40, b=10),
+            hovermode="x unified",
+            paper_bgcolor="rgba(11, 15, 25, 0.7)",
+            plot_bgcolor="rgba(15, 23, 42, 0.35)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=10))
+        )
+        fig_right_bottom.update_yaxes(title_text="Ratio", showgrid=True, gridcolor="rgba(51, 65, 85, 0.25)")
+        st.plotly_chart(fig_right_bottom, use_container_width=True)
 
 
 def render_tab_chart(price_df: pd.DataFrame, snapshots: list, max_pain_strike: float, analyzer: SmartOIAnalyzer, selected_symbol_label: str):
@@ -2202,14 +2556,18 @@ def run_dashboard():
 
     st.markdown("---")
 
-    # ── 5 CONSOLIDATED DEEP-DIVE TABS ─────────────────────────────
-    tab_delta, tab_chain, tab_chart, tab_causal, tab_fo = st.tabs([
+    # ── 6 CONSOLIDATED DEEP-DIVE TABS ─────────────────────────────
+    tab_stockmojo, tab_delta, tab_chain, tab_chart, tab_causal, tab_fo = st.tabs([
+        "🎯 StockMojo Smart OI (Price, Delta & Flow)",
         "⚡ Dynamic ΔOI & Writer Trap Monitor",
         "📋 Full Option Chain & Greeks Grid",
         "📈 Price Action, VWAP & Net Writer Flow",
         "🕸️ Causal Graph & Volume Shockwave",
         "🎲 F&O Universe PCR Heatmap"
     ])
+
+    with tab_stockmojo:
+        render_stockmojo_smart_oi_terminal(selected_symbol_label, db_symbol, spot_price, price_df, snapshots, analyzer)
 
     with tab_delta:
         render_tab_delta_monitor(selected_symbol_label, db_symbol, spot_price, latest_oc, snapshots, analyzer)

@@ -26,6 +26,11 @@ class EventType(Enum):
     OPTION_CHAIN_READY = auto()
     TRADE_SUGGESTION_GENERATED = auto()
     SESSION_PLAN_READY = auto()
+    
+    # Phase 2 Data Pipeline Events
+    TICK_RECEIVED = auto()
+    CANDLE_CLOSED = auto()
+    TECHNICAL_STATE_UPDATED = auto()
 
 
 @dataclass(slots=True)
@@ -38,6 +43,26 @@ class MarketEvent:
     close: float
     volume: float
     timeframe: str = "1m"
+
+@dataclass(slots=True)
+class TickEvent:
+    symbol: str
+    timestamp: datetime
+    price: float
+    volume: float
+
+@dataclass(slots=True)
+class CandleClosedEvent:
+    symbol: str
+    timestamp: datetime
+    timeframe: str
+    ohlcv: dict[str, float]
+
+@dataclass(slots=True)
+class TechnicalStateUpdatedEvent:
+    symbol: str
+    timestamp: datetime
+    indicators: dict[str, Any]
 
 
 @dataclass(slots=True)

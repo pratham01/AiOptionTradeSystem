@@ -16,6 +16,7 @@ from trade_system.domains.strategy.application.strategies.orb_strategy import Or
 from trade_system.domains.strategy.application.strategies.gamma_blast_strategy import GammaBlastStrategy
 from trade_system.domains.strategy.application.strategies.sniper_reversal_strategy import SniperReversalStrategy
 from trade_system.domains.strategy.application.strategies.intraday_edge_strategy import IntradayEdgeStrategy
+from trade_system.domains.strategy.application.strategies.smc_strategy import SmartMoneyConceptStrategy
 from trade_system.shared.exceptions import StrategyNotFoundError
 
 LOGGER = logging.getLogger(__name__)
@@ -35,6 +36,8 @@ def registered_strategies() -> Dict[str, Type[BaseStrategy]]:
         VolumeProfileStrategy.name: VolumeProfileStrategy,
         BollingerOptionStrategy.name: BollingerOptionStrategy,
         PrajwalPriceActionStrategy.name: PrajwalPriceActionStrategy,
+        SmartMoneyConceptStrategy.name: SmartMoneyConceptStrategy,
+        "smart_money_concepts": SmartMoneyConceptStrategy,
     }
 
 

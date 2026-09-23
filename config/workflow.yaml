@@ -1,0 +1,44 @@
+name: "Live Intraday Agentic Swarm"
+version: "1.0"
+description: "Executes the core multi-agent intraday intelligence pipeline."
+
+triggers:
+  - type: "cron"
+    schedule: "*/15 * * * *"  # Run every 15 minutes
+  - type: "event"
+    event_type: "CANDLE_CLOSED_15M"
+
+nodes:
+  - id: "data_collection"
+    module: "trade_system.modules.data_collection"
+    description: "Fetches live quotes, 15m OHLCV data, and F&O Option Chains."
+    config:
+      symbols: "all"
+      timeframe: "15m"
+
+  - id: "data_processing"
+    module: "trade_system.modules.data_processing"
+    description: "Generates PCR scores, Supertrend setups, and Phase states."
+    depends_on:
+      - "data_collection"
+
+  - id: "ai_analysis"
+    module: "trade_system.modules.ai_agents"
+    description: "Invokes LangChain agents (MarketContext, StockSuggester, ChiefAgent)."
+    depends_on:
+      - "data_processing"
+    config:
+      agents:
+        - "MarketContextAgent"
+        - "FoStockSuggesterAgent"
+        - "SetupValidatorAgent"
+        - "ChiefTradingAgent"
+
+  - id: "decision_making"
+    module: "trade_system.modules.decision_making"
+    description: "Evaluates agent outputs against risk limits and routes trades."
+    depends_on:
+      - "ai_analysis"
+    config:
+      max_trades_per_day: 3
+      max_drawdown_pct: 2.0
