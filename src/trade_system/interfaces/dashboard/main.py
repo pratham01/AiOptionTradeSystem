@@ -57,7 +57,20 @@ def _get_live_bot_health():
     except Exception:
         return None
 
+def _is_bot_process_running() -> bool:
+    try:
+        import psutil
+        for proc in psutil.process_iter(['name', 'cmdline']):
+            cmdline = proc.info.get('cmdline') or []
+            if any('run_live_trading.py' in str(arg) for arg in cmdline):
+                return True
+    except Exception:
+        pass
+    return False
+
 def _start_live_bot():
+    if _is_bot_process_running():
+        return
     import subprocess, sys
     root_dir = Path(__file__).resolve().parent.parent.parent.parent
     script_path = root_dir / "scripts" / "run_live_trading.py"
@@ -69,11 +82,11 @@ def _start_live_bot():
         start_new_session=True,
     )
 
-# Auto-start on application initial load
+# Auto-start on application initial load if not already running
 if "live_bot_auto_checked" not in st.session_state:
     st.session_state["live_bot_auto_checked"] = True
     bot_health = _get_live_bot_health()
-    if not bot_health:
+    if not bot_health and not _is_bot_process_running():
         _start_live_bot()
 
 bot_health = _get_live_bot_health()
@@ -82,6 +95,14 @@ if bot_health and bot_health.get("status") == "healthy":
     ws_ok = bot_health.get("components", {}).get("websocket", {}).get("connected", False)
     db_ok = bot_health.get("components", {}).get("database", {}).get("status", "") == "healthy"
     st.sidebar.caption(f"⚡ WS: {'Connected' if ws_ok else 'Reconnecting'} | 🛡️ DB: {'Sanity OK' if db_ok else 'Checking'}")
+elif bot_health and bot_health.get("status") == "degraded":
+    st.sidebar.warning("🟡 ST Flip Live Bot: **Degraded**")
+    ws_ok = bot_health.get("components", {}).get("websocket", {}).get("connected", False)
+    db_ok = bot_health.get("components", {}).get("database", {}).get("status", "") == "healthy"
+    st.sidebar.caption(f"⚡ WS: {'Connected' if ws_ok else 'Reconnecting'} | 🛡️ DB: {'Sanity OK' if db_ok else 'Checking'}")
+elif _is_bot_process_running():
+    st.sidebar.info("🟡 ST Flip Live Bot: **Starting up...**")
+    st.sidebar.caption("Syncing pre-flight data & connecting...")
 else:
     st.sidebar.warning("🔴 ST Flip Live Bot: **Offline**")
     st.sidebar.caption("ST Flip alerts & tick stream inactive")
