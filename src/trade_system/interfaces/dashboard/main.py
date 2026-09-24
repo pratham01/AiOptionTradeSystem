@@ -74,11 +74,14 @@ def _start_live_bot():
     import subprocess, sys
     root_dir = Path(__file__).resolve().parent.parent.parent.parent
     script_path = root_dir / "scripts" / "run_live_trading.py"
+    log_dir = root_dir / "logs"
+    log_dir.mkdir(exist_ok=True)
+    stdout_file = open(log_dir / "live_bot_stdout.log", "a")
     subprocess.Popen(
         [sys.executable, str(script_path)],
         cwd=str(root_dir),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stdout_file,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
     )
 
