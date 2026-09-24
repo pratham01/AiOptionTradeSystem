@@ -109,21 +109,45 @@ def fetch_live_fyers_option_chain(symbol: str, strikecount: int = 15) -> Tuple[O
 
 
 @st.cache_data(ttl=60)
-def fetch_live_price_history(symbol: str, resolution: str = "5") -> pd.DataFrame:
-    """Fetch recent intraday price candles from Fyers for live VWAP and charts."""
+def fetch_live_price_history(symbol: str, resolution: str = "1") -> pd.DataFrame:
+    """Fetch recent intraday price candles from Fyers for live VWAP and charts, with CSV/DB fallback."""
+    today_str = date.today().strftime("%Y-%m-%d")
     try:
         broker = get_broker()
-        if not broker:
-            return pd.DataFrame()
-        today_str = date.today().strftime("%Y-%m-%d")
-        df = broker.fetch_history(symbol, resolution, today_str, today_str)
-        if df is not None and not df.empty:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed")
-            return df.sort_values("timestamp").reset_index(drop=True)
-        return pd.DataFrame()
+        if broker:
+            df = broker.fetch_history(
+                symbol=symbol,
+                resolution=resolution,
+                range_from=today_str,
+                range_to=today_str
+            )
+            if df is not None and len(df) >= 2:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], format="mixed")
+                return df.sort_values("timestamp").reset_index(drop=True)
     except Exception as e:
-        LOGGER.error(f"Error fetching live price history: {e}")
-        return pd.DataFrame()
+        LOGGER.warning(f"Error fetching live price history from broker: {e}")
+
+    # Fallback 1: Local intraday CSV written by live collector
+    try:
+        clean = symbol.replace(":", "_")
+        csv_path = Path("data/fo_historical") / f"{clean}_1min_{today_str}.csv"
+        if csv_path.exists():
+            df_csv = pd.read_csv(csv_path)
+            if not df_csv.empty and "timestamp" in df_csv.columns:
+                df_csv["timestamp"] = pd.to_datetime(df_csv["timestamp"], format="mixed")
+                return df_csv.sort_values("timestamp").reset_index(drop=True)
+    except Exception as e:
+        LOGGER.warning(f"Fallback CSV read failed: {e}")
+
+    # Fallback 2: Database ohlcv_1m
+    try:
+        df_db = load_db_price_data(symbol, today_str)
+        if not df_db.empty:
+            return df_db
+    except Exception as e:
+        LOGGER.warning(f"Fallback DB read failed: {e}")
+
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
@@ -2518,11 +2542,24 @@ def run_dashboard():
 
         with st.spinner(f"Fetching real-time option chain for {selected_symbol_label}..."):
             latest_oc, spot_price, expiry_str = fetch_live_fyers_option_chain(db_symbol, strikecount=live_strikes)
-            price_df = fetch_live_price_history(db_symbol, resolution="5")
+            price_df = fetch_live_price_history(db_symbol, resolution="1")
             if not price_df.empty:
                 price_df = calculate_price_vwap(price_df)
+
+            today_str = date.today().strftime("%Y-%m-%d")
+            db_snaps = load_db_snapshots(db_symbol, today_str)
+            snapshots = list(db_snaps) if db_snaps else []
+
             if latest_oc is not None and not latest_oc.empty:
-                snapshots = [(datetime.now(), latest_oc)]
+                now_ts = datetime.now()
+                if not snapshots or (now_ts - snapshots[-1][0]).total_seconds() > 30:
+                    snapshots.append((now_ts, latest_oc))
+            elif snapshots:
+                latest_ts, latest_oc = snapshots[-1]
+
+            prev_oc = snapshots[-2][1] if len(snapshots) > 1 else None
+            if (spot_price is None or spot_price == 0.0) and not price_df.empty:
+                spot_price = float(price_df.iloc[-1]["close"])
     else:
         available_dates = load_db_dates(db_symbol)
         if not available_dates:
@@ -2961,22 +2998,86 @@ def render_tab_delta_monitor(
             with open(state_file) as f:
                 all_states = json.load(f)
                 res_data = all_states.get(clean_sym)
+                # Discard if stale (from previous days)
+                if res_data and res_data.get("timestamp"):
+                    ts_str = str(res_data["timestamp"])[:10]
+                    if ts_str != date.today().strftime("%Y-%m-%d"):
+                        res_data = None
         except Exception:
             pass
 
-    if not res_data and snapshots and len(snapshots) >= 2:
+    if not res_data and snapshots:
         try:
             agent = OptionChainMonitorAgent(enable_telegram=False)
-            prior_ts, prior_df = snapshots[-2]
-            latest_ts, latest_df = snapshots[-1]
-            agent.process_snapshot(db_symbol, prior_df, spot_price=spot_price, timestamp=pd.to_datetime(prior_ts))
-            dyn_res = agent.process_snapshot(db_symbol, latest_df, spot_price=spot_price, timestamp=pd.to_datetime(latest_ts))
+            dyn_res = None
+            for s_ts, s_df in snapshots[-12:]:
+                if s_df is not None and not s_df.empty:
+                    s_spot = spot_price
+                    if "underlying_value" in s_df.columns:
+                        u_vals = s_df["underlying_value"].dropna()
+                        if not u_vals.empty and float(u_vals.iloc[0]) > 0:
+                            s_spot = float(u_vals.iloc[0])
+                    dyn_res = agent.process_snapshot(
+                        db_symbol,
+                        s_df,
+                        spot_price=s_spot,
+                        timestamp=pd.to_datetime(s_ts)
+                    )
             if dyn_res:
                 from dataclasses import asdict
                 res_data = asdict(dyn_res)
                 res_data["timestamp"] = dyn_res.timestamp.isoformat()
         except Exception as e:
             LOGGER.warning("Could not compute on-the-fly dynamic OC forensics: %s", e)
+
+    # Baseline fallback if res_data still None
+    if not res_data and latest_oc is not None and not latest_oc.empty:
+        ce_oc = latest_oc[latest_oc["option_type"] == "CE"]
+        pe_oc = latest_oc[latest_oc["option_type"] == "PE"]
+        cw = float(ce_oc.loc[ce_oc["oi"].idxmax()]["strike"]) if not ce_oc.empty and ce_oc["oi"].max() > 0 else spot_price
+        pw = float(pe_oc.loc[pe_oc["oi"].idxmax()]["strike"]) if not pe_oc.empty and pe_oc["oi"].max() > 0 else spot_price
+        tot_ce = ce_oc["oi"].sum()
+        tot_pe = pe_oc["oi"].sum()
+        pcr_val = float(tot_pe / tot_ce) if tot_ce > 0 else 1.0
+
+        strikes = latest_oc["strike"].unique()
+        total_pain = []
+        for s in strikes:
+            pain = 0
+            for _, row in latest_oc.iterrows():
+                stk = row["strike"]
+                oi_val = row["oi"]
+                opt_type = row["option_type"]
+                if opt_type == "CE" and stk < s:
+                    pain += (s - stk) * oi_val
+                elif opt_type == "PE" and stk > s:
+                    pain += (stk - s) * oi_val
+            total_pain.append(pain)
+        mp_val = float(strikes[np.argmin(total_pain)]) if len(total_pain) > 0 else spot_price
+
+        res_data = {
+            "symbol": db_symbol,
+            "timestamp": datetime.now().isoformat(),
+            "spot_price": spot_price,
+            "max_pain": mp_val,
+            "prev_max_pain": mp_val,
+            "max_pain_shifted": False,
+            "max_pain_shift_pts": 0.0,
+            "ce_wall": cw,
+            "pe_wall": pw,
+            "ce_wall_shifted": False,
+            "pe_wall_shifted": False,
+            "pcr_oi": pcr_val,
+            "pcr_velocity": 0.0,
+            "top_ce_build_strike": cw,
+            "top_ce_build_oi": int(ce_oc["oi"].max()) if not ce_oc.empty else 0,
+            "top_pe_build_strike": pw,
+            "top_pe_build_oi": int(pe_oc["oi"].max()) if not pe_oc.empty else 0,
+            "regime": "BALANCED_ACCUMULATION",
+            "traps": [],
+            "squeezes": [],
+            "signals": [],
+        }
 
     # 2. Render Forensic Status Bar
     if res_data:
@@ -3127,6 +3228,44 @@ def render_tab_delta_monitor(
                 yaxis=dict(title="Contracts Added / Unwound", gridcolor="#21262d"),
             )
             st.plotly_chart(fig, use_container_width=True)
+    elif latest_oc is not None and not latest_oc.empty:
+        step = analyzer.strike_step or 50.0
+        atm = round(spot_price / step) * step
+        min_s = atm - (10 * step)
+        max_s = atm + (10 * step)
+        cur_s = latest_oc[(latest_oc["strike"] >= min_s) & (latest_oc["strike"] <= max_s)]
+        strikes_s = sorted(cur_s["strike"].unique())
+        ce_d = [int(cur_s[(cur_s["strike"] == s) & (cur_s["option_type"] == "CE")]["oi"].sum()) for s in strikes_s]
+        pe_d = [int(cur_s[(cur_s["strike"] == s) & (cur_s["option_type"] == "PE")]["oi"].sum()) for s in strikes_s]
+
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=strikes_s,
+            y=ce_d,
+            name="Call OI (Resistance Ceiling)",
+            marker_color="#ff4d6d",
+        ))
+        fig.add_trace(go.Bar(
+            x=strikes_s,
+            y=pe_d,
+            name="Put OI (Support Floor)",
+            marker_color="#00d084",
+        ))
+        fig.add_vline(x=spot_price, line_width=2, line_dash="dash", line_color="#f1fa8c", annotation_text=f"Spot ₹{spot_price:,.1f}")
+        fig.update_layout(
+            title="<b>Open Interest Strike Distribution (Current Snapshot)</b>",
+            barmode="group",
+            plot_bgcolor="#0e1117",
+            paper_bgcolor="#0e1117",
+            font_color="#c9d1d9",
+            height=380,
+            margin=dict(l=20, r=20, t=40, b=20),
+            legend=dict(orientation="h", y=1.1, x=0.2),
+            xaxis=dict(title="Strike Price", gridcolor="#21262d"),
+            yaxis=dict(title="Total Open Interest", gridcolor="#21262d"),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("ℹ️ Displaying baseline Open Interest distribution. Live strike-by-strike ΔOI velocity and institutional writer traps update continuously as new snapshots arrive.")
     else:
         st.info("Requires at least 2 consecutive snapshots to compute real-time strike ΔOI velocity.")
 

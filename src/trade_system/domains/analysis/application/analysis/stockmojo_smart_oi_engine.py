@@ -235,8 +235,17 @@ def resample_intraday_data(
 
     # Merge Snapshots by nearest or backward merge_asof
     s_df = snap_df.copy()
-    s_df["timestamp"] = pd.to_datetime(s_df["timestamp"]).sort_values()
-    s_df = s_df.sort_values("timestamp")
+    s_df["timestamp"] = pd.to_datetime(s_df["timestamp"])
+    resampled_p["timestamp"] = pd.to_datetime(resampled_p["timestamp"])
+
+    # Ensure tz-naive consistency across both dataframes
+    if hasattr(resampled_p["timestamp"].dt, "tz") and resampled_p["timestamp"].dt.tz is not None:
+        resampled_p["timestamp"] = resampled_p["timestamp"].dt.tz_localize(None)
+    if hasattr(s_df["timestamp"].dt, "tz") and s_df["timestamp"].dt.tz is not None:
+        s_df["timestamp"] = s_df["timestamp"].dt.tz_localize(None)
+
+    s_df = s_df.sort_values("timestamp").reset_index(drop=True)
+    resampled_p = resampled_p.sort_values("timestamp").reset_index(drop=True)
 
     merged = pd.merge_asof(
         resampled_p,
