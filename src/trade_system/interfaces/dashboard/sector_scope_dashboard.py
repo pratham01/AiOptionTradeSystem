@@ -47,7 +47,9 @@ from trade_system.domains.analysis.application.analysis.sector_rotation_rrg impo
 )
 from trade_system.shared.notifications.telegram import TelegramNotifier
 from trade_system.shared.config import Settings
-
+# New imports for enhancements
+from trade_system.domains.advisory.application.agent.candlestick_pattern_agent import CandlestickPatternAgent
+from trade_system.shared.utils.news_scraper import BusinessNewsScraper
 # --- COMPACT CSS STYLING ---
 st.markdown("""
 <style>
@@ -683,6 +685,49 @@ else:
             
     if rows:
         merged_closes = pd.DataFrame(rows)
+
+        # --- ENHANCEMENTS: Additional Data Columns ---
+        # 1. Candlestick pattern detection for each symbol on the target date
+        try:
+            pattern_agent = CandlestickPatternAgent()
+            pattern_signals = pattern_agent.scan_active_setups(target_date=latest_date_str)
+            pattern_map = {}
+            for sig in pattern_signals:
+                sym = sig.get("Symbol")
+                if sym and sym not in pattern_map:
+                    pattern_map[sym] = sig.get("Pattern")
+            merged_closes["Pattern"] = merged_closes["symbol"].apply(lambda s: pattern_map.get(s.replace("NSE:", "").replace("-EQ", ""), ""))
+        except Exception as e:
+            logger.warning(f"Candlestick pattern detection failed: {e}")
+            merged_closes["Pattern"] = ""
+
+        # 2. Fetch recent business news headlines and attach as summary
+        try:
+            news_scraper = BusinessNewsScraper()
+            all_headlines = news_scraper.get_all_headlines()
+            news_summary = ", ".join(all_headlines[:5])
+        except Exception as e:
+            logger.warning(f"News scraping failed: {e}")
+            news_summary = ""
+        merged_closes["News"] = news_summary
+
+        # 3. Support and Resistance levels (using today's low/high)
+        merged_closes["Support"] = merged_closes["low_today"]
+        merged_closes["Resistance"] = merged_closes["high_today"]
+
+        # 4. Momentum Strength (simple composite metric)
+        merged_closes["MomentumStrength"] = merged_closes["vol_surge"] * merged_closes["range_pos"]
+
+        # 5. Short/Long covering signals via OI quadrant (BTST scanner)
+        try:
+            from trade_system.domains.analysis.application.analysis.btst_scanner import BTSTInstitutionalScanner
+            btst_scanner = BTSTInstitutionalScanner()
+            btst_res = btst_scanner.scan_btst(symbols=merged_closes["symbol"].tolist())
+            oi_map = {cand.symbol: cand.oi_quadrant for cand in btst_res.all_results}
+            merged_closes["OIQuadrant"] = merged_closes["symbol"].apply(lambda s: oi_map.get(s, "NEUTRAL"))
+        except Exception as e:
+            logger.warning(f"BTST scanner integration failed: {e}")
+            merged_closes["OIQuadrant"] = "NEUTRAL"
         # Ensure any new quotes symbols not in database are added for Today view
         if is_today and quotes:
             live_symbols_to_add = []
