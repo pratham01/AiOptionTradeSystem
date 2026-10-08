@@ -19,8 +19,8 @@ fyersApi.log
 fyersDataSocket.log
 fyersRequests.log
 
-option_chain_data/
-market_data/
+/option_chain_data/
+/market_data/
 data/
 *.db
 *.sqlite

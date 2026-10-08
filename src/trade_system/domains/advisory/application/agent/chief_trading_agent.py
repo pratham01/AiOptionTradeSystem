@@ -755,6 +755,10 @@ class ChiefTradingAgent:
 
     def dispatch_telegram_alert(self, signal: ChiefTradeSignal) -> bool:
         """Send a pristine, high-priority Telegram alert for an approved sniper trade."""
+        if not getattr(self.settings, "enable_intraday_option_alerts", False):
+            LOGGER.info("Option Telegram alert suppressed for %s: enable_intraday_option_alerts is False.", signal.symbol)
+            return False
+
         try:
             bot_token = self.settings.st_confirmed_telegram.bot_token or self.settings.telegram.bot_token
             chat_id = self.settings.st_confirmed_telegram.chat_id or self.settings.telegram.chat_id

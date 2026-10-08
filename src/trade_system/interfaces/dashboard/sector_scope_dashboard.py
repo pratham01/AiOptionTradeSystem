@@ -161,11 +161,46 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- COMPACT HERO ---
-st.markdown("""
+def _get_broker_badge_info():
+    """Fast check of broker connectivity status for header corner display."""
+    try:
+        from trade_system.shared.config import Settings
+        settings = Settings.load()
+        token = settings.fyers.access_token or settings.fyers_access_token
+        if token and len(str(token)) > 20:
+            return {
+                "text": "● BROKER CONNECTED (FYERS)",
+                "bg": "rgba(34, 197, 94, 0.15)",
+                "color": "#22c55e",
+                "border": "1px solid rgba(34, 197, 94, 0.35)",
+            }
+        else:
+            return {
+                "text": "● BROKER OFFLINE",
+                "bg": "rgba(239, 68, 68, 0.15)",
+                "color": "#ef4444",
+                "border": "1px solid rgba(239, 68, 68, 0.35)",
+            }
+    except Exception:
+        return {
+            "text": "● BROKER STANDBY",
+            "bg": "rgba(148, 163, 184, 0.15)",
+            "color": "#94a3b8",
+            "border": "1px solid rgba(148, 163, 184, 0.35)",
+        }
+
+_broker_badge = _get_broker_badge_info()
+
+# --- COMPACT HERO WITH BROKER HEALTH IN CORNER ---
+st.markdown(f"""
 <div class="sector-hero-compact">
-    <h3>🧭 Sector Scope & Breakout Monitor</h3>
-    <span class="hero-sub">Sector Leadership • Volume Surge • ORB Scanner</span>
+    <div>
+        <h3>🧭 Sector Scope & Breakout Monitor</h3>
+        <span class="hero-sub">Sector Leadership • Volume Surge • ORB Scanner</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+        <span class="status-pill" style="background:{_broker_badge['bg']}; color:{_broker_badge['color']}; border:{_broker_badge['border']}; font-size:0.75rem;">{_broker_badge['text']}</span>
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -569,7 +604,7 @@ else:
                 # Intraday return lookbacks (Last 15m, 30m, 1h, 2h)
                 if not today_candles.empty and len(today_candles) > 1:
                     if len(today_candles) > step:
-                        ref_idx = -step
+                        ref_idx = -step - 1
                         close_prev = float(today_candles.iloc[ref_idx]['close'])
                     else:
                         close_prev = float(today_candles.iloc[0]['open'])
@@ -577,10 +612,8 @@ else:
                         pchange = ((close_last - close_prev) / close_prev) * 100
                     window_candles = today_candles.tail(step + 1)
                 else:
-                    pchange = quote.change_percent
+                    pchange = 0.0
                     close_prev = quote.previous_close
-                    if (pchange is None or pchange == 0.0) and close_prev > 0 and close_last > 0:
-                        pchange = ((close_last - close_prev) / close_prev) * 100
         else:
             # Historical date or fallback
             if step == "midday_1230":
@@ -686,48 +719,13 @@ else:
     if rows:
         merged_closes = pd.DataFrame(rows)
 
-        # --- ENHANCEMENTS: Additional Data Columns ---
-        # 1. Candlestick pattern detection for each symbol on the target date
-        try:
-            pattern_agent = CandlestickPatternAgent()
-            pattern_signals = pattern_agent.scan_active_setups(target_date=latest_date_str)
-            pattern_map = {}
-            for sig in pattern_signals:
-                sym = sig.get("Symbol")
-                if sym and sym not in pattern_map:
-                    pattern_map[sym] = sig.get("Pattern")
-            merged_closes["Pattern"] = merged_closes["symbol"].apply(lambda s: pattern_map.get(s.replace("NSE:", "").replace("-EQ", ""), ""))
-        except Exception as e:
-            logger.warning(f"Candlestick pattern detection failed: {e}")
-            merged_closes["Pattern"] = ""
-
-        # 2. Fetch recent business news headlines and attach as summary
-        try:
-            news_scraper = BusinessNewsScraper()
-            all_headlines = news_scraper.get_all_headlines()
-            news_summary = ", ".join(all_headlines[:5])
-        except Exception as e:
-            logger.warning(f"News scraping failed: {e}")
-            news_summary = ""
-        merged_closes["News"] = news_summary
-
-        # 3. Support and Resistance levels (using today's low/high)
+        # --- Support and Resistance & Momentum Metrics ---
         merged_closes["Support"] = merged_closes["low_today"]
         merged_closes["Resistance"] = merged_closes["high_today"]
-
-        # 4. Momentum Strength (simple composite metric)
         merged_closes["MomentumStrength"] = merged_closes["vol_surge"] * merged_closes["range_pos"]
-
-        # 5. Short/Long covering signals via OI quadrant (BTST scanner)
-        try:
-            from trade_system.domains.analysis.application.analysis.btst_scanner import BTSTInstitutionalScanner
-            btst_scanner = BTSTInstitutionalScanner()
-            btst_res = btst_scanner.scan_btst(symbols=merged_closes["symbol"].tolist())
-            oi_map = {cand.symbol: cand.oi_quadrant for cand in btst_res.all_results}
-            merged_closes["OIQuadrant"] = merged_closes["symbol"].apply(lambda s: oi_map.get(s, "NEUTRAL"))
-        except Exception as e:
-            logger.warning(f"BTST scanner integration failed: {e}")
-            merged_closes["OIQuadrant"] = "NEUTRAL"
+        merged_closes["Pattern"] = ""
+        merged_closes["News"] = ""
+        merged_closes["OIQuadrant"] = "NEUTRAL"
         # Ensure any new quotes symbols not in database are added for Today view
         if is_today and quotes:
             live_symbols_to_add = []
@@ -736,10 +734,12 @@ else:
                     sector = fo_metadata.get(symbol, "UNKNOWN")
                     ltp = quote.last_price or quote.close or quote.open
                     prev_close = quote.previous_close
-                    # Always use daily change for symbols with no DB history
-                    pchange = quote.change_percent
-                    if (pchange is None or pchange == 0.0) and prev_close > 0 and ltp > 0:
-                        pchange = ((ltp - prev_close) / prev_close) * 100
+                    if step is None:
+                        pchange = quote.change_percent
+                        if (pchange is None or pchange == 0.0) and prev_close > 0 and ltp > 0:
+                            pchange = ((ltp - prev_close) / prev_close) * 100
+                    else:
+                        pchange = 0.0
                     if prev_close > 0 and ltp > 0:
                         q_high = float(getattr(quote, 'high', 0.0) or 0.0) or ltp
                         q_low = float(getattr(quote, 'low', 0.0) or 0.0) or ltp
@@ -1168,6 +1168,13 @@ else:
         
         entry_info = entry_times_dict.get(row['symbol'], {})
         entry_time = entry_info.get("gainer_entry", "—")
+        
+        flow_quad, _ = IntradayFlowReversalEngine.classify_derivative_quadrant(
+            price_change=row.get('pChange', 0.0),
+            move_from_low=row.get('move_from_low', 0.0) * 100,
+            drop_from_high=row.get('drop_from_high', 0.0) * 100
+        )
+        
         gainers_data.append({
             "Symbol": sym_clean,
             "Sector": row['sector'],
@@ -1177,6 +1184,7 @@ else:
             "Daily RSI": rsi_label,
             "VWAP": vwap_val_str,
             "Entry Time": entry_time,
+            "Flow": flow_quad,
         })
 
     losers_data = []
@@ -1215,6 +1223,13 @@ else:
         
         entry_info = entry_times_dict.get(row['symbol'], {})
         entry_time = entry_info.get("loser_entry", "—")
+        
+        flow_quad, _ = IntradayFlowReversalEngine.classify_derivative_quadrant(
+            price_change=row.get('pChange', 0.0),
+            move_from_low=row.get('move_from_low', 0.0) * 100,
+            drop_from_high=row.get('drop_from_high', 0.0) * 100
+        )
+        
         losers_data.append({
             "Symbol": sym_clean,
             "Sector": row['sector'],
@@ -1224,6 +1239,7 @@ else:
             "Daily RSI": rsi_label,
             "VWAP": vwap_val_str,
             "Entry Time": entry_time,
+            "Flow": flow_quad,
         })
 
     near_bo_data = []
@@ -1300,6 +1316,7 @@ else:
 
     # Check for gainer/loser table clicks
     selected_sector_gainer = None
+    selected_symbol_to_chart = None
     if "gainer_leaderboard" in st.session_state and st.session_state["gainer_leaderboard"]:
         g_selection = st.session_state["gainer_leaderboard"].get("selection", {})
         g_rows = g_selection.get("rows", [])
@@ -1307,6 +1324,7 @@ else:
             g_idx = g_rows[0]
             if 0 <= g_idx < len(gainers_data):
                 selected_sector_gainer = gainers_data[g_idx]["Sector"]
+                selected_symbol_to_chart = gainers_data[g_idx]["Symbol"]
 
     selected_sector_loser = None
     if "loser_leaderboard" in st.session_state and st.session_state["loser_leaderboard"]:
@@ -1316,6 +1334,8 @@ else:
             l_idx = l_rows[0]
             if 0 <= l_idx < len(losers_data):
                 selected_sector_loser = losers_data[l_idx]["Sector"]
+                if not selected_symbol_to_chart:
+                    selected_symbol_to_chart = losers_data[l_idx]["Symbol"]
 
     # Check for new selection events and update selected_sector_drill
     target_sector = None
@@ -1340,13 +1360,60 @@ else:
         st.session_state['selected_sector_drill'] = target_sector
 
     # -------------------------------------------------------------
+    # TOP PANEL: Permanent Sector Performance Chart
+    # -------------------------------------------------------------
+    if not sector_perf.empty:
+        chart_top_c1, chart_top_c2 = st.columns([3, 1])
+        with chart_top_c1:
+            st.markdown("""
+            <div class="section-header" style="margin-top:0.1rem; margin-bottom:0.1rem;">
+                <h3 style="font-size:0.95rem; color:#e2e8f0; margin:0;">📈 Sector Performance Overview</h3>
+                <span class="badge" style="font-size:0.7rem;">Average Return</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with chart_top_c2:
+            st.markdown(f"<div style='text-align:right; font-size:0.75rem; color:#94a3b8; padding-top:4px;'>Lookback: <code style='color:#a78bfa;'>{selected_lookback}</code></div>", unsafe_allow_html=True)
+
+        fig = go.Figure()
+        colors = ['#22c55e' if v >= 0 else '#ef4444' for v in sector_perf['pChange']]
+        fig.add_trace(go.Bar(
+            x=sector_perf['sector'],
+            y=sector_perf['pChange'],
+            marker_color=colors,
+            marker_line_color='rgba(255,255,255,0.1)',
+            marker_line_width=1,
+            text=[f"{v:+.2f}%" for v in sector_perf['pChange']],
+            textposition='outside',
+            textfont=dict(size=10, color='#e2e8f0'),
+            hovertemplate='<b>%{x}</b><br>Avg Return: %{y:+.2f}%<extra></extra>'
+        ))
+        fig.update_layout(
+            height=260,
+            template="plotly_dark",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#94a3b8'),
+            xaxis=dict(title="", tickangle=-30, gridcolor='rgba(255,255,255,0.03)'),
+            yaxis=dict(title="Avg Return (%)", gridcolor='rgba(255,255,255,0.05)', zeroline=True, zerolinecolor='rgba(255,255,255,0.15)', zerolinewidth=1),
+            margin=dict(t=20, b=55, l=45, r=15),
+            bargap=0.25,
+        )
+        import inspect
+        sig = inspect.signature(st.plotly_chart)
+        if "on_select" in sig.parameters:
+            st.plotly_chart(fig, use_container_width=True, key="plotly_sector_chart")
+        else:
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown('<hr class="glow-divider" style="margin: 0.4rem 0 0.7rem 0;">', unsafe_allow_html=True)
+
+    # -------------------------------------------------------------
     # TABBED PANELS — Lazy-Loaded Broker Tabs (Instant Loading)
     # -------------------------------------------------------------
     tab_options = [
         "📊 Gainers & Losers",
         "🏆 Sector Matrix & RRG",
         "⚡ Intraday Flow & Reversals (Vol + OI)",
-        "📈 Sector Chart",
         "🚨 Breakout Scanner",
         "🎯 Multi-Touch Proximity (KEI Pattern)",
         "🎲 F&O Stock PCR Radar (Overbought/Oversold)",
@@ -1407,6 +1474,7 @@ else:
                         use_container_width=True,
                         hide_index=True,
                         selection_mode="single-row",
+                        on_select="rerun",
                         key="gainer_leaderboard"
                     )
 
@@ -1425,6 +1493,7 @@ else:
                         use_container_width=True,
                         hide_index=True,
                         selection_mode="single-row",
+                        on_select="rerun",
                         key="loser_leaderboard"
                     )
         else:
@@ -1506,6 +1575,60 @@ else:
                         )
                 else:
                     st.info("No intraday low/high data available.")
+
+        if selected_symbol_to_chart:
+            st.markdown(f"#### 📈 Daily Chart: {selected_symbol_to_chart}")
+            import plotly.graph_objects as go
+            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+            from sqlalchemy import text
+            sym_full = f"NSE:{selected_symbol_to_chart}-EQ" if not selected_symbol_to_chart.startswith("NSE:") else selected_symbol_to_chart
+            with get_engine().connect() as conn:
+                daily_df = pd.read_sql(
+                    text("SELECT timestamp, open, high, low, close FROM ohlcv_daily WHERE symbol = :sym ORDER BY timestamp DESC LIMIT 100"),
+                    conn, params={"sym": sym_full}
+                )
+            if not daily_df.empty:
+                daily_df = daily_df.sort_values('timestamp').reset_index(drop=True)
+                fig = go.Figure(data=[go.Candlestick(
+                    x=daily_df['timestamp'],
+                    open=daily_df['open'], high=daily_df['high'],
+                    low=daily_df['low'], close=daily_df['close']
+                )])
+                
+                try:
+                    from trade_system.domains.strategy.application.indicators.order_blocks import identify_order_blocks
+                    obs = identify_order_blocks(daily_df, atr_multiplier=1.5)
+                    for ob in obs.get('bullish', []):
+                        fig.add_shape(type="rect",
+                            x0=ob['start_date'], y0=ob['bottom'], x1=daily_df['timestamp'].iloc[-1], y1=ob['top'],
+                            line=dict(color="rgba(34,197,94,0)"), fillcolor="rgba(34,197,94,0.2)", layer="below"
+                        )
+                        date_str = str(ob['start_date']).split(' ')[0]
+                        fig.add_annotation(
+                            x=ob['start_date'], y=ob['top'],
+                            text=f"Bullish OB ({date_str})",
+                            showarrow=False, yshift=10,
+                            font=dict(color="#22c55e", size=10)
+                        )
+                    for ob in obs.get('bearish', []):
+                        fig.add_shape(type="rect",
+                            x0=ob['start_date'], y0=ob['bottom'], x1=daily_df['timestamp'].iloc[-1], y1=ob['top'],
+                            line=dict(color="rgba(239,68,68,0)"), fillcolor="rgba(239,68,68,0.2)", layer="below"
+                        )
+                        date_str = str(ob['start_date']).split(' ')[0]
+                        fig.add_annotation(
+                            x=ob['start_date'], y=ob['bottom'],
+                            text=f"Bearish OB ({date_str})",
+                            showarrow=False, yshift=-10,
+                            font=dict(color="#ef4444", size=10)
+                        )
+                except Exception as e:
+                    pass
+
+                fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("No daily data found.")
 
         st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
         col_near_bo, col_near_bd = st.columns(2)
@@ -2396,39 +2519,6 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                                 </div>
                             </div>
                             """, unsafe_allow_html=True)
-
-    # ---- TAB 2: Sector Chart ----
-    elif active_tab == "📈 Sector Chart":
-        fig = go.Figure()
-        colors = ['#22c55e' if v >= 0 else '#ef4444' for v in sector_perf['pChange']]
-        fig.add_trace(go.Bar(
-            x=sector_perf['sector'],
-            y=sector_perf['pChange'],
-            marker_color=colors,
-            marker_line_color='rgba(255,255,255,0.1)',
-            marker_line_width=1,
-            text=[f"{v:+.2f}%" for v in sector_perf['pChange']],
-            textposition='outside',
-            textfont=dict(size=10, color='#e2e8f0'),
-            hovertemplate='<b>%{x}</b><br>Return: %{y:+.2f}%<extra></extra>'
-        ))
-        fig.update_layout(
-            height=320,
-            template="plotly_dark",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='#94a3b8'),
-            xaxis=dict(title="", tickangle=-35, gridcolor='rgba(255,255,255,0.03)'),
-            yaxis=dict(title="Avg Return (%)", gridcolor='rgba(255,255,255,0.05)', zeroline=True, zerolinecolor='rgba(255,255,255,0.15)', zerolinewidth=1),
-            margin=dict(t=15, b=70, l=50, r=15),
-            bargap=0.2,
-        )
-        import inspect
-        sig = inspect.signature(st.plotly_chart)
-        if "on_select" in sig.parameters:
-            st.plotly_chart(fig, use_container_width=True, key="plotly_sector_chart")
-        else:
-            st.plotly_chart(fig, use_container_width=True)
 
     # ---- TAB 3: Breakout Scanner ----
     elif active_tab == "🚨 Breakout Scanner":
@@ -4614,5 +4704,62 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
         else:
             st.warning(f"Shadow intelligence directory not found for {today_str}. Make sure the runner script is active.")
 
+    # ---- SMC SNIPER (ORDER BLOCKS & LIQUIDITY) ----
+    st.markdown("---")
+    st.markdown("### 🚀 SMC Sniper (Liquidity Sweep & Order Blocks)")
+    if 'merged_closes' in locals() and not merged_closes.empty and 'df' in locals() and not df.empty:
+        # Step 1: Filter for Institutional Volume (vol_surge >= 1.5)
+        high_vol_df = merged_closes[merged_closes['vol_surge'] >= 1.5].copy()
+        
+        smc_candidates = []
+        if not high_vol_df.empty:
+            try:
+                from trade_system.domains.strategy.application.indicators.smc_structure import SMCStructureEngine
+                engine = SMCStructureEngine(swing_length=5, internal_length=2)
+                
+                for _, row in high_vol_df.iterrows():
+                    symbol = row['symbol']
+                    sym_df = df[df['symbol'] == symbol].sort_values('timestamp')
+                    if len(sym_df) < 15:
+                        continue
+                    
+                    state = engine.analyze(sym_df)
+                    
+                    # Focus on Internal CHoCH (Realignment) OR Pullback into Protected Level
+                    if state.is_internal_realigned or state.is_pullback:
+                        dist_to_ob = None
+                        if state.strong_protected_level:
+                            dist_to_ob = abs((row['close_last'] - state.strong_protected_level) / row['close_last']) * 100
+                        
+                        # High-probability setups: Price is within 2% of the Strong Order Block
+                        if dist_to_ob is not None and dist_to_ob <= 2.0:
+                            direction = "🟢 BULLISH" if state.swing_trend.value == "BULLISH" else "🔴 BEARISH"
+                            
+                            smc_candidates.append({
+                                "Symbol": symbol.replace("NSE:", "").replace("-EQ", ""),
+                                "Sector": row['sector'],
+                                "LTP": row['close_last'],
+                                "Trend": direction,
+                                "SMC State": state.alignment_description,
+                                "Order Block": f"₹{state.strong_protected_level:.2f}",
+                                "Target (Liquidity)": f"₹{state.weak_target_level:.2f}" if state.weak_target_level else "—",
+                                "Vol Surge (x)": f"{row['vol_surge']:.1f}x",
+                                "_dist": dist_to_ob
+                            })
+            except Exception as e:
+                st.error(f"SMC Engine Error: {e}")
+        
+        if smc_candidates:
+            smc_df = pd.DataFrame(smc_candidates).sort_values(by="_dist")
+            smc_df = smc_df.drop(columns=["_dist"])
+            
+            st.dataframe(
+                smc_df,
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No stocks currently show an SMC Realignment or Pullback into an Order Block with high institutional volume.")
+            
     # Footer
     st.caption("🧭 Sector Scope | AI Trade System V2 | Data refreshes every 60s")

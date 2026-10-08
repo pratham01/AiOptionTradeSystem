@@ -341,6 +341,7 @@ class LiveMarketDataService:
             gamma_agent=self.gamma_agent,
             notifier=self.notifier,
             latest_oc_analysis=self.latest_oc_analysis,
+            settings=self.settings,
         )
         # Register index symbols in these pipelines
         for sym in symbols:
@@ -1713,7 +1714,10 @@ class LiveMarketDataService:
                 f"Option: {opt_symbol} @ ₹{entry_premium:.2f}\n\n"
                 f"<i>{suggestion.narrative}</i>"
             )
-            self.notifier.send(msg)
+            if getattr(self.settings, "enable_intraday_option_alerts", False):
+                self.notifier.send(msg)
+            else:
+                LOGGER.debug("Intraday option alert suppressed for Gamma Blast (%s): disabled in settings.", symbol)
             
     def _manage_gamma_blast_trade(self, symbol: str, trade: dict[str, object]) -> None:
         """Trailing and exit logic for active Gamma Blast trade."""
@@ -1773,7 +1777,8 @@ class LiveMarketDataService:
             f"Exit: ₹{exit_premium:.2f}\n"
             f"PnL: <b>{pnl:+.2f} ({pnl_pct:+.1f}%)</b>"
         )
-        self.notifier.send(msg)
+        if getattr(self.settings, "enable_intraday_option_alerts", False):
+            self.notifier.send(msg)
         
         trade["exit_time"] = exit_time
         trade["exit_premium"] = exit_premium
@@ -2443,6 +2448,10 @@ class LiveMarketDataService:
 
     def _send_option_edge_alerts(self, alerts) -> None:
         """Send Intraday Option Edge alerts via Telegram with deduplication."""
+        if not getattr(self.settings, "enable_intraday_option_alerts", False):
+            LOGGER.debug("Intraday Option Edge Telegram alerts disabled in configuration.")
+            return
+
         now = self._now_ist()
         alerts_to_send = []
 

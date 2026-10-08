@@ -99,10 +99,12 @@ class GammaPipeline:
         gamma_agent,
         notifier,
         latest_oc_analysis: dict[str, Any],
+        settings: Any = None,
     ) -> None:
         self.gamma_agent = gamma_agent
         self.notifier = notifier
         self._oc_analysis = latest_oc_analysis
+        self.settings = settings
 
         # Per-symbol state
         self._open_trade: dict[str, GammaTrade | None] = {}
@@ -235,15 +237,16 @@ class GammaPipeline:
         )
         self._open_trade[symbol] = trade
 
-        self.notifier.send(
-            f"💥 <b>0DTE GAMMA BLAST: {self._short(symbol)}</b> 💥\n\n"
-            f"Direction: <b>{suggestion.direction.name}</b>\n"
-            f"Spot: ₹{trade.entry_spot:.2f}\n"
-            f"Target: ₹{trade.target_spot:.2f}\n"
-            f"Stop:   ₹{trade.stop_spot:.2f}\n"
-            f"Option: {opt_symbol} @ ₹{entry_premium:.2f}\n\n"
-            f"<i>{suggestion.narrative}</i>"
-        )
+        if not self.settings or getattr(self.settings, "enable_intraday_option_alerts", False):
+            self.notifier.send(
+                f"💥 <b>0DTE GAMMA BLAST: {self._short(symbol)}</b> 💥\n\n"
+                f"Direction: <b>{suggestion.direction.name}</b>\n"
+                f"Spot: ₹{trade.entry_spot:.2f}\n"
+                f"Target: ₹{trade.target_spot:.2f}\n"
+                f"Stop:   ₹{trade.stop_spot:.2f}\n"
+                f"Option: {opt_symbol} @ ₹{entry_premium:.2f}\n\n"
+                f"<i>{suggestion.narrative}</i>"
+            )
 
     def _manage_trade(
         self,
@@ -300,15 +303,16 @@ class GammaPipeline:
         trade.exit_reason = reason
 
         emoji = "🟢" if pnl > 0 else "🔴"
-        self.notifier.send(
-            f"{emoji} <b>GAMMA BLAST CLOSED: {short_sym}</b>\n\n"
-            f"Option: {trade.option_symbol}\n"
-            f"Direction: {trade.direction.name}\n"
-            f"Reason: <b>{reason}</b>\n\n"
-            f"Entry: ₹{trade.entry_premium:.2f}\n"
-            f"Exit:  ₹{exit_premium:.2f}\n"
-            f"PnL:   <b>{pnl:+.2f} ({pnl_pct:+.1f}%)</b>"
-        )
+        if not self.settings or getattr(self.settings, "enable_intraday_option_alerts", False):
+            self.notifier.send(
+                f"{emoji} <b>GAMMA BLAST CLOSED: {short_sym}</b>\n\n"
+                f"Option: {trade.option_symbol}\n"
+                f"Direction: {trade.direction.name}\n"
+                f"Reason: <b>{reason}</b>\n\n"
+                f"Entry: ₹{trade.entry_premium:.2f}\n"
+                f"Exit:  ₹{exit_premium:.2f}\n"
+                f"PnL:   <b>{pnl:+.2f} ({pnl_pct:+.1f}%)</b>"
+            )
         self._trade_history[symbol].append(trade)
         self._open_trade[symbol] = None
 

@@ -19,7 +19,6 @@ pages = {
         st.Page(HERE / "agent_dashboard.py", title="Agent Dashboard", icon="🤖"),
         st.Page(HERE / "smart_oi_dashboard.py", title="Smart OI", icon="🎯"),
         st.Page(HERE / "sector_scope_dashboard.py", title="Sector Scope", icon="🧭"),
-        st.Page(HERE / "broker_health_dashboard.py", title="Broker Health", icon="🔌"),
         st.Page(HERE / "market_mood_dashboard.py", title="Market Mood", icon="📊"),
         st.Page(HERE / "option_edge_dashboard.py", title="Option Edge", icon="⚡"),
         st.Page(HERE / "btst_scanner_dashboard.py", title="BTST Scanner", icon="🌅"),
@@ -37,6 +36,9 @@ pages = {
         st.Page(HERE / "sr_channels_dashboard.py", title="S/R Channels", icon="🏗️"),
         st.Page(HERE / "gamma_blast_dashboard.py", title="Gamma Blast Lab", icon="⚡"),
         st.Page(HERE / "agent_arch_viz.py", title="Swarm Architecture", icon="🏛️"),
+    ],
+    "System & Health": [
+        st.Page(HERE / "broker_health_dashboard.py", title="Broker Health", icon="🔌"),
     ],
 }
 

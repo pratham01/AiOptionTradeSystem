@@ -107,7 +107,7 @@ class LiveAlertAgent:
             vol_ma = df["volume"].rolling(20).mean().iloc[-1]
             vol_surge = latest["volume"] / vol_ma if vol_ma > 0 else 1.0
             if vol_surge >= self.config.volume_surge_multiplier:
-                self._debounce_send(symbol, "VOL", f"🚨 <b>{short_sym} Abnormal Volume</b>\nSurge: <b>{vol_surge:.1f}x</b> average\nPrice: ₹{price:.2f}\n<i>Institutional interest detected.</i>")
+                self._debounce_send(symbol, "VOL", f"🚨 <b>{short_sym} Abnormal Volume</b>\nSurge: <b>{vol_surge:.1f}x</b> average\nPrice: ₹{price:.2f}\n<i>Institutional interest detected.</i>", log_only=True)
 
     def process_smc_signal(self, symbol: str, signal: dict[str, Any]) -> None:
         """Alert on Smart Money Concept structural breaks."""
