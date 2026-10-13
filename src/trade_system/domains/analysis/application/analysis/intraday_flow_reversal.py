@@ -67,32 +67,46 @@ class IntradayFlowReversalEngine:
     ) -> Tuple[str, str]:
         """
         Classifies stock into institutional derivatives quadrant based on price thrust & PCR/OI:
-        - LONG_BUILDUP: Price expanding from low + healthy/rising PCR (fresh accumulation)
+        - LONG_BUILDUP: Price expanding / bullish thrust + positive/supportive PCR (fresh accumulation)
         - SHORT_COVERING: Reversal from extreme oversold conditions (PCR <= 0.55 / trapped call writers covering)
-        - SHORT_BUILDUP: Price breaking down from high + bearish PCR/OI addition
+        - SHORT_BUILDUP: Price breaking down / bearish dump + call writing / declining PCR
         - LONG_UNWINDING: Reversal from extreme overbought conditions (PCR >= 0.85 / bulls dumping)
+        - BALANCED CHURN: Flat / chop with no decisive directional flow
         """
-        # Rebound from low (Bullish thrust)
-        if move_from_low >= 1.2:
+        # Determine directional intent from price action & thrust
+        is_bullish = (price_change >= 0.4) or (move_from_low >= 1.0)
+        is_bearish = (price_change <= -0.4) or (drop_from_high >= 1.0)
+
+        # Bullish regime
+        if is_bullish and not (is_bearish and drop_from_high > move_from_low):
+            # Check for short squeeze / covering (oversold condition, low PCR, or bounce from deep low)
             if pcr_oi is not None and (pcr_oi <= 0.55 or sentiment_state in ["OVERSOLD", "EXTREME_OVERSOLD"]):
                 return "⚡ SHORT COVERING", "BULLISH"
-            elif pcr_oi is not None and pcr_oi >= 0.70:
-                return "🟢 LONG BUILD-UP", "BULLISH"
-            elif price_change >= 0.5:
-                return "🟢 LONG BUILD-UP", "BULLISH"
-            else:
+            elif move_from_low >= 1.5 and price_change < 0.2:
                 return "⚡ SHORT COVERING", "BULLISH"
+            else:
+                return "🟢 LONG BUILD-UP", "BULLISH"
 
-        # Pullback from high (Bearish rejection)
-        elif drop_from_high >= 1.2:
+        # Bearish regime
+        elif is_bearish:
+            # Check for long unwinding / profit booking (overbought condition, high PCR, or drop from high)
             if pcr_oi is not None and (pcr_oi >= 0.85 or sentiment_state in ["OVERBOUGHT", "EXTREME_OVERBOUGHT"]):
                 return "🩸 LONG UNWINDING", "BEARISH"
-            elif pcr_oi is not None and pcr_oi <= 0.65:
-                return "🔴 SHORT BUILD-UP", "BEARISH"
-            elif price_change <= -0.5:
-                return "🔴 SHORT BUILD-UP", "BEARISH"
-            else:
+            elif drop_from_high >= 1.5 and price_change > -0.2:
                 return "🩸 LONG UNWINDING", "BEARISH"
+            else:
+                return "🔴 SHORT BUILD-UP", "BEARISH"
+
+        # Mild directional leanings for stocks with modest moves
+        if price_change >= 0.2 or move_from_low >= 0.5:
+            if pcr_oi is not None and pcr_oi <= 0.55:
+                return "⚡ SHORT COVERING", "BULLISH"
+            return "🟢 LONG BUILD-UP", "BULLISH"
+
+        if price_change <= -0.2 or drop_from_high >= 0.5:
+            if pcr_oi is not None and pcr_oi >= 0.85:
+                return "🩸 LONG UNWINDING", "BEARISH"
+            return "🔴 SHORT BUILD-UP", "BEARISH"
 
         return "⚪ BALANCED CHURN", "NEUTRAL"
 

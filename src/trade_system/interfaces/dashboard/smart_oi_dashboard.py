@@ -72,20 +72,21 @@ def fetch_live_vix_quote() -> Dict[str, Any]:
 
 
 @st.cache_data(ttl=15)
-def fetch_live_fyers_option_chain(symbol: str, strikecount: int = 15) -> Tuple[Optional[pd.DataFrame], float, str]:
-    """Fetch live real-time option chain and spot price directly from Fyers."""
+def fetch_live_fyers_option_chain(symbol: str, strikecount: int = 15) -> Tuple[Optional[pd.DataFrame], float, str, str]:
+    """Fetch live real-time option chain, spot price, expiry, and error detail directly from Fyers."""
     try:
         broker = get_broker()
         if not broker:
-            return None, 0.0, ""
+            return None, 0.0, "", "Broker client not initialized."
         res = broker.fyers.optionchain(data={"symbol": symbol, "strikecount": strikecount})
         if not isinstance(res, dict) or res.get("s") != "ok":
-            LOGGER.warning("Fyers live option chain call returned non-ok: %s", res)
-            return None, 0.0, ""
+            msg = str(res.get("message") or res.get("errmsg") or "")
+            LOGGER.warning("Fyers live option chain call returned non-ok for %s: %s", symbol, res)
+            return None, 0.0, "", msg
         data = res.get("data", {})
         options_chain = data.get("optionsChain", [])
         if not options_chain:
-            return None, 0.0, ""
+            return None, 0.0, "", "No options chain data available."
         df = pd.DataFrame(options_chain)
         if "strike" not in df.columns and "strike_price" in df.columns:
             df["strike"] = pd.to_numeric(df["strike_price"], errors="coerce")
@@ -102,10 +103,10 @@ def fetch_live_fyers_option_chain(symbol: str, strikecount: int = 15) -> Tuple[O
                 val = q[symbol]
                 spot_price = float(val.get("lp", 0.0) if isinstance(val, dict) else getattr(val, "ltp", 0.0))
         expiry = str(options_chain[0].get("expiry_date", "")) if options_chain else ""
-        return df, spot_price, expiry
+        return df, spot_price, expiry, ""
     except Exception as e:
-        LOGGER.error(f"Error fetching live option chain: {e}")
-        return None, 0.0, ""
+        LOGGER.error(f"Error fetching live option chain for {symbol}: {e}")
+        return None, 0.0, "", str(e)
 
 
 @st.cache_data(ttl=60)
@@ -2540,8 +2541,9 @@ def run_dashboard():
         with col_stk:
             live_strikes = st.slider("Strikes", 10, 30, 15, 5, key="smart_oi_live_strikes")
 
+        oc_err_msg = ""
         with st.spinner(f"Fetching real-time option chain for {selected_symbol_label}..."):
-            latest_oc, spot_price, expiry_str = fetch_live_fyers_option_chain(db_symbol, strikecount=live_strikes)
+            latest_oc, spot_price, expiry_str, oc_err_msg = fetch_live_fyers_option_chain(db_symbol, strikecount=live_strikes)
             price_df = fetch_live_price_history(db_symbol, resolution="1")
             if not price_df.empty:
                 price_df = calculate_price_vwap(price_df)
@@ -2561,6 +2563,7 @@ def run_dashboard():
             if (spot_price is None or spot_price == 0.0) and not price_df.empty:
                 spot_price = float(price_df.iloc[-1]["close"])
     else:
+        oc_err_msg = ""
         available_dates = load_db_dates(db_symbol)
         if not available_dates:
             st.error(f"No option chain data found in database for {selected_symbol_label}. Switch to '🔴 Live Real-Time' to analyze live.")
@@ -2582,7 +2585,18 @@ def run_dashboard():
             spot_price = price_df.iloc[-1]["close"]
 
     if latest_oc is None or latest_oc.empty:
-        st.warning(f"Unable to load Option Chain for {selected_symbol_label}. Please check market hours or broker connection.")
+        if "no expiry contracts" in str(oc_err_msg).lower() or selected_symbol_label.upper() == "GRANULES":
+            st.error(
+                f"### ℹ️ No Active Option Chain Available for **{selected_symbol_label}**\n\n"
+                f"**Exchange Regulatory Status:** **Granules India Limited (`GRANULES`)** was officially **excluded from the NSE Futures & Options (F&O) segment** "
+                f"effective **August 29, 2025** per the National Stock Exchange (NSE) circular.\n\n"
+                f"- **Why there is no option chain:** The exchange no longer introduces new derivatives contracts (Futures or Options) for this security.\n"
+                f"- **Current Market Segment:** Granules India is actively traded exclusively in the **Cash / Equity (`-EQ`)** segment.\n"
+                f"- **Broker Response:** Fyers API code `-470: There are no expiry contracts.`\n"
+                f"- **Suggested Action:** To inspect option chains and OI profiles, select an active F&O constituent (e.g. `SBIN`, `TCS`, `RELIANCE`, `INFY`, `HDFCBANK`)."
+            )
+        else:
+            st.warning(f"Unable to load Option Chain for {selected_symbol_label}: {oc_err_msg or 'Please check market hours or broker connection.'}")
         st.stop()
 
     # Initialize SmartOI Analyzer & dynamically infer strike step

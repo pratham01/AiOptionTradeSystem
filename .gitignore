@@ -21,7 +21,7 @@ fyersRequests.log
 
 /option_chain_data/
 /market_data/
-data/
+/data/
 *.db
 *.sqlite
 *.sqlite3

@@ -264,3 +264,7 @@ def fetch_live_quotes(symbols):
         import logging
         logging.getLogger(__name__).error(f"Error fetching quotes: {e}")
         return {}
+
+
+# Backward-compatibility alias
+get_broker = get_cached_broker

@@ -8,10 +8,11 @@ LOGGER = logging.getLogger(__name__)
 logger = LOGGER
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, date, time as dt_time
+from plotly.subplots import make_subplots
+from datetime import datetime, date, time as dt_time, timedelta
 from pathlib import Path
 import json
-from trade_system.interfaces.dashboard.shared_broker import fetch_live_quotes
+from trade_system.interfaces.dashboard.shared_broker import fetch_live_quotes, get_cached_broker
 
 from trade_system.domains.market_data.infrastructure.database.connection import get_engine
 from sqlalchemy import text
@@ -371,6 +372,235 @@ def _cached_reversal_scan(target_date_str: str, min_probability: int = 40):
     return reversal_scanner.scan(target_date=tgt_date, min_probability=min_probability)
 
 
+def render_stock_inspection_chart(
+    selected_symbol: str,
+    target_date: Optional[date] = None,
+    key_prefix: str = "chart",
+):
+    """Render comprehensive stock forensics featuring Candlestick + Volume Bar Graph + Order Blocks."""
+    if not selected_symbol:
+        return
+
+    clean_sym = selected_symbol.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").replace("-INDEX", "").strip()
+    sec_map = get_sector_mapping()
+    stock_sector = sec_map.get(selected_symbol) or sec_map.get(f"NSE:{clean_sym}-EQ") or sec_map.get(clean_sym, "EQUITY")
+
+    st.markdown('<hr class="glow-divider" style="margin: 0.8rem 0 0.5rem 0;">', unsafe_allow_html=True)
+    
+    # Inspector Header with Controls
+    head_c1, head_c2, head_c3 = st.columns([3, 1.6, 0.7])
+    with head_c1:
+        st.markdown(f"""
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+            <span style="font-size:1.1rem; font-weight:800; color:#f8fafc;">📈 Stock Forensics Inspector: <span style="color:#38bdf8;">{clean_sym}</span></span>
+            <span style="background:rgba(56,189,248,0.16); color:#38bdf8; border:1px solid rgba(56,189,248,0.35); font-size:0.72rem; padding:2px 8px; border-radius:4px; font-weight:700;">{stock_sector}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with head_c2:
+        chart_tf = st.segmented_control(
+            "Timeframe",
+            options=["📅 Daily (100D)", "⏱️ 15m Intraday"],
+            default="📅 Daily (100D)",
+            key=f"{key_prefix}_tf_seg_{clean_sym}",
+            label_visibility="collapsed"
+        ) or "📅 Daily (100D)"
+    with head_c3:
+        if st.button("✕ Close", key=f"{key_prefix}_close_btn_{clean_sym}", use_container_width=True, help="Close stock inspector"):
+            st.session_state["selected_stock_to_chart"] = None
+            st.rerun()
+
+    cand_syms = [f"NSE:{clean_sym}-EQ", f"NSE:{clean_sym}-INDEX", f"BSE:{clean_sym}", clean_sym]
+    placeholders = ', '.join([f"'{s}'" for s in cand_syms])
+    engine = get_engine()
+
+    chart_df = pd.DataFrame()
+    is_daily = "Daily" in chart_tf
+
+    if is_daily:
+        with engine.connect() as conn:
+            chart_df = pd.read_sql(
+                text(f"SELECT timestamp, open, high, low, close, volume FROM ohlcv_daily WHERE symbol IN ({placeholders}) ORDER BY timestamp DESC LIMIT 100"),
+                conn
+            )
+        if chart_df.empty:
+            # Automatic fallback to 15m if daily candles are missing
+            with engine.connect() as conn:
+                chart_df = pd.read_sql(
+                    text(f"SELECT timestamp, open, high, low, close, volume FROM ohlcv_15m WHERE symbol IN ({placeholders}) ORDER BY timestamp DESC LIMIT 150"),
+                    conn
+                )
+            is_daily = False
+    else:
+        with engine.connect() as conn:
+            chart_df = pd.read_sql(
+                text(f"SELECT timestamp, open, high, low, close, volume FROM ohlcv_15m WHERE symbol IN ({placeholders}) ORDER BY timestamp DESC LIMIT 150"),
+                conn
+            )
+
+    if chart_df.empty:
+        st.warning(f"No candle data available in database for **{clean_sym}**.")
+        return
+
+    chart_df = chart_df.sort_values("timestamp").reset_index(drop=True)
+    chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"], format="mixed", errors="coerce")
+
+    # Metrics computation
+    ltp = float(chart_df["close"].iloc[-1])
+    prev_close = float(chart_df["close"].iloc[-2]) if len(chart_df) >= 2 else ltp
+    p_chg = ((ltp - prev_close) / prev_close * 100) if prev_close > 0 else 0.0
+    day_hi = float(chart_df["high"].tail(25 if not is_daily else 1).max())
+    day_lo = float(chart_df["low"].tail(25 if not is_daily else 1).min())
+
+    chart_df["ema20"] = chart_df["close"].ewm(span=20, adjust=False).mean()
+    chart_df["ema50"] = chart_df["close"].ewm(span=50, adjust=False).mean()
+    chart_df["vol_sma"] = chart_df["volume"].rolling(20, min_periods=1).mean()
+
+    # Calculate Volume Surge
+    curr_vol = float(chart_df["volume"].iloc[-1])
+    avg_vol = float(chart_df["vol_sma"].iloc[-1]) if len(chart_df) >= 1 else 1.0
+    vol_surge_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
+    vol_surge_badge = f"🔥 {vol_surge_ratio:.1f}x" if vol_surge_ratio >= 1.5 else f"🟡 {vol_surge_ratio:.1f}x" if vol_surge_ratio >= 1.0 else f"{vol_surge_ratio:.1f}x"
+
+    # Identify order blocks
+    obs = {}
+    try:
+        from trade_system.domains.strategy.application.indicators.order_blocks import identify_order_blocks
+        obs = identify_order_blocks(chart_df, atr_multiplier=1.5)
+    except Exception:
+        obs = {}
+
+    bull_obs = obs.get("bullish", [])
+    bear_obs = obs.get("bearish", [])
+
+    # KPI Banner
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("LTP", f"₹{ltp:,.2f}", f"{p_chg:+.2f}%")
+    m2.metric("High", f"₹{day_hi:,.2f}")
+    m3.metric("Low", f"₹{day_lo:,.2f}")
+    m4.metric("Vol Surge (20d)", vol_surge_badge)
+    m5.metric("Order Blocks", f"{len(bull_obs)} Bull / {len(bear_obs)} Bear")
+
+    # Plotly Subplots: Price on top, Volume Bar Graph on bottom
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.72, 0.28],
+        subplot_titles=(
+            f"<b>{clean_sym}</b> — Price Action & Structural Order Blocks ({'Daily' if is_daily else '15m Intraday'})",
+            "<b>Volume Profile & Momentum Bar Graph</b>"
+        )
+    )
+
+    # 1. Candlesticks
+    fig.add_trace(go.Candlestick(
+        x=chart_df["timestamp"],
+        open=chart_df["open"],
+        high=chart_df["high"],
+        low=chart_df["low"],
+        close=chart_df["close"],
+        name="OHLC",
+        increasing_line_color="#22c55e",
+        decreasing_line_color="#ef4444",
+        increasing_fillcolor="rgba(34, 197, 94, 0.75)",
+        decreasing_fillcolor="rgba(239, 68, 68, 0.75)",
+    ), row=1, col=1)
+
+    # 2. EMAs
+    fig.add_trace(go.Scatter(
+        x=chart_df["timestamp"],
+        y=chart_df["ema20"],
+        mode="lines",
+        name="20 EMA",
+        line=dict(color="#38bdf8", width=1.5)
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=chart_df["timestamp"],
+        y=chart_df["ema50"],
+        mode="lines",
+        name="50 EMA",
+        line=dict(color="#f59e0b", width=1.2, dash="dot")
+    ), row=1, col=1)
+
+    # 3. Order Blocks
+    last_ts = chart_df["timestamp"].iloc[-1]
+    for ob in bull_obs:
+        fig.add_shape(type="rect",
+            x0=ob["start_date"], y0=ob["bottom"], x1=last_ts, y1=ob["top"],
+            line=dict(color="rgba(34,197,94,0)"), fillcolor="rgba(34,197,94,0.18)", layer="below",
+            row=1, col=1
+        )
+        date_str = str(ob["start_date"]).split(" ")[0]
+        fig.add_annotation(
+            x=ob["start_date"], y=ob["top"],
+            text=f"Bullish OB ({date_str})",
+            showarrow=False, yshift=10,
+            font=dict(color="#22c55e", size=9),
+            row=1, col=1
+        )
+    for ob in bear_obs:
+        fig.add_shape(type="rect",
+            x0=ob["start_date"], y0=ob["bottom"], x1=last_ts, y1=ob["top"],
+            line=dict(color="rgba(239,68,68,0)"), fillcolor="rgba(239,68,68,0.18)", layer="below",
+            row=1, col=1
+        )
+        date_str = str(ob["start_date"]).split(" ")[0]
+        fig.add_annotation(
+            x=ob["start_date"], y=ob["bottom"],
+            text=f"Bearish OB ({date_str})",
+            showarrow=False, yshift=-10,
+            font=dict(color="#ef4444", size=9),
+            row=1, col=1
+        )
+
+    # 4. Volume Bar Graph
+    vol_colors = ["#22c55e" if c >= o else "#ef4444" for c, o in zip(chart_df["close"], chart_df["open"])]
+    fig.add_trace(go.Bar(
+        x=chart_df["timestamp"],
+        y=chart_df["volume"],
+        name="Volume",
+        marker_color=vol_colors,
+        marker_line_color="rgba(255,255,255,0.06)",
+        marker_line_width=0.5,
+        hovertemplate="<b>Volume:</b> %{y:,.0f}<extra></extra>"
+    ), row=2, col=1)
+
+    # 5. Volume 20 SMA
+    fig.add_trace(go.Scatter(
+        x=chart_df["timestamp"],
+        y=chart_df["vol_sma"],
+        mode="lines",
+        name="20 Vol SMA",
+        line=dict(color="#eab308", width=1.2, dash="dash")
+    ), row=2, col=1)
+
+    # Eliminate weekend and exchange holiday blank gaps from price & volume charts
+    all_dates = pd.date_range(start=chart_df['timestamp'].min().date(), end=chart_df['timestamp'].max().date(), freq='D')
+    trading_dates = set(chart_df['timestamp'].dt.strftime('%Y-%m-%d'))
+    missing_holidays = [d.strftime('%Y-%m-%d') for d in all_dates if d.strftime('%Y-%m-%d') not in trading_dates and d.weekday() < 5]
+
+    rbreaks = [
+        dict(bounds=["sat", "mon"]),  # remove weekends
+    ]
+    if missing_holidays:
+        rbreaks.append(dict(values=missing_holidays))  # remove trading holidays
+    if not is_daily:
+        rbreaks.append(dict(bounds=[15.5, 9.25], pattern="hour"))  # remove non-trading hours
+
+    fig.update_xaxes(rangebreaks=rbreaks)
+
+    fig.update_layout(
+        height=520,
+        template="plotly_dark",
+        paper_bgcolor="rgba(15, 23, 42, 0.6)",
+        plot_bgcolor="rgba(15, 23, 42, 0.35)",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=35, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 available_dates = fetch_available_dates()
 
 # Inject today's date if it is a weekday and current local time is after 9:00 AM (premarket start)
@@ -479,6 +709,20 @@ else:
         
     db_update_time = pd.to_datetime(last_candle_ts).strftime("%Y-%m-%d %H:%M:%S") if pd.notna(last_candle_ts) else "N/A"
     refresh_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if is_today:
+        today_candle_count = len(df[df['timestamp'].dt.date == target_date]) if not df.empty else 0
+        if st.sidebar.button("🔄 Sync Today's 15m Candles", key="btn_sync_15m_sidebar", help="Fetch latest 15m intraday bars for all F&O stocks from broker", use_container_width=True):
+            with st.spinner("Syncing 15m intraday candles from broker..."):
+                try:
+                    from scripts.sync_today_15m import sync_fo_15m_candles
+                    synced = sync_fo_15m_candles(latest_date_str)
+                    st.cache_data.clear()
+                    st.sidebar.success(f"Synced {synced} candles!")
+                    st.rerun()
+                except Exception as ex:
+                    st.sidebar.error(f"Sync failed: {ex}")
+        st.sidebar.caption(f"📊 Intraday Candles Today: **{today_candle_count}** bars | 🕒 **{db_update_time}**")
     
     # Compact status bar
     pill_cls = "pill-live" if is_today else "pill-hist"
@@ -542,17 +786,17 @@ else:
         vol_surge = 0.0
         
         # Today's volume: sum of intraday candle volumes (or live quote)
+        current_time_limit = None
         if is_today and quotes and symbol in quotes:
             volume_today = quotes[symbol].volume or 0
+            # Live quote accumulates volume up to the current clock time in the market
+            now_t = datetime.now().time()
+            current_time_limit = min(now_t, dt_time(15, 30))
         elif not today_candles.empty:
             volume_today = int(today_candles['volume'].sum())
-        
-        # Determine the current time cutoff based on today's available candles or current time
-        current_time_limit = None
-        if not today_candles.empty:
             current_time_limit = today_candles['trade_time'].max()
         elif is_today:
-            current_time_limit = datetime.now().time()
+            current_time_limit = min(datetime.now().time(), dt_time(15, 30))
             
         # Historical average volume up to the same time of day over the last 10 trading days
         if not prev_candles_all.empty and current_time_limit is not None:
@@ -602,7 +846,7 @@ else:
                     close_prev = quote.previous_close
             else:
                 # Intraday return lookbacks (Last 15m, 30m, 1h, 2h)
-                if not today_candles.empty and len(today_candles) > 1:
+                if not today_candles.empty:
                     if len(today_candles) > step:
                         ref_idx = -step - 1
                         close_prev = float(today_candles.iloc[ref_idx]['close'])
@@ -610,10 +854,10 @@ else:
                         close_prev = float(today_candles.iloc[0]['open'])
                     if close_prev > 0 and close_last > 0:
                         pchange = ((close_last - close_prev) / close_prev) * 100
-                    window_candles = today_candles.tail(step + 1)
                 else:
+                    # Intraday interval selected but no bars exist: do not masquerade full day change as 15m/30m change
                     pchange = 0.0
-                    close_prev = quote.previous_close
+                    close_prev = quote.previous_close if quote else 0.0
         else:
             # Historical date or fallback
             if step == "midday_1230":
@@ -630,7 +874,7 @@ else:
                     if close_prev > 0 and close_last > 0:
                         pchange = ((close_last - close_prev) / close_prev) * 100
             elif step is not None:
-                if not today_candles.empty and len(today_candles) > 1:
+                if not today_candles.empty:
                     if len(today_candles) > step:
                         ref_idx = -step - 1
                         close_prev = float(today_candles.iloc[ref_idx]['close'])
@@ -776,7 +1020,7 @@ else:
             if step is not None:
                 today_candle_count = len(df[df['timestamp'].dt.date == target_date])
                 if today_candle_count < 2:
-                    st.sidebar.warning(f"⚠️ No intraday candles in DB yet. Showing **daily change** as fallback. Start the live collector for {selected_lookback} precision.")
+                    st.sidebar.warning(f"⚠️ No intraday candles in DB for today yet. Click **'🔄 Sync Today\\'s 15m Candles'** above for {selected_lookback} precision.")
     else:
         merged_closes = pd.DataFrame(columns=["symbol", "sector", "close_last", "close_prev", "pChange", "volume_today", "avg_vol_time_adj", "vol_surge", "open_today", "high_today", "low_today", "move_from_low", "drop_from_high", "range_pos"])
     
@@ -1125,10 +1369,146 @@ else:
 
         return near_bo_sorted, near_bd_sorted
 
+    def _compute_smc_intraday_signals(full_df: pd.DataFrame, tgt_date) -> list:
+        signals = []
+        try:
+            from datetime import datetime
+            if 'smc_entry_times' not in st.session_state:
+                st.session_state['smc_entry_times'] = {}
+            current_clock = datetime.now().strftime("%H:%M")
+
+            from trade_system.domains.strategy.application.indicators.order_blocks import identify_order_blocks
+            symbol_groups = full_df.groupby('symbol')
+            for symbol, grp in symbol_groups:
+                grp_sorted = grp.sort_values('timestamp')
+                if len(grp_sorted) < 20:
+                    continue
+                today_candles = grp_sorted[grp_sorted['timestamp'].dt.date == tgt_date]
+                if today_candles.empty:
+                    continue
+
+                last_candle = today_candles.iloc[-1]
+                prev_candle = grp_sorted.iloc[-2] if len(grp_sorted) >= 2 else last_candle
+                c_open = float(last_candle['open'])
+                c_high = float(last_candle['high'])
+                c_low = float(last_candle['low'])
+                c_close = float(last_candle['close'])
+                c_range = c_high - c_low
+                if c_range <= 0:
+                    continue
+                c_body = abs(c_close - c_open)
+                c_upper_wick = c_high - max(c_close, c_open)
+                c_lower_wick = min(c_close, c_open) - c_low
+
+                vol_sma = grp_sorted['volume'].iloc[-21:-1].mean()
+                vol_surge = (last_candle['volume'] / vol_sma) if vol_sma > 0 else 1.0
+
+                signal_type = None
+                direction = None
+                stop_lvl = None
+                target_lvl = None
+                score = 0.0
+
+                # 1. Institutional Liquidity Sweeps (Must sweep prior swing level, clear rejection wick >= 30% of range, wick >= body, vol >= 1.0x)
+                lookback_window = grp_sorted.iloc[-21:-1]
+                prior_swing_low = float(lookback_window['low'].min())
+                prior_swing_high = float(lookback_window['high'].max())
+
+                # Bullish Sweep: Sweep below swing low, reclaim above, green close, strong lower rejection wick
+                if c_low < prior_swing_low and c_close > prior_swing_low and c_close > c_open and (c_lower_wick / c_range) >= 0.35 and c_lower_wick >= c_body and vol_surge >= 1.0:
+                    signal_type = "🟢 Bullish Sweep & Reclaim"
+                    direction = "🟢 BUY / CALL"
+                    stop_lvl = c_low * 0.998
+                    target_lvl = prior_swing_high
+                    score = (c_lower_wick / c_range) * 50 + vol_surge * 25
+
+                # Bearish Sweep: Sweep above swing high, reject below, red close, strong upper rejection wick
+                elif c_high > prior_swing_high and c_close < prior_swing_high and c_close < c_open and (c_upper_wick / c_range) >= 0.35 and c_upper_wick >= c_body and vol_surge >= 1.0:
+                    signal_type = "🔴 Bearish Sweep & Reject"
+                    direction = "🔴 SELL / PUT"
+                    stop_lvl = c_high * 1.002
+                    target_lvl = prior_swing_low
+                    score = (c_upper_wick / c_range) * 50 + vol_surge * 25
+
+                # 2. Fresh Order Block Taps (Recent <= 40 bars, first touch from outside, confirming reaction, vol_surge >= 1.0x)
+                if not signal_type and vol_surge >= 1.0:
+                    recent_bars = grp_sorted.iloc[-40:-1]
+                    obs = identify_order_blocks(recent_bars, atr_multiplier=1.2)
+                    bullish_obs = obs.get('bullish', [])
+                    bearish_obs = obs.get('bearish', [])
+
+                    # Bullish OB: prev candle low was above OB top, current touches OB and closes above bottom, defends zone
+                    for ob in bullish_obs:
+                        if prev_candle['low'] > ob['top'] and c_low <= ob['top'] and c_close >= ob['bottom']:
+                            if c_close >= c_open or c_lower_wick >= c_body * 0.8:
+                                signal_type = "🟢 Bullish OB Tap & Bounce"
+                                direction = "🟢 BUY / CALL"
+                                stop_lvl = ob['bottom'] * 0.998
+                                target_lvl = prior_swing_high
+                                score = 40 + vol_surge * 20
+                                break
+
+                    # Bearish OB: prev candle high was below OB bottom, current touches OB and closes below top, rejects zone
+                    if not signal_type:
+                        for ob in bearish_obs:
+                            if prev_candle['high'] < ob['bottom'] and c_high >= ob['bottom'] and c_close <= ob['top']:
+                                if c_close <= c_open or c_upper_wick >= c_body * 0.8:
+                                    signal_type = "🔴 Bearish OB Tap & Reject"
+                                    direction = "🔴 SELL / PUT"
+                                    stop_lvl = ob['top'] * 1.002
+                                    target_lvl = prior_swing_low
+                                    score = 40 + vol_surge * 20
+                                    break
+
+                if signal_type and direction:
+                    clean_sym = symbol.replace("NSE:", "").replace("-EQ", "")
+                    entry_key = f"intraday_{clean_sym}_{signal_type}"
+                    if entry_key not in st.session_state['smc_entry_times']:
+                        st.session_state['smc_entry_times'][entry_key] = current_clock
+                    entered_ui_time = st.session_state['smc_entry_times'][entry_key]
+
+                    signals.append({
+                        "Symbol": clean_sym,
+                        "Direction": direction,
+                        "Signal": signal_type,
+                        "LTP": f"₹{c_close:,.2f}",
+                        "Invalidation (SL)": f"₹{stop_lvl:,.2f}" if stop_lvl else "—",
+                        "Target": f"₹{target_lvl:,.2f}" if target_lvl else "—",
+                        "Vol Surge": f"{vol_surge:.1f}x",
+                        "Trigger Time": last_candle['timestamp'].strftime("%H:%M"),
+                        "Entered UI At": entered_ui_time,
+                        "_score": score
+                    })
+        except Exception:
+            pass
+
+        # Sort by conviction score and cap at Top 7 high-conviction institutional setups
+        if signals:
+            signals = sorted(signals, key=lambda x: x.get('_score', 0), reverse=True)[:7]
+            for s in signals:
+                s.pop('_score', None)
+        return signals
+
     raw_near_bo, raw_near_bd = _compute_near_breakout_breakdown(df, merged_closes, target_date)
+    smc_signals_data = _compute_smc_intraday_signals(df, target_date)
 
     _all_scope_symbols = list(merged_closes['symbol'].unique()) if 'symbol' in merged_closes.columns else list(set(_gl_symbols))
     _indicators = _compute_vwap_rsi(df, _all_scope_symbols, target_date, is_today=is_today, quotes=quotes)
+
+    # Preload PCR snapshot cache for derivatives flow confluence
+    cached_pcr = FOPCRScreener.load_snapshot_cache(max_age_minutes=1440, allow_stale_fallback=True)
+    _pcr_lookup = {}
+    if cached_pcr:
+        for item in cached_pcr.get("all", []):
+            sym = getattr(item, "symbol", None) or (item.get("symbol", "") if isinstance(item, dict) else "")
+            clean = getattr(item, "clean_symbol", None) or (item.get("clean_symbol", "") if isinstance(item, dict) else "")
+            if not clean and sym:
+                clean = sym.replace("NSE:", "").replace("BSE:", "").replace("-EQ", "").replace("-INDEX", "")
+            if sym:
+                _pcr_lookup[sym] = item
+            if clean:
+                _pcr_lookup[clean] = item
+                _pcr_lookup[f"NSE:{clean}-EQ"] = item
 
     gainers_data = []
     for idx, row in top_gainers.iterrows():
@@ -1169,10 +1549,17 @@ else:
         entry_info = entry_times_dict.get(row['symbol'], {})
         entry_time = entry_info.get("gainer_entry", "—")
         
+        # Pull PCR & sentiment if available
+        p_info = _pcr_lookup.get(row['symbol']) or _pcr_lookup.get(sym_clean)
+        pcr_val = getattr(p_info, 'pcr_oi', None) if p_info else (p_info.get('pcr_oi') if isinstance(p_info, dict) else None)
+        sent_state = getattr(p_info, 'sentiment_state', None) if p_info else (p_info.get('sentiment_state') if isinstance(p_info, dict) else None)
+
         flow_quad, _ = IntradayFlowReversalEngine.classify_derivative_quadrant(
             price_change=row.get('pChange', 0.0),
-            move_from_low=row.get('move_from_low', 0.0) * 100,
-            drop_from_high=row.get('drop_from_high', 0.0) * 100
+            move_from_low=((row['close_last'] - row['low_today']) / row['low_today'] * 100) if row.get('low_today', 0) > 0 else 0.0,
+            drop_from_high=((row['high_today'] - row['close_last']) / row['high_today'] * 100) if row.get('high_today', 0) > 0 else 0.0,
+            pcr_oi=pcr_val,
+            sentiment_state=sent_state,
         )
         
         gainers_data.append({
@@ -1180,11 +1567,11 @@ else:
             "Sector": row['sector'],
             "LTP": row['close_last'],
             "Change": row['pChange'],
+            "Flow": flow_quad,
             "Vol Surge": vs_label,
             "Daily RSI": rsi_label,
             "VWAP": vwap_val_str,
-            "Entry Time": entry_time,
-            "Flow": flow_quad,
+            "Top 10 Entry": entry_time,
         })
 
     losers_data = []
@@ -1224,10 +1611,17 @@ else:
         entry_info = entry_times_dict.get(row['symbol'], {})
         entry_time = entry_info.get("loser_entry", "—")
         
+        # Pull PCR & sentiment if available
+        p_info = _pcr_lookup.get(row['symbol']) or _pcr_lookup.get(sym_clean)
+        pcr_val = getattr(p_info, 'pcr_oi', None) if p_info else (p_info.get('pcr_oi') if isinstance(p_info, dict) else None)
+        sent_state = getattr(p_info, 'sentiment_state', None) if p_info else (p_info.get('sentiment_state') if isinstance(p_info, dict) else None)
+
         flow_quad, _ = IntradayFlowReversalEngine.classify_derivative_quadrant(
             price_change=row.get('pChange', 0.0),
-            move_from_low=row.get('move_from_low', 0.0) * 100,
-            drop_from_high=row.get('drop_from_high', 0.0) * 100
+            move_from_low=((row['close_last'] - row['low_today']) / row['low_today'] * 100) if row.get('low_today', 0) > 0 else 0.0,
+            drop_from_high=((row['high_today'] - row['close_last']) / row['high_today'] * 100) if row.get('high_today', 0) > 0 else 0.0,
+            pcr_oi=pcr_val,
+            sentiment_state=sent_state,
         )
         
         losers_data.append({
@@ -1235,11 +1629,11 @@ else:
             "Sector": row['sector'],
             "LTP": row['close_last'],
             "Change": row['pChange'],
+            "Flow": flow_quad,
             "Vol Surge": vs_label,
             "Daily RSI": rsi_label,
             "VWAP": vwap_val_str,
-            "Entry Time": entry_time,
-            "Flow": flow_quad,
+            "Top 10 Entry": entry_time,
         })
 
     near_bo_data = []
@@ -1297,6 +1691,9 @@ else:
     if 'clicked_stock_sector' not in st.session_state:
         st.session_state['clicked_stock_sector'] = None
 
+    if 'selected_stock_to_chart' not in st.session_state:
+        st.session_state['selected_stock_to_chart'] = None
+
     # Track last processed selections to prevent selection feedback loops
     if 'last_plotly_selection' not in st.session_state:
         st.session_state['last_plotly_selection'] = None
@@ -1304,6 +1701,14 @@ else:
         st.session_state['last_gainer_selection'] = None
     if 'last_loser_selection' not in st.session_state:
         st.session_state['last_loser_selection'] = None
+    if 'last_reb_selection' not in st.session_state:
+        st.session_state['last_reb_selection'] = None
+    if 'last_dump_selection' not in st.session_state:
+        st.session_state['last_dump_selection'] = None
+    if 'last_mat_selection' not in st.session_state:
+        st.session_state['last_mat_selection'] = None
+    if 'last_drill_selection' not in st.session_state:
+        st.session_state['last_drill_selection'] = None
 
     selected_sector_plotly = None
     if "plotly_sector_chart" in st.session_state and st.session_state["plotly_sector_chart"]:
@@ -1314,28 +1719,73 @@ else:
                 point = selection["points"][0]
                 selected_sector_plotly = point.get("x")
 
-    # Check for gainer/loser table clicks
-    selected_sector_gainer = None
-    selected_symbol_to_chart = None
+    # Check for table clicks across leaderboards & matrices
+    selected_sector_from_table = None
+
+    # 1. Gainers table click
     if "gainer_leaderboard" in st.session_state and st.session_state["gainer_leaderboard"]:
-        g_selection = st.session_state["gainer_leaderboard"].get("selection", {})
-        g_rows = g_selection.get("rows", [])
-        if g_rows:
+        g_rows = st.session_state["gainer_leaderboard"].get("selection", {}).get("rows", [])
+        if g_rows and g_rows != st.session_state.get('last_gainer_selection'):
+            st.session_state['last_gainer_selection'] = g_rows
             g_idx = g_rows[0]
             if 0 <= g_idx < len(gainers_data):
-                selected_sector_gainer = gainers_data[g_idx]["Sector"]
-                selected_symbol_to_chart = gainers_data[g_idx]["Symbol"]
+                st.session_state['selected_stock_to_chart'] = gainers_data[g_idx]["Symbol"]
+                selected_sector_from_table = gainers_data[g_idx]["Sector"]
 
-    selected_sector_loser = None
+    # 2. Losers table click
     if "loser_leaderboard" in st.session_state and st.session_state["loser_leaderboard"]:
-        l_selection = st.session_state["loser_leaderboard"].get("selection", {})
-        l_rows = l_selection.get("rows", [])
-        if l_rows:
+        l_rows = st.session_state["loser_leaderboard"].get("selection", {}).get("rows", [])
+        if l_rows and l_rows != st.session_state.get('last_loser_selection'):
+            st.session_state['last_loser_selection'] = l_rows
             l_idx = l_rows[0]
             if 0 <= l_idx < len(losers_data):
-                selected_sector_loser = losers_data[l_idx]["Sector"]
-                if not selected_symbol_to_chart:
-                    selected_symbol_to_chart = losers_data[l_idx]["Symbol"]
+                st.session_state['selected_stock_to_chart'] = losers_data[l_idx]["Symbol"]
+                selected_sector_from_table = losers_data[l_idx]["Sector"]
+
+    # 3. Rebounds table click
+    if "rebound_leaderboard" in st.session_state and st.session_state["rebound_leaderboard"]:
+        reb_rows = st.session_state["rebound_leaderboard"].get("selection", {}).get("rows", [])
+        if reb_rows and reb_rows != st.session_state.get('last_reb_selection'):
+            st.session_state['last_reb_selection'] = reb_rows
+            r_idx = reb_rows[0]
+            reb_cache = st.session_state.get("rebound_rows_cache", [])
+            if 0 <= r_idx < len(reb_cache):
+                st.session_state['selected_stock_to_chart'] = reb_cache[r_idx]["Symbol"]
+                selected_sector_from_table = reb_cache[r_idx]["Sector"]
+
+    # 4. Dumps table click
+    if "dump_leaderboard" in st.session_state and st.session_state["dump_leaderboard"]:
+        dump_rows = st.session_state["dump_leaderboard"].get("selection", {}).get("rows", [])
+        if dump_rows and dump_rows != st.session_state.get('last_dump_selection'):
+            st.session_state['last_dump_selection'] = dump_rows
+            d_idx = dump_rows[0]
+            d_cache = st.session_state.get("dump_rows_cache", [])
+            if 0 <= d_idx < len(d_cache):
+                st.session_state['selected_stock_to_chart'] = d_cache[d_idx]["Symbol"]
+                selected_sector_from_table = d_cache[d_idx]["Sector"]
+
+    # 5. Sector Matrix table click
+    if "sec_matrix_stock_table" in st.session_state and st.session_state["sec_matrix_stock_table"]:
+        mat_rows = st.session_state["sec_matrix_stock_table"].get("selection", {}).get("rows", [])
+        if mat_rows and mat_rows != st.session_state.get('last_mat_selection'):
+            st.session_state['last_mat_selection'] = mat_rows
+            m_idx = mat_rows[0]
+            m_cache = st.session_state.get("sec_matrix_cache", [])
+            if 0 <= m_idx < len(m_cache):
+                st.session_state['selected_stock_to_chart'] = m_cache[m_idx]["Symbol"]
+
+    # 6. Sector Drilldown table click
+    if "sec_drilldown_stock_table" in st.session_state and st.session_state["sec_drilldown_stock_table"]:
+        drill_rows = st.session_state["sec_drilldown_stock_table"].get("selection", {}).get("rows", [])
+        if drill_rows and drill_rows != st.session_state.get('last_drill_selection'):
+            st.session_state['last_drill_selection'] = drill_rows
+            dr_idx = drill_rows[0]
+            dr_cache = st.session_state.get("sec_drilldown_cache", [])
+            if 0 <= dr_idx < len(dr_cache):
+                st.session_state['selected_stock_to_chart'] = dr_cache[dr_idx]["Symbol"]
+
+    # Active selected symbol to chart
+    selected_symbol_to_chart = st.session_state.get('selected_stock_to_chart')
 
     # Check for new selection events and update selected_sector_drill
     target_sector = None
@@ -1344,17 +1794,9 @@ else:
         if selected_sector_plotly in options:
             target_sector = selected_sector_plotly
 
-    elif selected_sector_gainer != st.session_state['last_gainer_selection']:
-        st.session_state['last_gainer_selection'] = selected_sector_gainer
-        if selected_sector_gainer in options:
-            target_sector = selected_sector_gainer
-            st.session_state['clicked_stock_sector'] = selected_sector_gainer
-
-    elif selected_sector_loser != st.session_state['last_loser_selection']:
-        st.session_state['last_loser_selection'] = selected_sector_loser
-        if selected_sector_loser in options:
-            target_sector = selected_sector_loser
-            st.session_state['clicked_stock_sector'] = selected_sector_loser
+    elif selected_sector_from_table and selected_sector_from_table in options:
+        target_sector = selected_sector_from_table
+        st.session_state['clicked_stock_sector'] = selected_sector_from_table
 
     if target_sector:
         st.session_state['selected_sector_drill'] = target_sector
@@ -1401,7 +1843,7 @@ else:
         import inspect
         sig = inspect.signature(st.plotly_chart)
         if "on_select" in sig.parameters:
-            st.plotly_chart(fig, use_container_width=True, key="plotly_sector_chart")
+            st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points", key="plotly_sector_chart")
         else:
             st.plotly_chart(fig, use_container_width=True)
 
@@ -1422,7 +1864,8 @@ else:
         "🔎 Sector Drill-Down",
         "📦 Volatility Squeeze",
         "📅 Off-Market Cycle Analyst",
-        "🧪 Shadow Intelligence (Beta)"
+        "🧪 Shadow Intelligence (Beta)",
+        "🔬 SMC Backtest Lab"
     ]
     active_tab = st.segmented_control(
         "Navigation",
@@ -1456,11 +1899,41 @@ else:
             key="gl_view_mode_toggle"
         )
 
+        # High Volume Activity Pulse Banner (Institutional RVOL >= 1.5x)
+        if not merged_closes.empty and 'vol_surge' in merged_closes.columns:
+            high_vol_stocks = merged_closes[merged_closes['vol_surge'] >= 1.5].sort_values(by='vol_surge', ascending=False)
+            if not high_vol_stocks.empty:
+                st.markdown(f"""
+                <div style="background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px;">
+                    <div style="font-size: 0.82rem; font-weight: 700; color: #f59e0b; margin-bottom: 6px;">
+                        🔥 High Volume Institutional Activity Pulse (Surge ≥ 1.5x) — {len(high_vol_stocks)} Active F&O Stocks
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                hv_cols = st.columns(min(len(high_vol_stocks), 4))
+                for idx, (_, hv_row) in enumerate(high_vol_stocks.head(4).iterrows()):
+                    with hv_cols[idx]:
+                        sym_c = hv_row['symbol'].replace("NSE:", "").replace("-EQ", "")
+                        chg_c = hv_row.get('pChange', 0.0)
+                        chg_col = "#22c55e" if chg_c >= 0 else "#ef4444"
+                        st.markdown(f"""
+                        <div style="background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 6px; padding: 6px 10px; font-size: 0.78rem; margin-bottom: 8px;">
+                            <div style="display:flex; justify-content:space-between; font-weight:700;">
+                                <span style="color:#f8fafc;">{sym_c}</span>
+                                <span style="color:#f59e0b; font-weight:800;">🔥 {hv_row['vol_surge']:.1f}x</span>
+                            </div>
+                            <div style="display:flex; justify-content:space-between; color:#94a3b8; font-size:0.73rem; margin-top:2px;">
+                                <span>₹{hv_row['close_last']:,.2f}</span>
+                                <span style="color:{chg_col}; font-weight:600;">{chg_c:+.2f}%</span>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
         col_gainers, col_losers = st.columns(2)
 
         if gl_mode == "📊 Net Day Change (Standard Top 10)":
             with col_gainers:
-                st.markdown("##### 🟢 Top 10 Gainers")
+                st.markdown(f"##### 🟢 Top 10 Gainers ({selected_lookback})")
                 if gainers_data:
                     gainer_df = pd.DataFrame(gainers_data)
                     st.dataframe(
@@ -1470,6 +1943,9 @@ else:
                         }).map(
                             lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else "",
                             subset=["Change"]
+                        ).map(
+                            lambda v: "color: #f59e0b; font-weight:800; background-color: rgba(245, 158, 11, 0.12)" if ("🟢" in str(v) or "🔥" in str(v)) else "",
+                            subset=["Vol Surge"]
                         ),
                         use_container_width=True,
                         hide_index=True,
@@ -1479,7 +1955,7 @@ else:
                     )
 
             with col_losers:
-                st.markdown("##### 🔴 Top 10 Losers")
+                st.markdown(f"##### 🔴 Top 10 Losers ({selected_lookback})")
                 if losers_data:
                     loser_df = pd.DataFrame(losers_data)
                     st.dataframe(
@@ -1489,6 +1965,9 @@ else:
                         }).map(
                             lambda v: "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else "",
                             subset=["Change"]
+                        ).map(
+                            lambda v: "color: #f59e0b; font-weight:800; background-color: rgba(245, 158, 11, 0.12)" if ("🟢" in str(v) or "🔥" in str(v)) else "",
+                            subset=["Vol Surge"]
                         ),
                         use_container_width=True,
                         hide_index=True,
@@ -1521,6 +2000,7 @@ else:
                             "VWAP": vw_l,
                         })
                     if rebound_rows:
+                        st.session_state["rebound_rows_cache"] = rebound_rows
                         reb_df = pd.DataFrame(rebound_rows)
                         st.dataframe(
                             reb_df.style.format({
@@ -1532,6 +2012,8 @@ else:
                             ),
                             use_container_width=True,
                             hide_index=True,
+                            selection_mode="single-row",
+                            on_select="rerun",
                             key="rebound_leaderboard"
                         )
                 else:
@@ -1560,6 +2042,7 @@ else:
                             "VWAP": vw_l,
                         })
                     if dump_rows:
+                        st.session_state["dump_rows_cache"] = dump_rows
                         dump_df = pd.DataFrame(dump_rows)
                         st.dataframe(
                             dump_df.style.format({
@@ -1571,64 +2054,15 @@ else:
                             ),
                             use_container_width=True,
                             hide_index=True,
+                            selection_mode="single-row",
+                            on_select="rerun",
                             key="dump_leaderboard"
                         )
                 else:
                     st.info("No intraday low/high data available.")
 
         if selected_symbol_to_chart:
-            st.markdown(f"#### 📈 Daily Chart: {selected_symbol_to_chart}")
-            import plotly.graph_objects as go
-            from trade_system.domains.market_data.infrastructure.database.connection import get_engine
-            from sqlalchemy import text
-            sym_full = f"NSE:{selected_symbol_to_chart}-EQ" if not selected_symbol_to_chart.startswith("NSE:") else selected_symbol_to_chart
-            with get_engine().connect() as conn:
-                daily_df = pd.read_sql(
-                    text("SELECT timestamp, open, high, low, close FROM ohlcv_daily WHERE symbol = :sym ORDER BY timestamp DESC LIMIT 100"),
-                    conn, params={"sym": sym_full}
-                )
-            if not daily_df.empty:
-                daily_df = daily_df.sort_values('timestamp').reset_index(drop=True)
-                fig = go.Figure(data=[go.Candlestick(
-                    x=daily_df['timestamp'],
-                    open=daily_df['open'], high=daily_df['high'],
-                    low=daily_df['low'], close=daily_df['close']
-                )])
-                
-                try:
-                    from trade_system.domains.strategy.application.indicators.order_blocks import identify_order_blocks
-                    obs = identify_order_blocks(daily_df, atr_multiplier=1.5)
-                    for ob in obs.get('bullish', []):
-                        fig.add_shape(type="rect",
-                            x0=ob['start_date'], y0=ob['bottom'], x1=daily_df['timestamp'].iloc[-1], y1=ob['top'],
-                            line=dict(color="rgba(34,197,94,0)"), fillcolor="rgba(34,197,94,0.2)", layer="below"
-                        )
-                        date_str = str(ob['start_date']).split(' ')[0]
-                        fig.add_annotation(
-                            x=ob['start_date'], y=ob['top'],
-                            text=f"Bullish OB ({date_str})",
-                            showarrow=False, yshift=10,
-                            font=dict(color="#22c55e", size=10)
-                        )
-                    for ob in obs.get('bearish', []):
-                        fig.add_shape(type="rect",
-                            x0=ob['start_date'], y0=ob['bottom'], x1=daily_df['timestamp'].iloc[-1], y1=ob['top'],
-                            line=dict(color="rgba(239,68,68,0)"), fillcolor="rgba(239,68,68,0.2)", layer="below"
-                        )
-                        date_str = str(ob['start_date']).split(' ')[0]
-                        fig.add_annotation(
-                            x=ob['start_date'], y=ob['bottom'],
-                            text=f"Bearish OB ({date_str})",
-                            showarrow=False, yshift=-10,
-                            font=dict(color="#ef4444", size=10)
-                        )
-                except Exception as e:
-                    pass
-
-                fig.update_layout(height=400, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("No daily data found.")
+            render_stock_inspection_chart(selected_symbol_to_chart, target_date=target_date, key_prefix="tab1")
 
         st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
         col_near_bo, col_near_bd = st.columns(2)
@@ -1672,6 +2106,19 @@ else:
                 )
             else:
                 st.info("No stocks currently within 0.75% of intraday breakdown level.")
+
+        st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### 🕵️ SMC Intraday Radar (15m Liquidity Sweeps & OB Taps)")
+        if smc_signals_data:
+            smc_df = pd.DataFrame(smc_signals_data)
+            st.dataframe(
+                smc_df,
+                use_container_width=True,
+                hide_index=True,
+                key="smc_radar_table"
+            )
+        else:
+            st.info("No active SMC signals detected on the 15m timeframe for the selected date.")
 
     # ---- TAB 2: Sector Matrix & RRG ----
     elif active_tab == "🏆 Sector Matrix & RRG":
@@ -2143,6 +2590,24 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                     sector_stocks_df['Daily RSI'] = rsi_labels
                     sector_stocks_df['vs VWAP'] = vwap_labels
 
+                    # Map Flow Quadrant for constituents
+                    flow_labels = []
+                    for _, r_stock in sector_stocks_df.iterrows():
+                        sym_s = r_stock['symbol']
+                        clean_s = sym_s.replace("NSE:", "").replace("-EQ", "")
+                        p_info = _pcr_lookup.get(sym_s) or _pcr_lookup.get(clean_s)
+                        pcr_val = getattr(p_info, 'pcr_oi', None) if p_info else (p_info.get('pcr_oi') if isinstance(p_info, dict) else None)
+                        sent_state = getattr(p_info, 'sentiment_state', None) if p_info else (p_info.get('sentiment_state') if isinstance(p_info, dict) else None)
+                        fq, _ = IntradayFlowReversalEngine.classify_derivative_quadrant(
+                            price_change=r_stock.get('pChange', 0.0),
+                            move_from_low=((r_stock['close_last'] - r_stock['low_today']) / r_stock['low_today'] * 100) if r_stock.get('low_today', 0) > 0 else 0.0,
+                            drop_from_high=((r_stock['high_today'] - r_stock['close_last']) / r_stock['high_today'] * 100) if r_stock.get('high_today', 0) > 0 else 0.0,
+                            pcr_oi=pcr_val,
+                            sentiment_state=sent_state,
+                        )
+                        flow_labels.append(fq)
+                    sector_stocks_df['Flow'] = flow_labels
+
                     # Instant constituent search filter
                     q_sym = st.text_input(
                         "Filter stocks",
@@ -2155,8 +2620,9 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                     if q_sym:
                         filtered_sec_df = filtered_sec_df[filtered_sec_df['Symbol'].str.contains(q_sym.upper(), case=False)]
 
-                    display_df = filtered_sec_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP']].copy()
-                    display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP']
+                    display_df = filtered_sec_df[['Symbol', 'close_last', 'pChange', 'Vol Surge', 'Daily RSI', 'vs VWAP', 'Flow']].copy()
+                    display_df.columns = ['Symbol', 'LTP (₹)', 'Change %', 'Vol Surge', 'Daily RSI', 'vs VWAP', 'Flow']
+                    st.session_state["sec_matrix_cache"] = display_df.to_dict('records')
                     
                     st.dataframe(
                         display_df.style.format({
@@ -2168,12 +2634,18 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                         ),
                         use_container_width=True,
                         hide_index=True,
+                        selection_mode="single-row",
+                        on_select="rerun",
+                        key="sec_matrix_stock_table",
                         height=450
                     )
                 else:
                     st.info(f"No stock data available for {active_sector}.")
             else:
                 st.info("Select a sector from the board on the left.")
+
+        if st.session_state.get('selected_stock_to_chart'):
+            render_stock_inspection_chart(st.session_state['selected_stock_to_chart'], target_date=target_date, key_prefix="tab2")
 
     # ---- TAB: Intraday Smart Flow & Reversal Radar ----
     elif active_tab == "⚡ Intraday Flow & Reversals (Vol + OI)":
@@ -2224,7 +2696,7 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
             key="radar_view_mode_toggle"
         )
 
-        cached_pcr = FOPCRScreener.load_snapshot_cache(max_age_minutes=180)
+        cached_pcr = FOPCRScreener.load_snapshot_cache(max_age_minutes=1440, allow_stale_fallback=True)
 
         # ── SUB-MODE 1: Current Instance Thrust & Flow ────────────────────────
         if radar_view_mode == "⏱️ Rolling Instance Thrust & Flow (Vol + OI)":
@@ -2239,16 +2711,16 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                 st.info("No intraday flow data currently available. Ensure market quotes or 15m candles are loaded.")
             else:
                 # Quick KPIs
-                c_bull = len([s for s in flow_setups if s.direction == "BULLISH" and s.move_from_low_pct >= 1.2])
-                c_bear = len([s for s in flow_setups if s.direction == "BEARISH" and s.drop_from_high_pct >= 1.2])
+                c_bull = len([s for s in flow_setups if s.direction == "BULLISH"])
+                c_bear = len([s for s in flow_setups if s.direction == "BEARISH"])
                 c_vol = len([s for s in flow_setups if s.vol_surge >= 1.5])
                 c_sqz = len([s for s in flow_setups if "SHORT COVERING" in s.flow_quadrant])
 
                 pk1, pk2, pk3, pk4 = st.columns(4)
                 with pk1:
-                    st.metric("🟢 Bullish Rebounds (≥1.2%)", c_bull, help="Stocks rebounding ≥1.2% in active lookback window")
+                    st.metric("🟢 Bullish Flow Setups", c_bull, help="Stocks exhibiting long buildup or short covering")
                 with pk2:
-                    st.metric("🔴 Bearish Dumps (≥1.2%)", c_bear, help="Stocks falling ≥1.2% in active lookback window")
+                    st.metric("🔴 Bearish Flow Setups", c_bear, help="Stocks exhibiting short buildup or long unwinding")
                 with pk3:
                     st.metric("🔥 Volume Spikes (≥1.5x)", c_vol, help="Stocks with relative volume ≥1.5x vs historical average")
                 with pk4:
@@ -2265,11 +2737,11 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                         key="flow_flt_dir"
                     )
                 with flt_c2:
-                    flt_min_vol = st.slider("Min Vol Surge", 0.0, 3.0, 0.8, 0.2, key="flow_flt_vol", format="%.1fx")
+                    flt_min_vol = st.slider("Min Vol Surge", 0.0, 3.0, 0.0, 0.2, key="flow_flt_vol", format="%.1fx")
                 with flt_c3:
-                    flt_min_thrust = st.slider("Min Thrust %", 0.5, 4.0, 1.0, 0.25, key="flow_flt_thrust", format="%.2f%%")
+                    flt_min_thrust = st.slider("Min Thrust %", 0.0, 4.0, 0.5, 0.25, key="flow_flt_thrust", format="%.2f%%")
                 with flt_c4:
-                    flt_min_score = st.slider("Min Conviction", 0, 90, 40, 5, key="flow_flt_score")
+                    flt_min_score = st.slider("Min Conviction", 0, 90, 0, 5, key="flow_flt_score")
                 with flt_c5:
                     flt_sector = st.selectbox("Sector", ["All Sectors"] + options, key="flow_flt_sector")
 
@@ -3116,6 +3588,7 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                         marker_color=vol_colors, name="Volume", showlegend=False
                     ), row=2, col=1)
 
+                    fig_prox.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
                     fig_prox.update_layout(
                         template="plotly_dark",
                         xaxis_rangeslider_visible=False,
@@ -3277,14 +3750,18 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
             # Fetch fresh detailed option chain for selected stock
             with st.spinner(f"Loading strike-by-strike option chain for {target_stock.clean_symbol}..."):
                 try:
-                    broker = get_broker()
-                    res_chain = broker.fyers.optionchain(data={"symbol": target_stock.symbol, "strikecount": 15})
-                    if isinstance(res_chain, dict) and res_chain.get("s") == "ok":
-                        oc_list = res_chain.get("data", {}).get("optionsChain", [])
-                        df_oc = pd.DataFrame(oc_list)
+                    broker = get_cached_broker()
+                    if broker and broker.fyers:
+                        res_chain = broker.fyers.optionchain(data={"symbol": target_stock.symbol, "strikecount": 15})
+                        if isinstance(res_chain, dict) and res_chain.get("s") == "ok":
+                            oc_list = res_chain.get("data", {}).get("optionsChain", [])
+                            df_oc = pd.DataFrame(oc_list)
+                        else:
+                            df_oc = pd.DataFrame()
                     else:
                         df_oc = pd.DataFrame()
-                except Exception:
+                except Exception as ex:
+                    LOGGER.warning(f"Error fetching option chain for {target_stock.symbol}: {ex}")
                     df_oc = pd.DataFrame()
 
             if not df_oc.empty and "strike_price" in df_oc.columns:
@@ -3341,6 +3818,8 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                 st.plotly_chart(fig_oc, use_container_width=True)
 
                 st.info(f"💡 **Institutional Forensics:** {target_stock.analysis_narrative} | CE Resistance Wall: **₹{target_stock.highest_ce_oi_strike:.1f}** | PE Support Wall: **₹{target_stock.highest_pe_oi_strike:.1f}** | Expiry: **{target_stock.nearest_expiry}**")
+            else:
+                st.warning(f"Option chain strike distribution for **{target_stock.clean_symbol}** is currently unavailable from broker. Please re-scan or verify broker connectivity.")
 
     # ---- TAB 4: Daily Reversal Radar ----
     elif active_tab == "🔄 Daily Reversal Radar":
@@ -3588,6 +4067,7 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                     fig_rev.add_hline(y=70, line_dash="dot", line_color="rgba(239, 68, 68, 0.5)", row=2, col=1)
                     fig_rev.add_hline(y=30, line_dash="dot", line_color="rgba(34, 197, 94, 0.5)", row=2, col=1)
 
+                    fig_rev.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
                     fig_rev.update_layout(
                         height=460,
                         template="plotly_dark",
@@ -3835,14 +4315,21 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
                 })
             if stock_rows:
                 df_stocks = pd.DataFrame(stock_rows).sort_values(by="Change %", ascending=False)
+                st.session_state["sec_drilldown_cache"] = df_stocks.to_dict('records')
                 st.dataframe(
                     df_stocks.style.format({
                         "LTP (₹)": "{:.2f}", "Change %": "{:+.2f}%",
                         "Vol Surge": "{:.1f}x", "VWAP": "{:.2f}",
                         "ORB Hi": "{:.2f}", "ORB Lo": "{:.2f}"
                     }),
-                    use_container_width=True, hide_index=True
+                    use_container_width=True,
+                    hide_index=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    key="sec_drilldown_stock_table"
                 )
+                if st.session_state.get('selected_stock_to_chart'):
+                    render_stock_inspection_chart(st.session_state['selected_stock_to_chart'], target_date=target_date, key_prefix="tab9")
             else:
                 st.caption("No stock data matching filters.")
 
@@ -4704,10 +5191,319 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
         else:
             st.warning(f"Shadow intelligence directory not found for {today_str}. Make sure the runner script is active.")
 
+    # ---- TAB 13: SMC Backtest Lab ----
+    elif active_tab == "🔬 SMC Backtest Lab":
+        st.markdown("### 🔬 Institutional SMC Backtest Lab")
+        st.caption("Perform on-demand historical simulations for Liquidity Sweeps, Order Block Taps, and Structural CHoCH Realignments across custom timeframes and intraday market time slots.")
+
+        from trade_system.domains.analysis.application.backtesting.smc_backtest_service import (
+            SMCBacktestService, SMCBacktestParams, TOP_10_SYMBOLS, TOP_25_SYMBOLS
+        )
+        smc_service = SMCBacktestService()
+
+        if "smc_backtest_run_data" not in st.session_state:
+            st.session_state["smc_backtest_run_data"] = None
+
+        with st.container():
+            st.markdown("""
+            <div style="background: rgba(30, 41, 59, 0.45); border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 12px; padding: 18px; margin-bottom: 20px;">
+                <h4 style="margin-top:0; margin-bottom: 12px; color: #a78bfa;">⚙️ Simulation Configuration</h4>
+            """, unsafe_allow_html=True)
+
+            # Row 1: Timeframe & Universe
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                tf_choice = st.selectbox(
+                    "⏱️ Candle Timeframe",
+                    options=["15m", "5m", "3m", "1m", "Daily"],
+                    index=0,
+                    help="Historical data table: 1m, 3m, 5m, 15m, or Daily."
+                )
+            with c2:
+                univ_choice = st.selectbox(
+                    "🎯 Stock Universe",
+                    options=[
+                        "Top 10 Heavyweights (Liquid Prime)",
+                        "Top 25 Liquid F&O",
+                        "Entire F&O Universe (263 Stocks)",
+                        "Custom Selection"
+                    ],
+                    index=0
+                )
+
+            all_db_symbols = smc_service.get_available_symbols()
+            if univ_choice == "Top 10 Heavyweights (Liquid Prime)":
+                chosen_symbols = [s for s in TOP_10_SYMBOLS if s in all_db_symbols]
+            elif univ_choice == "Top 25 Liquid F&O":
+                chosen_symbols = [s for s in TOP_25_SYMBOLS if s in all_db_symbols]
+            elif univ_choice == "Entire F&O Universe (263 Stocks)":
+                chosen_symbols = all_db_symbols
+            else:
+                default_picks = [s for s in TOP_10_SYMBOLS if s in all_db_symbols][:5]
+                clean_sym_map = {s.replace("NSE:", "").replace("-EQ", ""): s for s in all_db_symbols}
+                sel_clean = st.multiselect(
+                    "Select Symbols",
+                    options=list(clean_sym_map.keys()),
+                    default=[s.replace("NSE:", "").replace("-EQ", "") for s in default_picks]
+                )
+                chosen_symbols = [clean_sym_map[c] for c in sel_clean if c in clean_sym_map]
+
+            st.markdown("---")
+
+            # Row 2: Intraday Time Slot & Date Horizon
+            c3, c4 = st.columns(2)
+            with c3:
+                slot_choice = st.selectbox(
+                    "🕒 Intraday Time Slot (Execution Window)",
+                    options=[
+                        "Full Market Hours (09:15 - 15:30)",
+                        "Morning Session (09:15 - 11:30)",
+                        "Midday Session (11:30 - 13:30)",
+                        "Afternoon Session (13:30 - 15:15)",
+                        "Custom Time Slot"
+                    ],
+                    index=0,
+                    disabled=(tf_choice == "Daily"),
+                    help="Filter candles by market hours to backtest specific intraday market sessions."
+                )
+                start_slot_time = None
+                end_slot_time = None
+                if tf_choice != "Daily":
+                    if slot_choice == "Morning Session (09:15 - 11:30)":
+                        start_slot_time = dt_time(9, 15)
+                        end_slot_time = dt_time(11, 30)
+                    elif slot_choice == "Midday Session (11:30 - 13:30)":
+                        start_slot_time = dt_time(11, 30)
+                        end_slot_time = dt_time(13, 30)
+                    elif slot_choice == "Afternoon Session (13:30 - 15:15)":
+                        start_slot_time = dt_time(13, 30)
+                        end_slot_time = dt_time(15, 15)
+                    elif slot_choice == "Custom Time Slot":
+                        ts_c1, ts_c2 = st.columns(2)
+                        with ts_c1:
+                            start_slot_time = st.time_input("Start Time", dt_time(9, 30))
+                        with ts_c2:
+                            end_slot_time = st.time_input("End Time", dt_time(14, 30))
+
+            with c4:
+                date_horizon = st.selectbox(
+                    "📅 Date Range Horizon",
+                    options=[
+                        "Full Historical Dataset",
+                        "Last 15 Trading Days",
+                        "Last 30 Trading Days",
+                        "Last 90 Trading Days",
+                        "Last 180 Trading Days",
+                        "Custom Date Range"
+                    ],
+                    index=2
+                )
+                start_date_filter = None
+                end_date_filter = None
+                today_curr = date.today()
+                if date_horizon == "Last 15 Trading Days":
+                    start_date_filter = today_curr - timedelta(days=22)
+                elif date_horizon == "Last 30 Trading Days":
+                    start_date_filter = today_curr - timedelta(days=45)
+                elif date_horizon == "Last 90 Trading Days":
+                    start_date_filter = today_curr - timedelta(days=125)
+                elif date_horizon == "Last 180 Trading Days":
+                    start_date_filter = today_curr - timedelta(days=250)
+                elif date_horizon == "Custom Date Range":
+                    dr_c1, dr_c2 = st.columns(2)
+                    with dr_c1:
+                        start_date_filter = st.date_input("Start Date", today_curr - timedelta(days=60))
+                    with dr_c2:
+                        end_date_filter = st.date_input("End Date", today_curr)
+
+            st.markdown("---")
+
+            # Row 3: SMC Setups to Include
+            st.markdown("<b>🎯 SMC Setups to Include:</b>", unsafe_allow_html=True)
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            with sc1:
+                use_bull_sweep = st.checkbox("🟢 Bullish Sweep", value=True, help="Sell-side liquidity sweep & reclaim")
+            with sc2:
+                use_bear_sweep = st.checkbox("🔴 Bearish Sweep", value=True, help="Buy-side liquidity sweep & reject")
+            with sc3:
+                use_bull_ob = st.checkbox("🟢 Bullish OB Tap", value=True, help="Demand Order Block tap & bounce")
+            with sc4:
+                use_bear_ob = st.checkbox("🔴 Bearish OB Tap", value=True, help="Supply Order Block tap & reject")
+            with sc5:
+                use_realign = st.checkbox("⚡ CHoCH Realign", value=True, help="Internal structure realignment with trend")
+
+            enabled_setups = set()
+            if use_bull_sweep: enabled_setups.add("bullish_sweep")
+            if use_bear_sweep: enabled_setups.add("bearish_sweep")
+            if use_bull_ob: enabled_setups.add("bullish_ob_tap")
+            if use_bear_ob: enabled_setups.add("bearish_ob_tap")
+            if use_realign: enabled_setups.add("realign")
+
+            st.markdown("---")
+
+            # Row 4: Exit Strategy & Filters
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                exit_mode_ui = st.radio(
+                    "🚪 Exit Mechanism",
+                    options=["Hold Fixed Bars", "Risk-to-Reward (RR Exit)"],
+                    horizontal=True
+                )
+                exit_mode_val = "bars" if exit_mode_ui == "Hold Fixed Bars" else "rr"
+            with e2:
+                if exit_mode_val == "bars":
+                    hold_bars_val = st.slider("Holding Horizon (Bars)", min_value=2, max_value=30, value=8 if tf_choice != "Daily" else 5)
+                    rr_val = 2.0
+                else:
+                    rr_val = st.select_slider("Target Risk:Reward Ratio", options=[1.0, 1.5, 2.0, 2.5, 3.0, 4.0], value=2.0)
+                    hold_bars_val = 25
+            with e3:
+                trend_filt_ui = st.toggle("Filter with 50 EMA Trend", value=False, help="Only take Longs above 50 EMA, Shorts below 50 EMA")
+                vol_surge_ui = st.slider("Min Vol Surge Multiple", min_value=1.0, max_value=2.5, value=1.0, step=0.1)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Run Action Button
+        run_btn = st.button("🚀 Run SMC Backend Backtest", type="primary", use_container_width=True)
+
+        if run_btn:
+            if not enabled_setups:
+                st.warning("Please enable at least one SMC setup checkbox.")
+            elif not chosen_symbols:
+                st.warning("Please select at least one symbol.")
+            else:
+                progress_bar = st.progress(0.0)
+                status_text = st.empty()
+
+                def update_progress(pct: float, msg: str):
+                    progress_bar.progress(pct)
+                    status_text.markdown(f"⏳ *{msg}*")
+
+                params = SMCBacktestParams(
+                    symbols=chosen_symbols,
+                    timeframe=tf_choice,
+                    start_date=start_date_filter,
+                    end_date=end_date_filter,
+                    start_time=start_slot_time,
+                    end_time=end_slot_time,
+                    setups=enabled_setups,
+                    exit_mode=exit_mode_val,
+                    hold_bars=hold_bars_val,
+                    rr_ratio=rr_val,
+                    vol_surge_threshold=vol_surge_ui,
+                    trend_filter=trend_filt_ui
+                )
+
+                res = smc_service.run_backtest(params, progress_callback=update_progress)
+                st.session_state["smc_backtest_run_data"] = res
+                progress_bar.empty()
+                status_text.empty()
+                st.success("✅ Backtest simulation completed successfully!")
+
+        # Display Results
+        run_data = st.session_state.get("smc_backtest_run_data")
+        if run_data and run_data["summary"]["total_trades"] > 0:
+            summary = run_data["summary"]
+            trades_df = run_data["trades_df"]
+            by_setup = run_data["by_setup"]
+            equity_curve = run_data["equity_curve"]
+
+            st.markdown("### 📊 Backtest Performance Overview")
+
+            # 6 KPI Metric Cards
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("Total Trades", f"{summary['total_trades']:,}")
+            k2.metric("Win Rate", f"{summary['win_rate']:.1f}%")
+            k3.metric("Total PnL", f"{summary['total_pnl']:+.2f}%")
+            k4.metric("Profit Factor", f"{summary['profit_factor']:.2f}")
+            k5.metric("Avg Trade PnL", f"{summary['avg_trade_pnl']:+.2f}%")
+            k6.metric("Max Drawdown", f"{summary['max_drawdown']:.2f}%")
+
+            # Equity Curve Plotly Chart
+            if not equity_curve.empty:
+                st.markdown("#### 📈 Cumulative Equity Growth (% PnL)")
+                fig_eq = go.Figure()
+                fig_eq.add_trace(go.Scatter(
+                    x=equity_curve["timestamp"],
+                    y=equity_curve["cum_pnl"],
+                    mode="lines",
+                    name="Cumulative PnL (%)",
+                    line=dict(color="#38bdf8", width=2.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(56, 189, 248, 0.1)"
+                ))
+                fig_eq.add_hline(y=0, line_dash="dash", line_color="rgba(148, 163, 184, 0.5)")
+                fig_eq.update_layout(
+                    height=360,
+                    margin=dict(l=20, r=20, t=30, b=20),
+                    paper_bgcolor="rgba(15, 23, 42, 0.6)",
+                    plot_bgcolor="rgba(15, 23, 42, 0.6)",
+                    xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", title="Cumulative Return (%)")
+                )
+                st.plotly_chart(fig_eq, use_container_width=True)
+
+            # Performance by Setup Table
+            c_tbl1, c_tbl2 = st.columns([1.2, 1.8])
+            with c_tbl1:
+                st.markdown("#### 🎯 Setup Breakdown")
+                st.dataframe(by_setup, use_container_width=True, hide_index=True)
+
+            with c_tbl2:
+                st.markdown("#### ⚖️ Win / Loss Distribution")
+                win_count = summary["winning_trades"]
+                loss_count = summary["losing_trades"]
+                fig_pie = go.Figure(data=[go.Pie(
+                    labels=["Winning Trades", "Losing Trades"],
+                    values=[win_count, loss_count],
+                    hole=0.55,
+                    marker=dict(colors=["#22c55e", "#ef4444"])
+                )])
+                fig_pie.update_layout(
+                    height=220,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    showlegend=True
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+            # Detailed Trades Table with CSV Export
+            st.markdown("#### 📋 Detailed Executed Trades Log")
+            st.dataframe(
+                trades_df[[
+                    "timestamp", "symbol", "direction", "signal",
+                    "entry_price", "exit_price", "pnl_pct", "exit_reason", "bars_held"
+                ]].style.format({
+                    "entry_price": "₹{:.2f}",
+                    "exit_price": "₹{:.2f}",
+                    "pnl_pct": "{:+.2f}%",
+                }).map(
+                    lambda v: "color: #22c55e; font-weight:700" if isinstance(v, (int, float)) and v > 0 else (
+                        "color: #ef4444; font-weight:700" if isinstance(v, (int, float)) and v < 0 else ""
+                    ),
+                    subset=["pnl_pct"]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+
+            # CSV Download
+            csv_data = trades_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Export Full Trade Log (CSV)",
+                data=csv_data,
+                file_name=f"smc_backtest_{tf_choice}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        elif run_data is not None and run_data["summary"]["total_trades"] == 0:
+            st.info("No trades matched the specified setup and filter criteria for this date range / universe.")
+
     # ---- SMC SNIPER (ORDER BLOCKS & LIQUIDITY) ----
-    st.markdown("---")
-    st.markdown("### 🚀 SMC Sniper (Liquidity Sweep & Order Blocks)")
-    if 'merged_closes' in locals() and not merged_closes.empty and 'df' in locals() and not df.empty:
+    if active_tab != "🔬 SMC Backtest Lab":
+        st.markdown("---")
+        st.markdown("### 🚀 SMC Sniper (Liquidity Sweep & Order Blocks)")
+    if active_tab != "🔬 SMC Backtest Lab" and 'merged_closes' in locals() and not merged_closes.empty and 'df' in locals() and not df.empty:
         # Step 1: Filter for Institutional Volume (vol_surge >= 1.5)
         high_vol_df = merged_closes[merged_closes['vol_surge'] >= 1.5].copy()
         
@@ -4715,51 +5511,158 @@ Ranked leaderboard tracking sector advance/decline breadth, relative strength re
         if not high_vol_df.empty:
             try:
                 from trade_system.domains.strategy.application.indicators.smc_structure import SMCStructureEngine
+                from trade_system.domains.strategy.application.indicators.order_blocks import identify_order_blocks
+                from trade_system.domains.market_data.infrastructure.database.connection import get_engine
+                from sqlalchemy import text
+                
                 engine = SMCStructureEngine(swing_length=5, internal_length=2)
+                
+                # Fetch daily data for all high-volume candidates
+                symbols_tuple = tuple(high_vol_df['symbol'].tolist())
+                if len(symbols_tuple) == 1:
+                    symbols_tuple = f"('{symbols_tuple[0]}')"
+                else:
+                    symbols_tuple = str(symbols_tuple)
+                    
+                query = text(f"""
+                    SELECT * FROM ohlcv_daily 
+                    WHERE symbol IN {symbols_tuple}
+                    ORDER BY timestamp ASC
+                """)
+                with get_engine().connect() as conn:
+                    df_daily = pd.read_sql(query, conn)
+                df_daily['timestamp'] = pd.to_datetime(df_daily['timestamp'], format='mixed', errors='coerce')
                 
                 for _, row in high_vol_df.iterrows():
                     symbol = row['symbol']
-                    sym_df = df[df['symbol'] == symbol].sort_values('timestamp')
-                    if len(sym_df) < 15:
+                    sym_df = df_daily[df_daily['symbol'] == symbol].sort_values('timestamp')
+                    if len(sym_df) < 20:
                         continue
                     
                     state = engine.analyze(sym_df)
                     
-                    # Focus on Internal CHoCH (Realignment) OR Pullback into Protected Level
-                    if state.is_internal_realigned or state.is_pullback:
-                        dist_to_ob = None
-                        if state.strong_protected_level:
-                            dist_to_ob = abs((row['close_last'] - state.strong_protected_level) / row['close_last']) * 100
-                        
-                        # High-probability setups: Price is within 2% of the Strong Order Block
-                        if dist_to_ob is not None and dist_to_ob <= 2.0:
-                            direction = "🟢 BULLISH" if state.swing_trend.value == "BULLISH" else "🔴 BEARISH"
+                    last_candle = sym_df.iloc[-1]
+                    prev_candle = sym_df.iloc[-2] if len(sym_df) >= 2 else last_candle
+                    c_open = float(last_candle['open'])
+                    c_high = float(last_candle['high'])
+                    c_low = float(last_candle['low'])
+                    c_close = float(last_candle['close'])
+                    c_range = c_high - c_low
+                    if c_range <= 0:
+                        continue
+                    c_body = abs(c_close - c_open)
+                    c_upper_wick = c_high - max(c_close, c_open)
+                    c_lower_wick = min(c_close, c_open) - c_low
+                    
+                    sig_type = None
+                    direction = None
+                    stop_lvl = None
+                    target_lvl = None
+                    score = 0.0
+                    
+                    # 1. Structural Realignment (Internal CHoCH fired FRESH on current bar in direction of Swing Trend)
+                    if state.is_internal_realigned and state.realignment_event:
+                        if state.realignment_event.bar_idx == len(sym_df) - 1:
+                            if state.swing_trend.value == "BULLISH":
+                                sig_type = "🟢 Bullish Realignment (Internal CHoCH)"
+                                direction = "🟢 BUY / CALL"
+                                stop_lvl = state.strong_protected_level
+                                target_lvl = state.weak_target_level
+                                score = 60 + float(row['vol_surge']) * 15
+                            elif state.swing_trend.value == "BEARISH":
+                                sig_type = "🔴 Bearish Realignment (Internal CHoCH)"
+                                direction = "🔴 SELL / PUT"
+                                stop_lvl = state.strong_protected_level
+                                target_lvl = state.weak_target_level
+                                score = 60 + float(row['vol_surge']) * 15
                             
-                            smc_candidates.append({
-                                "Symbol": symbol.replace("NSE:", "").replace("-EQ", ""),
-                                "Sector": row['sector'],
-                                "LTP": row['close_last'],
-                                "Trend": direction,
-                                "SMC State": state.alignment_description,
-                                "Order Block": f"₹{state.strong_protected_level:.2f}",
-                                "Target (Liquidity)": f"₹{state.weak_target_level:.2f}" if state.weak_target_level else "—",
-                                "Vol Surge (x)": f"{row['vol_surge']:.1f}x",
-                                "_dist": dist_to_ob
-                            })
+                    # 2. Daily Order Block Tap with Fresh Touch & Reaction (recent <= 40 bars, touch from outside)
+                    if not sig_type:
+                        obs = identify_order_blocks(sym_df.iloc[-40:-1], atr_multiplier=1.2)
+                        bullish_obs = obs.get('bullish', [])
+                        bearish_obs = obs.get('bearish', [])
+                        
+                        for ob in bullish_obs:
+                            if prev_candle['low'] > ob['top'] and c_low <= ob['top'] and c_close >= ob['bottom']:
+                                if c_close >= c_open or c_lower_wick >= c_body * 0.8:
+                                    sig_type = "🟢 Daily Bullish OB Tap & Bounce"
+                                    direction = "🟢 BUY / CALL"
+                                    stop_lvl = ob['bottom'] * 0.995
+                                    target_lvl = state.weak_target_level or float(sym_df['high'].tail(20).max())
+                                    score = 45 + float(row['vol_surge']) * 15
+                                    break
+                        if not sig_type:
+                            for ob in bearish_obs:
+                                if prev_candle['high'] < ob['bottom'] and c_high >= ob['bottom'] and c_close <= ob['top']:
+                                    if c_close <= c_open or c_upper_wick >= c_body * 0.8:
+                                        sig_type = "🔴 Daily Bearish OB Tap & Reject"
+                                        direction = "🔴 SELL / PUT"
+                                        stop_lvl = ob['top'] * 1.005
+                                        target_lvl = state.weak_target_level or float(sym_df['low'].tail(20).min())
+                                        score = 45 + float(row['vol_surge']) * 15
+                                        break
+                                        
+                    # 3. Daily Liquidity Sweep with Genuine Rejection Wick (swept prior 20-day high/low)
+                    if not sig_type:
+                        recent_low = float(sym_df['low'].iloc[-21:-1].min())
+                        recent_high = float(sym_df['high'].iloc[-21:-1].max())
+                        if c_low < recent_low and c_close > recent_low and c_close > c_open and (c_lower_wick / c_range) >= 0.35 and c_lower_wick >= c_body:
+                            sig_type = "🟢 Daily Bullish Sweep & Reclaim"
+                            direction = "🟢 BUY / CALL"
+                            stop_lvl = c_low * 0.995
+                            target_lvl = recent_high
+                            score = (c_lower_wick / c_range) * 40 + float(row['vol_surge']) * 15
+                        elif c_high > recent_high and c_close < recent_high and c_close < c_open and (c_upper_wick / c_range) >= 0.35 and c_upper_wick >= c_body:
+                            sig_type = "🔴 Daily Bearish Sweep & Reject"
+                            direction = "🔴 SELL / PUT"
+                            stop_lvl = c_high * 1.005
+                            target_lvl = recent_low
+                            score = (c_upper_wick / c_range) * 40 + float(row['vol_surge']) * 15
+                            
+                    if sig_type and direction:
+                        from datetime import datetime
+                        if 'smc_entry_times' not in st.session_state:
+                            st.session_state['smc_entry_times'] = {}
+                        current_clock = datetime.now().strftime("%H:%M")
+                        
+                        clean_sym = symbol.replace("NSE:", "").replace("-EQ", "")
+                        entry_key = f"sniper_{clean_sym}_{sig_type}"
+                        if entry_key not in st.session_state['smc_entry_times']:
+                            st.session_state['smc_entry_times'][entry_key] = current_clock
+                        entered_ui_time = st.session_state['smc_entry_times'][entry_key]
+                        
+                        trigger_date_str = last_candle['timestamp'].strftime("%Y-%m-%d") if pd.notna(last_candle['timestamp']) else "Today"
+                        
+                        smc_candidates.append({
+                            "Symbol": clean_sym,
+                            "Sector": row['sector'],
+                            "LTP": f"₹{c_close:,.2f}",
+                            "Direction": direction,
+                            "SMC Setup": sig_type,
+                            "Invalidation (SL)": f"₹{stop_lvl:,.2f}" if stop_lvl else "—",
+                            "Target (Liquidity)": f"₹{target_lvl:,.2f}" if target_lvl else "—",
+                            "Vol Surge": f"{row['vol_surge']:.1f}x",
+                            "Trigger Date": trigger_date_str,
+                            "Entered UI At": entered_ui_time,
+                            "_score": score
+                        })
             except Exception as e:
                 st.error(f"SMC Engine Error: {e}")
         
         if smc_candidates:
-            smc_df = pd.DataFrame(smc_candidates).sort_values(by="_dist")
-            smc_df = smc_df.drop(columns=["_dist"])
-            
+            # Sort by institutional conviction score and cap at Top 7 cleanest setups
+            smc_candidates = sorted(smc_candidates, key=lambda x: x.get('_score', 0), reverse=True)[:7]
+            for c in smc_candidates:
+                c.pop('_score', None)
+            smc_df = pd.DataFrame(smc_candidates)
             st.dataframe(
                 smc_df,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
+                key="smc_sniper_table"
             )
         else:
-            st.info("No stocks currently show an SMC Realignment or Pullback into an Order Block with high institutional volume.")
+            st.info("No stocks currently show an SMC Realignment, Order Block Tap, or Liquidity Sweep with institutional volume surge (≥1.5x).")
             
     # Footer
     st.caption("🧭 Sector Scope | AI Trade System V2 | Data refreshes every 60s")

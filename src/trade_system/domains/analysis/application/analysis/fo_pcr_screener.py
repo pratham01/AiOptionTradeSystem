@@ -303,8 +303,12 @@ class FOPCRScreener:
             return False
 
     @staticmethod
-    def load_snapshot_cache(filepath: str = "data/fo_pcr_scan_cache.json", max_age_minutes: int = 120) -> Optional[Dict[str, Any]]:
-        """Load scan results from local JSON snapshot cache if fresh."""
+    def load_snapshot_cache(
+        filepath: str = "data/fo_pcr_scan_cache.json", 
+        max_age_minutes: int = 120,
+        allow_stale_fallback: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Load scan results from local JSON snapshot cache with stale fallback."""
         try:
             p = Path(filepath)
             if not p.exists():
@@ -312,16 +316,21 @@ class FOPCRScreener:
             with open(p, "r") as f:
                 raw = json.load(f)
             ts_str = raw.get("timestamp")
+            is_stale = False
             if ts_str:
                 try:
                     ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
                     if datetime.now() - ts > timedelta(minutes=max_age_minutes):
-                        LOGGER.info("PCR snapshot cache is stale (%s)", ts_str)
-                        return None
+                        is_stale = True
+                        if not allow_stale_fallback:
+                            LOGGER.info("PCR snapshot cache is stale (%s)", ts_str)
+                            return None
+                        LOGGER.info("Using cached PCR snapshot as fallback (%s)", ts_str)
                 except Exception:
                     pass
             return {
                 "timestamp": raw.get("timestamp", ""),
+                "is_stale": is_stale,
                 "overbought": [StockPCRInfo.from_dict(d) for d in raw.get("overbought", [])],
                 "oversold": [StockPCRInfo.from_dict(d) for d in raw.get("oversold", [])],
                 "neutral": [StockPCRInfo.from_dict(d) for d in raw.get("neutral", [])],

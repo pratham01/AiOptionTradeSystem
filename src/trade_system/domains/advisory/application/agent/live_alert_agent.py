@@ -100,7 +100,12 @@ class LiveAlertAgent:
             if rsi_val >= self.config.rsi_overbought:
                 self._debounce_send(symbol, "OB", f"⚠️ <b>{short_sym} Overbought</b>\nRSI: {rsi_val:.1f}\nPrice: ₹{price:.2f}\n<i>Potential reversal zone.</i>")
             elif rsi_val <= self.config.rsi_oversold:
-                self._debounce_send(symbol, "OS", f"🛡️ <b>{short_sym} Oversold</b>\nRSI: {rsi_val:.1f}\nPrice: ₹{price:.2f}\n<i>Potential bounce zone.</i>")
+                self._debounce_send(
+                    symbol,
+                    "OS",
+                    f"🛡️ <b>{short_sym} Oversold</b>\nRSI: {rsi_val:.1f}\nPrice: ₹{price:.2f}\n<i>Potential bounce zone.</i>",
+                    log_only=True,
+                )
 
         # 2. Unusual Volume Detection
         if len(df) >= 20:
