@@ -1,10 +1,10 @@
 # Trade System v2
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Architecture](https://img.shields.io/badge/architecture-Domain--Driven%20Design%20(DDD)-success.svg)](file:///Users/pratham/aitrade/trade_system_v2/ARCHITECTURE.md)
+[![Architecture](https://img.shields.io/badge/architecture-Domain--Driven%20Design%20(DDD)-success.svg)](ARCHITECTURE.md)
 [![Broker](https://img.shields.io/badge/broker-FYERS%20API%20v3-orange.svg)](https://myapi.fyers.in/)
-[![Dashboard](https://img.shields.io/badge/dashboard-Streamlit%20Mission%20Control-red.svg)](file:///Users/pratham/aitrade/trade_system_v2/src/trade_system/interfaces/dashboard/main.py)
-[![Docker](https://img.shields.io/badge/deployment-Docker%20Compose-2496ED.svg)](file:///Users/pratham/aitrade/trade_system_v2/docker-compose.yml)
+[![Dashboard](https://img.shields.io/badge/dashboard-Streamlit%20Mission%20Control-red.svg)](src/trade_system/interfaces/dashboard/main.py)
+[![Docker](https://img.shields.io/badge/deployment-Docker%20Compose-2496ED.svg)](docker-compose.yml)
 
 An enterprise-grade, institutional algorithmic trading platform and autonomous multi-agent swarm engineered for Indian derivatives (NSE F&O). Built on Domain-Driven Design (DDD), the system features real-time WebSocket ingestion, dynamic $\Delta\text{OI}$ option forensics, institutional market structure analysis, automated order routing with dynamic risk management, and a unified Streamlit Mission Control.
 
@@ -13,7 +13,7 @@ An enterprise-grade, institutional algorithmic trading platform and autonomous m
 ## 🏛️ Core Capabilities
 
 ### 1. ⚡ Autonomous Execution Cockpit & Router
-- **Automated Signal Routing**: Wires institutional strategies directly to live execution via [autonomous_router.py](file:///Users/pratham/aitrade/trade_system_v2/src/trade_system/domains/trading/application/execution/autonomous_router.py).
+- **Automated Signal Routing**: Wires institutional strategies directly to live execution via [autonomous_router.py](src/trade_system/domains/trading/application/execution/autonomous_router.py).
 - **Two-Stage Trailing Stops**: Automates risk lifecycle:
   - **Stage 1 (Breakeven)**: Shifts stop loss to entry price once Target 1 is achieved.
   - **Stage 2 (Trailing Lock)**: Continuously trails profit dynamically towards Target 2.
@@ -27,21 +27,22 @@ An enterprise-grade, institutional algorithmic trading platform and autonomous m
 - **Price-Volume Divergence Engine**: Automatic classification of Bull Traps (Bearish Divergence) and Institutional Absorption (Bullish Divergence).
 
 ### 3. 🧠 Institutional Strategy Suite
-- **Smart Money Concepts (SMC)**: Photon Market Structure, Order Blocks (OB), Fair Value Gaps (FVG), Change of Character (CHoCH), and Break of Structure (BOS) with confluence scoring via [smc_strategy.py](file:///Users/pratham/aitrade/trade_system_v2/src/trade_system/domains/strategy/application/strategies/smc_strategy.py).
-- **Midday Breakout Engine**: Detects afternoon volatility expansion following morning consolidation coils (10:30–12:45 IST) via [midday_breakout_engine.py](file:///Users/pratham/aitrade/trade_system_v2/src/trade_system/domains/analysis/application/analysis/midday_breakout_engine.py).
-- **Intraday Flow Reversal Engine (ISFRE)**: 4-quadrant derivative classification (Short Covering, Long Buildup, Long Unwinding, Short Buildup) via [intraday_flow_reversal.py](file:///Users/pratham/aitrade/trade_system_v2/src/trade_system/domains/analysis/application/analysis/intraday_flow_reversal.py).
+- **Smart Money Concepts (SMC)**: Photon Market Structure, Order Blocks (OB), Fair Value Gaps (FVG), Change of Character (CHoCH), and Break of Structure (BOS) with confluence scoring via [smc_strategy.py](src/trade_system/domains/strategy/application/strategies/smc_strategy.py).
+- **Midday Breakout Engine**: Detects afternoon volatility expansion following morning consolidation coils (10:30–12:45 IST) via [midday_breakout_engine.py](src/trade_system/domains/analysis/application/analysis/midday_breakout_engine.py).
+- **Intraday Flow Reversal Engine (ISFRE)**: 4-quadrant derivative classification (Short Covering, Long Buildup, Long Unwinding, Short Buildup) via [intraday_flow_reversal.py](src/trade_system/domains/analysis/application/analysis/intraday_flow_reversal.py).
 - **Supertrend MTF (ST Flip Engine)**: Multi-timeframe trend confluence tracking real-time 1m/3m/5m/15m Supertrend flips on NIFTY, BANKNIFTY, SENSEX, and top F&O stocks.
 - **0DTE Gamma Blast & Intraday Option Edge**: Quantitative Gamma Exposure (GEX) and Delta Exposure (DEX) scoring with strike selection.
 - **Wyckoff Method & VSA**: Volume Spread Analysis detecting accumulation, spring tests, markup, and distribution phases.
 - **Next Day Predictor & BTST Scanner**: Post-market scan of 180+ F&O stocks looking for >1.5% momentum surges, volume spikes, and trend confluence.
 
 ### 4. 🚀 Streamlit Mission Control (Multi-Page UI)
-The interactive web suite in [main.py](file:///Users/pratham/aitrade/trade_system_v2/src/trade_system/interfaces/dashboard/main.py) provides 20+ purpose-built analytics surfaces:
+The interactive web suite in [main.py](src/trade_system/interfaces/dashboard/main.py) provides 20+ purpose-built analytics surfaces:
 - **Live Operations**:
   - `Autonomous Execution`: Live position matrix, order flow, 1-click test simulation, manual close, and emergency kill switches.
   - `Chief Trading Agent`: Daily market regime, macro briefing, and multi-agent coordination.
   - `Agent Dashboard`: Multi-agent swarm thought streams, status monitors, and Telegram dispatch log.
   - `Smart OI`: Real-time StockMojo terminal, strike heatmaps, and divergence alerts.
+  - `Strike Supertrend`: Real-time Supertrend indicator on the near 5 strikes around spot price from the option chain, showing Call/Put direction, trailing stop levels, and multi-strike consensus.
   - `Sector Scope`: Live sector heatmaps, Sector Matrix & RRG (Relative Rotation Graph), and universe-wide VWAP.
   - `Broker Health`: FYERS token status, ping latency, and rate limits.
   - `Market Mood`: Advance/Decline ratios, aggregate PCR, and breadth analysis.
@@ -63,37 +64,131 @@ The interactive web suite in [main.py](file:///Users/pratham/aitrade/trade_syste
 
 ```
 trade_system_v2/
-├── config/                      # Universe definitions (fo_universe.json) & settings
-├── data/                        # Shared SQLite databases & historical candle storage
-├── docker-compose.yml           # Production multi-container orchestration
-├── Dockerfile                   # Python container specification
-├── scripts/                     # Operational runners, backfillers, and schedulers
+├── config/                          # Universe definitions & alert templates
+│   ├── fo_universe.json             # F&O stock universe (180+ symbols)
+│   ├── nse_universe.json            # NSE universe definitions
+│   ├── alerts_config.yaml           # Telegram alert templates & routing
+│   └── workflow.yaml                # Agent workflow configuration
+│
+├── data/                            # Runtime data (gitignored)
+│   ├── trade_system.db              # Primary SQLite database
+│   ├── fo_historical/               # F&O OHLCV CSV archive
+│   ├── market_data/                 # Index/stock market data cache
+│   ├── option_chain_data/           # Option chain snapshots
+│   ├── sector_performance/          # Sector rotation data
+│   ├── top_gainers/                 # Daily top gainers archive
+│   └── watchlists/                  # Symbol watchlists
+│
+├── logs/                            # Centralized log directory (gitignored)
+│   ├── trade_system.log             # Main app log (rotating, 10MB x 5)
+│   ├── live_bot.log                 # ST Flip live bot log
+│   ├── streamlit.log                # Dashboard log
+│   └── fyersApi.log                 # Fyers SDK logs
+│
+├── scripts/                         # Operational runners & utilities
+│   ├── start_app.sh                 # Unified launcher (dashboard + bots)
+│   ├── start_live_bot.sh            # Cron-ready live bot launcher
+│   ├── deploy.sh                    # Deployment script
+│   ├── run_live_trading.py          # Live bot entrypoint
+│   ├── run_live_st_scanner.py       # ST Telegram scanner entrypoint
+│   ├── run_post_market_swarm.py     # EOD batch analysis
+│   ├── backfill_*.py                # Historical data backfill scripts
+│   ├── backtest_*.py                # Backtesting scripts
+│   ├── authenticate_fyers*.py       # Fyers auth utilities
+│   └── ... (scanners, sync, migration utilities)
+│
 ├── src/trade_system/
-│   ├── core/                    # System orchestrator & agent lifecycle management
-│   ├── domains/
-│   │   ├── advisory/            # Agents (Chief, Live Alert, Risk, Sanity, SMC, Wyckoff)
-│   │   ├── analysis/            # Analytical engines (Smart OI, Midday Breakout, ISFRE, RRG)
-│   │   ├── market_data/         # WebSocket ingestion, bar store, and historical fetchers
-│   │   ├── strategy/            # Strategy implementations & registry (SMC, ST, Gamma, ORB)
-│   │   └── trading/             # Execution engine, position manager, autonomous router, broker
+│   ├── core/                        # System orchestrator & lifecycle
+│   │   └── orchestration/           # Agent startup sequencing
+│   │
+│   ├── domains/                     # ── Bounded Contexts (DDD) ──
+│   │   ├── advisory/               # Intelligence: Agents, alerts, dispatch
+│   │   │   ├── domain/agents/       # Agent protocols & interfaces
+│   │   │   ├── application/agent/   # Live Alert, Chief, Risk, Sanity agents
+│   │   │   └── infrastructure/      # Telegram & WhatsApp adapters
+│   │   │
+│   │   ├── analysis/               # Analytics: OI forensics, engines
+│   │   │   ├── application/analysis/    # Smart OI, ISFRE, Midday Breakout
+│   │   │   ├── application/backtesting/ # Backtesting framework
+│   │   │   ├── application/evolution/   # Parameter optimization
+│   │   │   └── application/research/    # Research lab services
+│   │   │
+│   │   ├── market_data/            # Data: Ingestion, storage, sync
+│   │   │   ├── application/         # BarStore, data sync services
+│   │   │   └── infrastructure/
+│   │   │       ├── database/        # SQLAlchemy (NullPool + WAL mode)
+│   │   │       └── data/            # Historical fetchers, FO universe
+│   │   │
+│   │   ├── strategy/               # Strategies: Indicators, signals
+│   │   │   ├── application/indicators/  # SuperTrend, RSI, VWAP, Bollinger
+│   │   │   ├── application/signals/     # Signal scoring & generation
+│   │   │   └── application/strategies/  # SMC, ST Flip, Gamma, ORB
+│   │   │
+│   │   └── trading/                # Execution: Orders, risk, broker
+│   │       ├── domain/models/       # Position, Order domain models
+│   │       ├── domain/ports/        # BrokerPort protocol (hexagonal)
+│   │       ├── application/execution/   # Autonomous router, trailing stops
+│   │       └── infrastructure/brokers/  # Fyers, Dhan adapters
+│   │
 │   ├── interfaces/
-│   │   ├── cli/                 # CLI entrypoint (trade-system command)
-│   │   ├── dashboard/           # Streamlit Mission Control multi-page dashboard
-│   │   └── live/                # Live WebSocket collectors and execution loops
-│   └── shared/                  # Common domain models, events, logging, and configuration
-└── tests/                       # Comprehensive unit and integration test suite
+│   │   ├── api/                     # REST/MCP API server
+│   │   ├── cli/                     # CLI entrypoint (trade-system cmd)
+│   │   ├── dashboard/               # Streamlit Mission Control (20+ pages)
+│   │   └── live/                    # WebSocket engine & pipelines
+│   │       ├── collector.py         # Main orchestrator
+│   │       ├── websocket_adapter.py # Fyers WS lifecycle
+│   │       ├── bar_aggregator.py    # Tick → OHLCV bars
+│   │       └── pipelines/           # Index & F&O processing pipelines
+│   │
+│   ├── shared/                      # Cross-cutting concerns
+│   │   ├── config/                  # Settings & feature flags
+│   │   ├── events/                  # Domain event definitions
+│   │   ├── notifications/           # Notification abstractions
+│   │   ├── observability/           # Logging, metrics, tracing
+│   │   └── utils/                   # Date, math, formatting helpers
+│   │
+│   └── modules/                     # Legacy bridge (being migrated)
+│
+├── tests/                           # Test suite
+│   ├── conftest.py                  # Pytest fixtures & shared setup
+│   ├── test_*.py                    # Unit tests (auto-discovered by pytest)
+│   ├── integration/                 # Integration tests (DB, Telegram, etc.)
+│   ├── backtests/                   # Backtest-specific test scripts
+│   ├── checks/                      # DB & API sanity check scripts
+│   ├── scratch/                     # Ad-hoc / exploratory test scripts
+│   ├── scripts/                     # Test-related utility scripts
+│   └── data/                        # Test fixtures & mock data
+│
+├── reports/                         # Generated reports (gitignored)
+│   ├── backtest/                    # Backtest HTML reports
+│   └── smc/, fvg/, gamma_blast/    # Strategy-specific reports
+│
+├── scratch/                         # Ad-hoc experiments (gitignored)
+│
+├── docs/                            # Documentation
+│   ├── MULTI_BROKER_ARCHITECTURE.md # Multi-broker design reference
+│   └── option_buyer_rulebook.md     # Trading rules documentation
+│
+├── Dockerfile                       # Multi-stage Python container
+├── docker-compose.yml               # Production multi-service stack
+├── .env.example                     # Environment variable template
+├── requirements.txt                 # Python dependencies
+├── pyproject.toml                   # Project metadata & tooling config
+└── ARCHITECTURE.md                  # Detailed architecture reference
 ```
 
 ---
 
-## 🚀 Quick Start (Local Setup)
+## 🚀 Quick Start
 
-### 1. Prerequisites
+### Option A: Local Setup (Development)
+
+#### 1. Prerequisites
 - Python 3.11+
 - FYERS API v3 account with App ID and Secret
-- Redis (optional for local standalone, required for event-bus multi-process setup)
+- Redis (optional — required only for multi-process event-bus mode)
 
-### 2. Installation
+#### 2. Installation
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/trade_system_v2.git
@@ -107,12 +202,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Environment Configuration
-Create your `.env` file from the template:
+#### 3. Environment Configuration
 ```bash
+# Create your .env from the template
 cp .env.example .env
+
+# Edit with your credentials
+nano .env   # or use your preferred editor
 ```
-Populate the essential variables:
+
+Key variables to populate:
 ```ini
 FYERS_CLIENT_ID="YOUR_APP_ID-100"
 FYERS_SECRET_KEY="YOUR_SECRET_KEY"
@@ -122,67 +221,121 @@ FYERS_TOTP_SECRET="YOUR_TOTP_BASE32_SECRET"
 
 TELEGRAM_BOT_TOKEN="YOUR_TELEGRAM_BOT_TOKEN"
 TELEGRAM_CHAT_ID="YOUR_TELEGRAM_CHAT_ID"
-REDIS_URL="redis://localhost:6379/0"
-
-# Telegram Alert Configuration (Intraday option buying is disabled by default)
-ENABLE_INTRADAY_OPTION_ALERTS=false
 ```
 
-### 4. Broker Authentication
-Authenticate seamlessly with automated TOTP:
+#### 4. Broker Authentication
 ```bash
 python3 -m trade_system auth --mode totp
 ```
 
----
-
-## 🖥️ Running the System
-
-### 1. Unified Application & ST Telegram Bot Launcher (Recommended)
-Start the complete stack — Streamlit Mission Control dashboard, ST Telegram Touch Scanner Bot, and ST Flip Live Bot — with a single command:
-
+#### 5. Run the System
 ```bash
-# Start background ST bots + Streamlit dashboard in foreground:
+# Start everything (dashboard + live bots) in one command:
 ./scripts/start_app.sh
 
-# Or start all services in the background (daemon mode):
+# Or in daemon mode (all services background):
 ./scripts/start_app.sh --daemon
 ```
 
-#### Manage Running Services:
+#### Service Management:
 ```bash
-# Check status and health endpoints:
+# Check status and health:
 ./scripts/start_app.sh --status
 
-# Stop all running instances (Streamlit, ST Scanner, Live Bot):
+# Stop all services:
 ./scripts/start_app.sh --stop
 ```
 
 The unified launcher will:
-1. Gracefully terminate any stale background processes on ports `8501`, `8502`, and `9090`.
+1. Terminate any stale background processes on ports `8501`, `8502`, and `9090`.
 2. Validate and renew the FYERS broker access token automatically.
-3. Start the **ST Telegram Scanner Bot** (`scripts/run_live_st_scanner.py`) in the background (logs to `logs/st_scanner.log`).
-4. Start the **ST Flip Live Bot** (`scripts/run_live_trading.py`) in the background (logs to `logs/live_bot.log`).
+3. Start the **ST Telegram Scanner Bot** (`scripts/run_live_st_scanner.py`) in the background.
+4. Start the **ST Flip Live Bot** (`scripts/run_live_trading.py`) in the background.
 5. Launch the **Streamlit Mission Control Dashboard** at `http://localhost:8501`.
 
 ---
 
-### 2. Standalone Startup Commands
+### Option B: Docker Deployment (Production / Cloud)
+
+For 24/7 cloud server deployment (Linux VPS / AWS EC2 / DigitalOcean):
+
+#### 1. Setup
+```bash
+# Clone and configure
+git clone https://github.com/your-username/trade_system_v2.git
+cd trade_system_v2
+
+# Create environment file from template
+cp .env.example .env
+nano .env   # populate with your credentials
+```
+
+#### 2. Build & Run
+```bash
+# Build images and start all services
+docker compose up -d --build
+
+# Verify all containers are healthy
+docker compose ps
+
+# Follow logs of specific services
+docker compose logs -f live-bot
+docker compose logs -f dashboard
+docker compose logs -f st-touch-scanner
+```
+
+#### 3. Access
+```bash
+# Dashboard URL (configurable via DASHBOARD_PORT in .env)
+open http://YOUR_SERVER_IP:8502
+```
+
+#### 4. Management
+```bash
+# Stop all services
+docker compose down
+
+# Rebuild after code changes
+docker compose up -d --build
+
+# View resource usage
+docker stats
+
+# Access a running container shell
+docker exec -it trade_bot_live bash
+```
+
+#### Deployed Services:
+| Service | Container | Purpose | Port / Health |
+|---|---|---|---|
+| `redis` | `trade_redis` | Inter-agent event bus | 6379 (Redis ping) |
+| `live-bot` | `trade_bot_live` | Core real-time trading engine | 9090 `/health` |
+| `sync-15m-db` | `trade_bot_sync_15m` | 15-minute historical sync | 9090 `/health` |
+| `st-touch-scanner` | `trade_bot_st_scanner` | Supertrend options scanner | 9090 `/health` |
+| `dashboard` | `trade_bot_dashboard` | Streamlit Mission Control | 8502 `/_stcore/health` |
+| `cron-tasks` | `trade_bot_cron` | EOD batch (4:15 PM IST, Mon-Fri) | Crond process |
+
+#### Named Volumes:
+| Volume | Purpose |
+|---|---|
+| `redis_data` | Redis persistence |
+| `trade_data` | SQLite databases, CSV candle storage, option chain data |
+| `trade_logs` | Application logs across all services |
+
+---
+
+### Option C: Standalone Component Startup
 
 If you prefer launching components independently:
 
-**Start Streamlit Mission Control Application:**
 ```bash
+# Streamlit Mission Control
 streamlit run src/trade_system/interfaces/dashboard/main.py --server.port 8501
-```
 
-**Start ST Telegram Scanner Bot:**
-```bash
+# ST Telegram Scanner Bot
 python3 scripts/run_live_st_scanner.py
-```
 
-**Start ST Flip Live Trading Bot:**
-```bash
+# ST Flip Live Trading Bot
 python3 scripts/run_live_trading.py
 # Or via CLI module:
 python3 -m trade_system live
@@ -219,46 +372,43 @@ python3 -m trade_system sanity-check
 
 ---
 
-## ☁️ Cloud Deployment (Docker Compose)
+## ⚙️ Configuration Reference
 
-For 24/7 cloud server deployment (Linux VPS / AWS EC2 / DigitalOcean), deploy the container stack via `docker-compose`:
+### Feature Flags (`.env`)
 
-```bash
-# Build and run containers in background
-docker compose up -d --build
-
-# View container status
-docker compose ps
-
-# Follow logs of the live trading bot
-docker compose logs -f live-bot
-```
-
-### Deployed Services:
-| Service | Purpose | Port / Health |
+| Variable | Default | Description |
 |---|---|---|
-| `redis` | Inter-agent event bus | Port 6379 (Redis ping) |
-| `live-bot` | Core real-time trading engine & WebSocket client | HTTP 9090 health check |
-| `sync-15m-db` | Automated 15-minute historical sync worker | HTTP 9090 health check |
-| `st-touch-scanner`| Real-time Supertrend options scanner | HTTP 9090 health check |
-| `dashboard` | Streamlit Mission Control web application | Port 8502 (`/_stcore/health`) |
-| `cron-tasks` | Post-market EOD swarm scheduler (16:15 IST Mon-Fri) | Crond process |
+| `ENABLE_INTRADAY_OPTION_ALERTS` | `false` | Enable intraday option buying alerts (disabled — historically unprofitable) |
+| `TELEGRAM_ENABLE_INTRADAY_OPTION_ALERTS` | `false` | Telegram dispatch for intraday option setups |
+| `FYERS_ENABLED` | `true` | Enable FYERS broker |
+| `DHAN_ENABLED` | `false` | Enable Dhan backup broker |
+| `WHATSAPP_ENABLED` | `false` | Enable WhatsApp fallback notifications |
+| `DASHBOARD_PORT` | `8502` | Streamlit dashboard port (Docker only) |
+
+### Alert Configuration (`config/alerts_config.yaml`)
+
+Controls per-strategy alert routing, cooldowns, and Telegram message templates. See [alerts_config.yaml](config/alerts_config.yaml) for the full schema.
 
 ---
 
 ## 🧪 Testing
 
-Run unit and integration tests across all domains:
 ```bash
+# Run all tests
 pytest tests/
-```
-Run specific module tests:
-```bash
+
+# Run specific module tests
 pytest tests/test_midday_breakout_engine.py
 pytest tests/test_intraday_flow_reversal.py
+
+# Run with verbose output
+pytest tests/ -v --tb=short
 ```
 
 ---
 
-## 📚 Architectural Reference
-For in-depth diagrams, pipeline dataflows, and domain boundaries, see [ARCHITECTURE.md](file:///Users/pratham/aitrade/trade_system_v2/ARCHITECTURE.md).
+## 📚 Further Reading
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Detailed pipeline dataflows, domain boundaries, component responsibilities, and deployment diagrams.
+- **[config/alerts_config.yaml](config/alerts_config.yaml)** — Full alert template schema and channel routing.
+- **[config/fo_universe.json](config/fo_universe.json)** — F&O symbol universe with sector mappings.

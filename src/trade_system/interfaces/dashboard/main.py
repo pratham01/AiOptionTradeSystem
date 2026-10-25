@@ -18,6 +18,7 @@ pages = {
         st.Page(HERE / "chief_agent_dashboard.py", title="Chief Trading Agent", icon="🎯", default=True),
         st.Page(HERE / "agent_dashboard.py", title="Agent Dashboard", icon="🤖"),
         st.Page(HERE / "smart_oi_dashboard.py", title="Smart OI", icon="🎯"),
+        st.Page(HERE / "strike_supertrend_dashboard.py", title="Strike Supertrend", icon="📈"),
         st.Page(HERE / "sector_scope_dashboard.py", title="Sector Scope", icon="🧭"),
         st.Page(HERE / "market_mood_dashboard.py", title="Market Mood", icon="📊"),
         st.Page(HERE / "option_edge_dashboard.py", title="Option Edge", icon="⚡"),

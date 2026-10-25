@@ -4,7 +4,8 @@
 # It is designed to be run via cron at 9:10 AM every weekday.
 
 PROJECT_DIR="/Users/pratham/aitrade/trade_system_v2"
-LOG_FILE="$PROJECT_DIR/live_bot.log"
+LOG_FILE="$PROJECT_DIR/logs/live_bot.log"
+mkdir -p "$PROJECT_DIR/logs"
 
 cd "$PROJECT_DIR" || exit 1
 

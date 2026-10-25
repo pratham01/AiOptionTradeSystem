@@ -1,32 +1,68 @@
+# ═══════════════════════════════════════════════════════════
+# Trade System v2 — Git Ignore Rules
+# ═══════════════════════════════════════════════════════════
+
+# ─── Secrets & Credentials ────────────────────────────────
 .env
 .env.*
 !.env.example
+.secrets/
 
+# ─── Python Artifacts ─────────────────────────────────────
 __pycache__/
-.pytest_cache/
-.DS_Store
-
 *.pyc
 *.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 
+# ─── Virtual Environments ─────────────────────────────────
 .venv/
 venv/
 
-*.csv
-
-logs/
-fyersApi.log
-fyersDataSocket.log
-fyersRequests.log
-
-/option_chain_data/
-/market_data/
-/data/
+# ─── Database Files ───────────────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
 
-# Local secrets
-.secrets/
+# ─── Data & Market Data Directories ───────────────────────
+/data/
+/market_data/
+/option_chain_data/
 
+# ─── Logs ─────────────────────────────────────────────────
+/logs/
 *.log
+
+# ─── CSV Data Files ───────────────────────────────────────
+*.csv
+
+# ─── Reports & Generated HTML ─────────────────────────────
+/reports/
+*.html
+
+# ─── Scratch / Temp ───────────────────────────────────────
+/scratch/
+temp_test.txt
+
+# ─── OS / Editor ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Orphan / Stray Directories ──────────────────────────
+/src/data/
+/src/logs/
+/tests/logs/
+/tests/.secrets/
+
+# ─── Fyers SDK Auto-Generated Logs ───────────────────────
+fyersDataSocket.log

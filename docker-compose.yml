@@ -1,3 +1,18 @@
+# ═══════════════════════════════════════════════════════════════
+# Trade System v2 — Docker Compose Production Stack
+# ═══════════════════════════════════════════════════════════════
+#
+# Quick start:
+#   cp .env.example .env   # populate with your credentials
+#   docker compose up -d --build
+#   docker compose ps      # verify health
+#   docker compose logs -f live-bot  # tail logs
+#
+# Stop:
+#   docker compose down
+#
+# ═══════════════════════════════════════════════════════════════
+
 services:
   # ─────────────────────────────────────────────────────────
   # Redis — Event bus for inter-agent communication
@@ -6,9 +21,11 @@ services:
     image: redis:7-alpine
     container_name: trade_redis
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
+    command: redis-server --save 60 1 --loglevel warning --maxmemory 256mb --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
+    networks:
+      - trade_net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -16,10 +33,12 @@ services:
       retries: 5
 
   # ─────────────────────────────────────────────────────────
-  # Live Trading Bot — Main trading engine
+  # Live Trading Bot — Main real-time trading engine
   # ─────────────────────────────────────────────────────────
   live-bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: trade_bot_live
     restart: unless-stopped
     depends_on:
@@ -31,8 +50,11 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - trade_data:/app/data
+      - trade_logs:/app/logs
+      - ./config:/app/config:ro
+    networks:
+      - trade_net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
       interval: 30s
@@ -44,7 +66,9 @@ services:
   # 15-Minute DB Sync — Historical data fetcher
   # ─────────────────────────────────────────────────────────
   sync-15m-db:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: trade_bot_sync_15m
     restart: unless-stopped
     depends_on:
@@ -56,8 +80,11 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - trade_data:/app/data
+      - trade_logs:/app/logs
+      - ./config:/app/config:ro
+    networks:
+      - trade_net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
       interval: 30s
@@ -69,7 +96,9 @@ services:
   # ST Touch Scanner — Supertrend options scanner
   # ─────────────────────────────────────────────────────────
   st-touch-scanner:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: trade_bot_st_scanner
     restart: unless-stopped
     depends_on:
@@ -81,8 +110,11 @@ services:
       - TZ=Asia/Kolkata
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - trade_data:/app/data
+      - trade_logs:/app/logs
+      - ./config:/app/config:ro
+    networks:
+      - trade_net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
       interval: 60s
@@ -91,10 +123,12 @@ services:
       start_period: 60s
 
   # ─────────────────────────────────────────────────────────
-  # Streamlit Dashboard — Monitoring & analysis UI
+  # Streamlit Dashboard — Mission Control web UI
   # ─────────────────────────────────────────────────────────
   dashboard:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: trade_bot_dashboard
     restart: unless-stopped
     depends_on:
@@ -107,14 +141,17 @@ services:
       --server.headless true
       --browser.gatherUsageStats false
     ports:
-      - "8502:8502"
+      - "${DASHBOARD_PORT:-8502}:8502"
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - trade_data:/app/data
+      - trade_logs:/app/logs
+      - ./config:/app/config:ro
+    networks:
+      - trade_net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8502/_stcore/health"]
       interval: 30s
@@ -123,12 +160,15 @@ services:
       start_period: 30s
 
   # ─────────────────────────────────────────────────────────
-  # Cron Tasks — End-of-day batch jobs (4:15 PM IST, Mon-Fri)
+  # Cron Tasks — EOD batch jobs (4:15 PM IST, Mon-Fri)
   # ─────────────────────────────────────────────────────────
   cron-tasks:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: trade_bot_cron
     restart: unless-stopped
+    user: root
     command: >
       sh -c "echo '15 10 * * 1-5 cd /app && PYTHONPATH=src python scripts/run_post_market_swarm.py >> /proc/1/fd/1 2>&1' > /etc/cron.d/trade-cron &&
              chmod 0644 /etc/cron.d/trade-cron &&
@@ -137,10 +177,28 @@ services:
     env_file: .env
     environment:
       - TZ=Asia/Kolkata
+      - REDIS_URL=redis://redis:6379/0
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - trade_data:/app/data
+      - trade_logs:/app/logs
+      - ./config:/app/config:ro
+    networks:
+      - trade_net
 
+# ─────────────────────────────────────────────────────────────
+# Named Volumes — Persistent data survives container rebuilds
+# ─────────────────────────────────────────────────────────────
 volumes:
   redis_data:
     driver: local
+  trade_data:
+    driver: local
+  trade_logs:
+    driver: local
+
+# ─────────────────────────────────────────────────────────────
+# Network — Isolated bridge network for inter-service comms
+# ─────────────────────────────────────────────────────────────
+networks:
+  trade_net:
+    driver: bridge

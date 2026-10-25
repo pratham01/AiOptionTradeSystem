@@ -1,9 +1,14 @@
-# Version control
+# ═══════════════════════════════════════════════════════════
+# Trade System v2 — Docker Ignore Rules
+# Keep the image lean: exclude everything not needed at runtime.
+# ═══════════════════════════════════════════════════════════
+
+# ─── Version Control ──────────────────────────────────────
 .git
 .github
 .gitignore
 
-# Python caches
+# ─── Python Caches ────────────────────────────────────────
 __pycache__
 *.pyc
 *.pyo
@@ -12,46 +17,55 @@ __pycache__
 .ruff_cache
 *.egg-info
 
-# Secrets — NEVER include in Docker image
+# ─── Secrets — NEVER bake into the image ──────────────────
+# (injected at runtime via env_file or Docker secrets)
 .env
 .env.*
+!.env.example
 .secrets/
 .secrets.enc
 
-# Database files — mounted as volumes, not baked into image
+# ─── Database Files — mounted as volumes ──────────────────
 *.db
+*.sqlite
+*.sqlite3
 data/
 
-# Logs — mounted as volumes
+# ─── Logs — mounted as volumes ────────────────────────────
 logs/
 *.log
 
-# IDE / editor
+# ─── IDE / Editor ─────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS files
+# ─── OS Files ─────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 
-# Build artifacts
+# ─── Build Artifacts ──────────────────────────────────────
 dist/
 build/
 *.egg
+.venv/
+venv/
 
-# Test / dev files
+# ─── Test / Dev / Docs ────────────────────────────────────
 tests/
 scratch/
 docs/
 reports/
+market_data/
 bb_backtest_validation.html
 temp_test.txt
-market_data/
 
-# Docker
+# ─── Docker Meta (prevent recursive copy) ─────────────────
 docker-compose*.yml
 Dockerfile
 .dockerignore
+
+# ─── Agent Config (not needed in container) ───────────────
+.agents/
